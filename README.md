@@ -163,7 +163,7 @@ dq 'sales.csv | group category | reduce total = sum(price), n = count() | remove
 
 ## Supported Formats
 
-CSV (`.csv`), JSON (`.json`), Avro (`.avro`)
+CSV (`.csv`), JSON (`.json`), JSONL (`.jsonl`), Avro (`.avro`)
 
 ## License
 

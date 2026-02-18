@@ -1,6 +1,7 @@
 package loader
 
 import (
+	"bufio"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -22,10 +23,12 @@ func Load(filename string) (*table.Table, error) {
 		return loadCSV(filename)
 	case ".json":
 		return loadJSON(filename)
+	case ".jsonl":
+		return loadJSONL(filename)
 	case ".avro":
 		return loadAvro(filename)
 	default:
-		return nil, fmt.Errorf("unsupported file format %q (supported: .csv, .json, .avro)", ext)
+		return nil, fmt.Errorf("unsupported file format %q (supported: .csv, .json, .jsonl, .avro)", ext)
 	}
 }
 
@@ -110,17 +113,48 @@ func loadJSON(filename string) (*table.Table, error) {
 		return nil, fmt.Errorf("cannot read %s: %w", filename, err)
 	}
 
-	// Try array of objects
 	var records []map[string]interface{}
 	if err := json.Unmarshal(data, &records); err != nil {
 		return nil, fmt.Errorf("cannot parse JSON from %s: %w (expected array of objects)", filename, err)
 	}
 
-	if len(records) == 0 {
-		return table.NewTable(nil), nil
+	return buildTableFromRecords(records), nil
+}
+
+func loadJSONL(filename string) (*table.Table, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return nil, fmt.Errorf("cannot open %s: %w", filename, err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	var records []map[string]interface{}
+	lineNum := 0
+	for scanner.Scan() {
+		lineNum++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var rec map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			return nil, fmt.Errorf("invalid JSON on line %d: %w", lineNum, err)
+		}
+		records = append(records, rec)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("error reading %s: %w", filename, err)
 	}
 
-	// Collect all column names preserving order from first record
+	return buildTableFromRecords(records), nil
+}
+
+func buildTableFromRecords(records []map[string]interface{}) *table.Table {
+	if len(records) == 0 {
+		return table.NewTable(nil)
+	}
+
 	colSet := make(map[string]bool)
 	var columns []string
 	for _, rec := range records {
@@ -146,7 +180,7 @@ func loadJSON(filename string) (*table.Table, error) {
 		t.AddRow(vals)
 	}
 
-	return t, nil
+	return t
 }
 
 func jsonValue(v interface{}) table.Value {
