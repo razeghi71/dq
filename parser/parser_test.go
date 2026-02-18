@@ -282,6 +282,46 @@ func TestParseFilenameQuotedWithPipe(t *testing.T) {
 	}
 }
 
+func TestParseHeadDefault(t *testing.T) {
+	q, err := Parse("users.csv | head")
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := q.Ops[0].(*ast.HeadOp)
+	if head.N != 10 {
+		t.Errorf("expected default 10, got %d", head.N)
+	}
+}
+
+func TestParseTailDefault(t *testing.T) {
+	q, err := Parse("users.csv | tail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tail := q.Ops[0].(*ast.TailOp)
+	if tail.N != 10 {
+		t.Errorf("expected default 10, got %d", tail.N)
+	}
+}
+
+func TestParseHeadDefaultTailExplicit(t *testing.T) {
+	q, err := Parse("users.csv | head | tail 3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(q.Ops) != 2 {
+		t.Fatalf("expected 2 ops, got %d", len(q.Ops))
+	}
+	head := q.Ops[0].(*ast.HeadOp)
+	if head.N != 10 {
+		t.Errorf("expected head default 10, got %d", head.N)
+	}
+	tail := q.Ops[1].(*ast.TailOp)
+	if tail.N != 3 {
+		t.Errorf("expected tail 3, got %d", tail.N)
+	}
+}
+
 func TestParseFilenameEmpty(t *testing.T) {
 	_, err := Parse("| head 10")
 	if err == nil {

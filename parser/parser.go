@@ -146,18 +146,26 @@ func (p *Parser) parseOp() (ast.Op, error) {
 
 func (p *Parser) parseHead() (ast.Op, error) {
 	p.advance() // consume "head"
-	n, err := p.parseInt()
-	if err != nil {
-		return nil, fmt.Errorf("head: %w", err)
+	n := 10
+	if p.peek().Type == lexer.TokenInt {
+		var err error
+		n, err = p.parseInt()
+		if err != nil {
+			return nil, fmt.Errorf("head: %w", err)
+		}
 	}
 	return &ast.HeadOp{N: n}, nil
 }
 
 func (p *Parser) parseTail() (ast.Op, error) {
 	p.advance() // consume "tail"
-	n, err := p.parseInt()
-	if err != nil {
-		return nil, fmt.Errorf("tail: %w", err)
+	n := 10
+	if p.peek().Type == lexer.TokenInt {
+		var err error
+		n, err = p.parseInt()
+		if err != nil {
+			return nil, fmt.Errorf("tail: %w", err)
+		}
 	}
 	return &ast.TailOp{N: n}, nil
 }

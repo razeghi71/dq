@@ -35,7 +35,9 @@ Wrap queries in single quotes so your shell doesn't interpret `|`, `{`, `}`, or 
 ### `head` / `tail` - Get rows from the start or end
 
 ```bash
-dq 'users.csv | head 10'       # first 10 rows
+dq 'users.csv | head'          # first 10 rows (default)
+dq 'users.csv | head 20'       # first 20 rows
+dq 'users.csv | tail'          # last 10 rows (default)
 dq 'users.csv | tail 5'        # last 5 rows
 ```
 
