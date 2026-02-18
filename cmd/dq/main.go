@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -12,13 +13,23 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: dq '<query>'")
+	var format string
+	flag.StringVar(&format, "f", "", "file format: csv, json, jsonl, avro (overrides file extension)")
+	flag.StringVar(&format, "format", "", "file format: csv, json, jsonl, avro (overrides file extension)")
+	flag.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: dq [-f format] '<query>'")
 		fmt.Fprintln(os.Stderr, "example: dq 'users.csv | filter { age > 20 } | select name age'")
+		fmt.Fprintln(os.Stderr, "         dq -f csv 'mydata | select name age'")
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+
+	if flag.NArg() < 1 {
+		flag.Usage()
 		os.Exit(1)
 	}
 
-	query := os.Args[1]
+	query := flag.Arg(0)
 
 	q, err := parser.Parse(query)
 	if err != nil {
@@ -27,7 +38,7 @@ func main() {
 	}
 
 	// Load the source file
-	input, err := loader.Load(q.Source.Filename)
+	input, err := loader.Load(q.Source.Filename, format)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "load error: %v\n", err)
 		os.Exit(1)

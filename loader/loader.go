@@ -15,20 +15,27 @@ import (
 	"github.com/razeghi71/dq/table"
 )
 
-// Load reads a file and returns a Table.
-func Load(filename string) (*table.Table, error) {
-	ext := strings.ToLower(filepath.Ext(filename))
-	switch ext {
-	case ".csv":
+// Load reads a file and returns a Table. If format is non-empty it overrides
+// the file extension; otherwise the extension is used. An error is returned if
+// neither provides a recognisable format.
+func Load(filename, format string) (*table.Table, error) {
+	if format == "" {
+		format = strings.TrimPrefix(strings.ToLower(filepath.Ext(filename)), ".")
+	}
+	switch format {
+	case "csv":
 		return loadCSV(filename)
-	case ".json":
+	case "json":
 		return loadJSON(filename)
-	case ".jsonl":
+	case "jsonl":
 		return loadJSONL(filename)
-	case ".avro":
+	case "avro":
 		return loadAvro(filename)
 	default:
-		return nil, fmt.Errorf("unsupported file format %q (supported: .csv, .json, .jsonl, .avro)", ext)
+		if format == "" {
+			return nil, fmt.Errorf("cannot determine file format for %q: use -f to specify (csv, json, jsonl, avro)", filename)
+		}
+		return nil, fmt.Errorf("unsupported format %q (supported: csv, json, jsonl, avro)", format)
 	}
 }
 
