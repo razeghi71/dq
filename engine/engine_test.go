@@ -250,6 +250,110 @@ func TestUpperLower(t *testing.T) {
 	}
 }
 
+func runQueryExpectErr(t *testing.T, input *table.Table, query string) error {
+	t.Helper()
+	q, err := parser.Parse("test.csv | " + query)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	_, err = Execute(q, input)
+	return err
+}
+
+func salesTable() *table.Table {
+	t := table.NewTable([]string{"date", "quantity"})
+	t.AddRow([]table.Value{table.StrVal("2024-01-15"), table.IntVal(10)})
+	t.AddRow([]table.Value{table.StrVal("2024-02-20"), table.IntVal(5)})
+	return t
+}
+
+func TestDatePartValidDate(t *testing.T) {
+	result := runQuery(t, salesTable(), "transform y = year(date), m = month(date), d = day(date) | head 1")
+	row := result.Rows[0]
+	yIdx := result.ColIndex("y")
+	mIdx := result.ColIndex("m")
+	dIdx := result.ColIndex("d")
+	if row.Values[yIdx].Int != 2024 {
+		t.Errorf("expected year 2024, got %d", row.Values[yIdx].Int)
+	}
+	if row.Values[mIdx].Int != 1 {
+		t.Errorf("expected month 1, got %d", row.Values[mIdx].Int)
+	}
+	if row.Values[dIdx].Int != 15 {
+		t.Errorf("expected day 15, got %d", row.Values[dIdx].Int)
+	}
+}
+
+func TestDatePartNullPropagation(t *testing.T) {
+	tbl := table.NewTable([]string{"d"})
+	tbl.AddRow([]table.Value{table.Null()})
+
+	result := runQuery(t, tbl, "transform y = year(d)")
+	if !result.Rows[0].Values[1].IsNull() {
+		t.Errorf("expected null for year(null), got %v", result.Rows[0].Values[1].AsString())
+	}
+}
+
+func TestDatePartErrorOnInt(t *testing.T) {
+	err := runQueryExpectErr(t, salesTable(), "transform y = year(quantity)")
+	if err == nil {
+		t.Fatal("expected error for year(quantity) on int column")
+	}
+}
+
+func TestDatePartErrorOnString(t *testing.T) {
+	tbl := table.NewTable([]string{"x"})
+	tbl.AddRow([]table.Value{table.StrVal("notadate")})
+
+	err := runQueryExpectErr(t, tbl, "transform y = year(x)")
+	if err == nil {
+		t.Fatal("expected error for year() on unparseable string")
+	}
+}
+
+func TestDatePartErrorOnIntResult(t *testing.T) {
+	// year(date) returns int; year(year(date)) should error
+	err := runQueryExpectErr(t, salesTable(), "transform y = year(date) | transform yy = year(y)")
+	if err == nil {
+		t.Fatal("expected error for year() on int result of year()")
+	}
+}
+
+func TestStringFuncsCoerceInt(t *testing.T) {
+	result := runQuery(t, usersTable(), "transform x = upper(age) | head 1")
+	if result.Rows[0].Values[3].Str != "30" {
+		t.Errorf("expected '30', got %q", result.Rows[0].Values[3].Str)
+	}
+}
+
+func TestArithmeticErrorOnStringTimesInt(t *testing.T) {
+	err := runQueryExpectErr(t, usersTable(), "transform x = name * 2")
+	if err == nil {
+		t.Fatal("expected error for string * int")
+	}
+}
+
+func TestArithmeticErrorOnIntPlusString(t *testing.T) {
+	err := runQueryExpectErr(t, usersTable(), "transform x = age + name")
+	if err == nil {
+		t.Fatal("expected error for int + string")
+	}
+}
+
+func TestLogicalErrorOnNonBool(t *testing.T) {
+	err := runQueryExpectErr(t, usersTable(), "filter { age and city }")
+	if err == nil {
+		t.Fatal("expected error for 'and' on non-bool operands")
+	}
+}
+
+func TestComparisonErrorOnTypeMismatch(t *testing.T) {
+	err := runQueryExpectErr(t, usersTable(), "filter { age > name }")
+	if err == nil {
+		t.Fatal("expected error for comparing int with string")
+	}
+}
+
 func TestGroupWithCustomName(t *testing.T) {
 	result := runQuery(t, usersTable(), "group city as entries | reduce entries total = sum(age) | remove entries | select city total")
 	if len(result.Rows) != 3 {

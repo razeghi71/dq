@@ -212,7 +212,7 @@ func callDatePart(args []ast.Expr, ctx *EvalContext, part string) (table.Value, 
 		}
 	}
 	if !parsed {
-		return table.Null(), nil // unparseable date returns null
+		return table.Null(), fmt.Errorf("%s(): cannot parse %q as a date", part, s)
 	}
 
 	switch part {
