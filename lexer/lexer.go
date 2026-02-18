@@ -94,178 +94,31 @@ var keywords = map[string]TokenType{
 	"as":    TokenAs,
 }
 
-// Lex tokenizes the input string into a slice of Tokens.
-func Lex(input string) ([]Token, error) {
-	var tokens []Token
-	runes := []rune(input)
-	i := 0
-
-	for i < len(runes) {
-		ch := runes[i]
-
-		// Skip whitespace
-		if unicode.IsSpace(ch) {
-			i++
-			continue
-		}
-
-		// Single/double char operators and structural tokens
-		pos := i
-		switch ch {
-		case '|':
-			tokens = append(tokens, Token{TokenPipe, "|", pos})
-			i++
-			continue
-		case '{':
-			tokens = append(tokens, Token{TokenLBrace, "{", pos})
-			i++
-			continue
-		case '}':
-			tokens = append(tokens, Token{TokenRBrace, "}", pos})
-			i++
-			continue
-		case '(':
-			tokens = append(tokens, Token{TokenLParen, "(", pos})
-			i++
-			continue
-		case ')':
-			tokens = append(tokens, Token{TokenRParen, ")", pos})
-			i++
-			continue
-		case ',':
-			tokens = append(tokens, Token{TokenComma, ",", pos})
-			i++
-			continue
-		case '.':
-			tokens = append(tokens, Token{TokenDot, ".", pos})
-			i++
-			continue
-		case '+':
-			tokens = append(tokens, Token{TokenPlus, "+", pos})
-			i++
-			continue
-		case '-':
-			// Could be negative number or minus operator
-			// If next char is digit and previous token is an operator/start, treat as number
-			if i+1 < len(runes) && unicode.IsDigit(runes[i+1]) && isNegativeContext(tokens) {
-				tok, newI, err := lexNumber(runes, i)
-				if err != nil {
-					return nil, err
-				}
-				tokens = append(tokens, tok)
-				i = newI
-				continue
-			}
-			tokens = append(tokens, Token{TokenMinus, "-", pos})
-			i++
-			continue
-		case '*':
-			tokens = append(tokens, Token{TokenStar, "*", pos})
-			i++
-			continue
-		case '/':
-			// Check for // comment
-			if i+1 < len(runes) && runes[i+1] == '/' {
-				// Skip to end of line
-				for i < len(runes) && runes[i] != '\n' {
-					i++
-				}
-				continue
-			}
-			tokens = append(tokens, Token{TokenSlash, "/", pos})
-			i++
-			continue
-		case '=':
-			if i+1 < len(runes) && runes[i+1] == '=' {
-				tokens = append(tokens, Token{TokenEq, "==", pos})
-				i += 2
-			} else {
-				tokens = append(tokens, Token{TokenEquals, "=", pos})
-				i++
-			}
-			continue
-		case '!':
-			if i+1 < len(runes) && runes[i+1] == '=' {
-				tokens = append(tokens, Token{TokenNeq, "!=", pos})
-				i += 2
-			} else {
-				return nil, fmt.Errorf("unexpected character '!' at position %d (did you mean '!='?)", pos)
-			}
-			continue
-		case '<':
-			if i+1 < len(runes) && runes[i+1] == '=' {
-				tokens = append(tokens, Token{TokenLte, "<=", pos})
-				i += 2
-			} else {
-				tokens = append(tokens, Token{TokenLt, "<", pos})
-				i++
-			}
-			continue
-		case '>':
-			if i+1 < len(runes) && runes[i+1] == '=' {
-				tokens = append(tokens, Token{TokenGte, ">=", pos})
-				i += 2
-			} else {
-				tokens = append(tokens, Token{TokenGt, ">", pos})
-				i++
-			}
-			continue
-		}
-
-		// String literal
-		if ch == '"' {
-			tok, newI, err := lexString(runes, i)
-			if err != nil {
-				return nil, err
-			}
-			tokens = append(tokens, tok)
-			i = newI
-			continue
-		}
-
-		// Backtick identifier
-		if ch == '`' {
-			tok, newI, err := lexBacktick(runes, i)
-			if err != nil {
-				return nil, err
-			}
-			tokens = append(tokens, tok)
-			i = newI
-			continue
-		}
-
-		// Number
-		if unicode.IsDigit(ch) {
-			tok, newI, err := lexNumber(runes, i)
-			if err != nil {
-				return nil, err
-			}
-			tokens = append(tokens, tok)
-			i = newI
-			continue
-		}
-
-		// Identifier or keyword
-		if isIdentStart(ch) {
-			tok, newI := lexIdent(runes, i)
-			tokens = append(tokens, tok)
-			i = newI
-			continue
-		}
-
-		return nil, fmt.Errorf("unexpected character %q at position %d", ch, pos)
-	}
-
-	tokens = append(tokens, Token{TokenEOF, "", len(runes)})
-	return tokens, nil
+// Lexer is a stateful tokenizer that supports both normal tokenization
+// via Next() and greedy filename scanning via ScanFilename().
+type Lexer struct {
+	runes   []rune
+	pos     int
+	prevSet bool
+	prev    TokenType
 }
 
-func isNegativeContext(tokens []Token) bool {
-	if len(tokens) == 0 {
+// NewLexer creates a new Lexer for the given input string.
+func NewLexer(input string) *Lexer {
+	return &Lexer{runes: []rune(input)}
+}
+
+func (l *Lexer) emit(tok Token) Token {
+	l.prevSet = true
+	l.prev = tok.Type
+	return tok
+}
+
+func (l *Lexer) isNegativeContext() bool {
+	if !l.prevSet {
 		return true
 	}
-	last := tokens[len(tokens)-1].Type
-	switch last {
+	switch l.prev {
 	case TokenLParen, TokenComma, TokenEquals, TokenPipe, TokenLBrace,
 		TokenPlus, TokenMinus, TokenStar, TokenSlash,
 		TokenEq, TokenNeq, TokenLt, TokenGt, TokenLte, TokenGte,
@@ -273,6 +126,207 @@ func isNegativeContext(tokens []Token) bool {
 		return true
 	}
 	return false
+}
+
+// Next returns the next token using normal tokenization rules.
+func (l *Lexer) Next() (Token, error) {
+	for l.pos < len(l.runes) {
+		ch := l.runes[l.pos]
+
+		// Skip whitespace
+		if unicode.IsSpace(ch) {
+			l.pos++
+			continue
+		}
+
+		pos := l.pos
+		switch ch {
+		case '|':
+			l.pos++
+			return l.emit(Token{TokenPipe, "|", pos}), nil
+		case '{':
+			l.pos++
+			return l.emit(Token{TokenLBrace, "{", pos}), nil
+		case '}':
+			l.pos++
+			return l.emit(Token{TokenRBrace, "}", pos}), nil
+		case '(':
+			l.pos++
+			return l.emit(Token{TokenLParen, "(", pos}), nil
+		case ')':
+			l.pos++
+			return l.emit(Token{TokenRParen, ")", pos}), nil
+		case ',':
+			l.pos++
+			return l.emit(Token{TokenComma, ",", pos}), nil
+		case '.':
+			l.pos++
+			return l.emit(Token{TokenDot, ".", pos}), nil
+		case '+':
+			l.pos++
+			return l.emit(Token{TokenPlus, "+", pos}), nil
+		case '-':
+			if l.pos+1 < len(l.runes) && unicode.IsDigit(l.runes[l.pos+1]) && l.isNegativeContext() {
+				tok, newPos, err := lexNumber(l.runes, l.pos)
+				if err != nil {
+					return Token{}, err
+				}
+				l.pos = newPos
+				return l.emit(tok), nil
+			}
+			l.pos++
+			return l.emit(Token{TokenMinus, "-", pos}), nil
+		case '*':
+			l.pos++
+			return l.emit(Token{TokenStar, "*", pos}), nil
+		case '/':
+			if l.pos+1 < len(l.runes) && l.runes[l.pos+1] == '/' {
+				for l.pos < len(l.runes) && l.runes[l.pos] != '\n' {
+					l.pos++
+				}
+				continue
+			}
+			l.pos++
+			return l.emit(Token{TokenSlash, "/", pos}), nil
+		case '=':
+			if l.pos+1 < len(l.runes) && l.runes[l.pos+1] == '=' {
+				l.pos += 2
+				return l.emit(Token{TokenEq, "==", pos}), nil
+			}
+			l.pos++
+			return l.emit(Token{TokenEquals, "=", pos}), nil
+		case '!':
+			if l.pos+1 < len(l.runes) && l.runes[l.pos+1] == '=' {
+				l.pos += 2
+				return l.emit(Token{TokenNeq, "!=", pos}), nil
+			}
+			return Token{}, fmt.Errorf("unexpected character '!' at position %d (did you mean '!='?)", pos)
+		case '<':
+			if l.pos+1 < len(l.runes) && l.runes[l.pos+1] == '=' {
+				l.pos += 2
+				return l.emit(Token{TokenLte, "<=", pos}), nil
+			}
+			l.pos++
+			return l.emit(Token{TokenLt, "<", pos}), nil
+		case '>':
+			if l.pos+1 < len(l.runes) && l.runes[l.pos+1] == '=' {
+				l.pos += 2
+				return l.emit(Token{TokenGte, ">=", pos}), nil
+			}
+			l.pos++
+			return l.emit(Token{TokenGt, ">", pos}), nil
+		}
+
+		// String literal
+		if ch == '"' {
+			tok, newPos, err := lexString(l.runes, l.pos)
+			if err != nil {
+				return Token{}, err
+			}
+			l.pos = newPos
+			return l.emit(tok), nil
+		}
+
+		// Backtick identifier
+		if ch == '`' {
+			tok, newPos, err := lexBacktick(l.runes, l.pos)
+			if err != nil {
+				return Token{}, err
+			}
+			l.pos = newPos
+			return l.emit(tok), nil
+		}
+
+		// Number
+		if unicode.IsDigit(ch) {
+			tok, newPos, err := lexNumber(l.runes, l.pos)
+			if err != nil {
+				return Token{}, err
+			}
+			l.pos = newPos
+			return l.emit(tok), nil
+		}
+
+		// Identifier or keyword
+		if isIdentStart(ch) {
+			tok, newPos := lexIdent(l.runes, l.pos)
+			l.pos = newPos
+			return l.emit(tok), nil
+		}
+
+		return Token{}, fmt.Errorf("unexpected character %q at position %d", ch, pos)
+	}
+
+	return Token{TokenEOF, "", len(l.runes)}, nil
+}
+
+// ScanFilename reads a filename token greedily. It consumes all characters
+// that are not whitespace and not '|'. Quoted and backtick-quoted filenames
+// are also supported.
+func (l *Lexer) ScanFilename() (Token, error) {
+	// Skip whitespace
+	for l.pos < len(l.runes) && unicode.IsSpace(l.runes[l.pos]) {
+		l.pos++
+	}
+
+	if l.pos >= len(l.runes) {
+		return Token{TokenEOF, "", l.pos}, nil
+	}
+
+	ch := l.runes[l.pos]
+
+	// Quoted filename
+	if ch == '"' {
+		tok, newPos, err := lexString(l.runes, l.pos)
+		if err != nil {
+			return Token{}, err
+		}
+		l.pos = newPos
+		l.prevSet = true
+		l.prev = TokenIdent
+		return Token{TokenIdent, tok.Val, tok.Pos}, nil
+	}
+
+	// Backtick-quoted filename
+	if ch == '`' {
+		tok, newPos, err := lexBacktick(l.runes, l.pos)
+		if err != nil {
+			return Token{}, err
+		}
+		l.pos = newPos
+		l.prevSet = true
+		l.prev = TokenIdent
+		return Token{TokenIdent, tok.Val, tok.Pos}, nil
+	}
+
+	// Unquoted: consume all non-whitespace, non-pipe characters
+	start := l.pos
+	for l.pos < len(l.runes) && !unicode.IsSpace(l.runes[l.pos]) && l.runes[l.pos] != '|' {
+		l.pos++
+	}
+
+	val := string(l.runes[start:l.pos])
+	l.prevSet = true
+	l.prev = TokenIdent
+	return Token{TokenIdent, val, start}, nil
+}
+
+// Lex tokenizes the input string into a slice of Tokens.
+// It is a convenience wrapper around the streaming Lexer.
+func Lex(input string) ([]Token, error) {
+	l := NewLexer(input)
+	var tokens []Token
+	for {
+		tok, err := l.Next()
+		if err != nil {
+			return nil, err
+		}
+		tokens = append(tokens, tok)
+		if tok.Type == TokenEOF {
+			break
+		}
+	}
+	return tokens, nil
 }
 
 func lexString(runes []rune, start int) (Token, int, error) {

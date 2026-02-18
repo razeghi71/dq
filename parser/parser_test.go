@@ -204,3 +204,87 @@ func TestParseFullQuery(t *testing.T) {
 		t.Errorf("expected 9 ops, got %d", len(q.Ops))
 	}
 }
+
+func TestParseFilenameLeadingNumber(t *testing.T) {
+	q, err := Parse("123data.csv | head 10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Source.Filename != "123data.csv" {
+		t.Errorf("expected '123data.csv', got %q", q.Source.Filename)
+	}
+	head := q.Ops[0].(*ast.HeadOp)
+	if head.N != 10 {
+		t.Errorf("expected 10, got %d", head.N)
+	}
+}
+
+func TestParseFilenameHyphen(t *testing.T) {
+	q, err := Parse("my-file.csv | head 5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Source.Filename != "my-file.csv" {
+		t.Errorf("expected 'my-file.csv', got %q", q.Source.Filename)
+	}
+}
+
+func TestParseFilenameAbsolutePath(t *testing.T) {
+	q, err := Parse("/absolute/path.csv | head 5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Source.Filename != "/absolute/path.csv" {
+		t.Errorf("expected '/absolute/path.csv', got %q", q.Source.Filename)
+	}
+}
+
+func TestParseFilenameMultipleDots(t *testing.T) {
+	q, err := Parse("file.tar.gz | head 5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Source.Filename != "file.tar.gz" {
+		t.Errorf("expected 'file.tar.gz', got %q", q.Source.Filename)
+	}
+}
+
+func TestParseFilenameSpecialChars(t *testing.T) {
+	q, err := Parse("data@2024#v2.csv | head 5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Source.Filename != "data@2024#v2.csv" {
+		t.Errorf("expected 'data@2024#v2.csv', got %q", q.Source.Filename)
+	}
+}
+
+func TestParseFilenameOnly(t *testing.T) {
+	q, err := Parse("data.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Source.Filename != "data.csv" {
+		t.Errorf("expected 'data.csv', got %q", q.Source.Filename)
+	}
+	if len(q.Ops) != 0 {
+		t.Errorf("expected 0 ops, got %d", len(q.Ops))
+	}
+}
+
+func TestParseFilenameQuotedWithPipe(t *testing.T) {
+	q, err := Parse(`"file|weird.csv" | head 5`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Source.Filename != "file|weird.csv" {
+		t.Errorf("expected 'file|weird.csv', got %q", q.Source.Filename)
+	}
+}
+
+func TestParseFilenameEmpty(t *testing.T) {
+	_, err := Parse("| head 10")
+	if err == nil {
+		t.Fatal("expected error for empty filename")
+	}
+}

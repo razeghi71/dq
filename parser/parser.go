@@ -11,33 +11,55 @@ import (
 
 // Parser converts a token stream into an AST.
 type Parser struct {
-	tokens []lexer.Token
-	pos    int
+	lexer  *lexer.Lexer
+	buf    []lexer.Token // lookahead buffer
+	lexErr error         // first lexer error encountered
 }
 
 // Parse parses a full query string into a Query AST.
 func Parse(input string) (*ast.Query, error) {
-	tokens, err := lexer.Lex(input)
+	p := &Parser{lexer: lexer.NewLexer(input)}
+	q, err := p.parseQuery()
 	if err != nil {
-		return nil, fmt.Errorf("lex error: %w", err)
+		if p.lexErr != nil {
+			return nil, fmt.Errorf("lex error: %w", p.lexErr)
+		}
+		return nil, err
 	}
-	p := &Parser{tokens: tokens, pos: 0}
-	return p.parseQuery()
+	return q, nil
+}
+
+func (p *Parser) fillBuf(n int) {
+	for len(p.buf) <= n && p.lexErr == nil {
+		tok, err := p.lexer.Next()
+		if err != nil {
+			p.lexErr = err
+			return
+		}
+		p.buf = append(p.buf, tok)
+	}
 }
 
 func (p *Parser) peek() lexer.Token {
-	if p.pos >= len(p.tokens) {
-		return lexer.Token{Type: lexer.TokenEOF}
+	return p.peekAt(0)
+}
+
+func (p *Parser) peekAt(n int) lexer.Token {
+	p.fillBuf(n)
+	if n < len(p.buf) {
+		return p.buf[n]
 	}
-	return p.tokens[p.pos]
+	return lexer.Token{Type: lexer.TokenEOF}
 }
 
 func (p *Parser) advance() lexer.Token {
-	tok := p.peek()
-	if p.pos < len(p.tokens) {
-		p.pos++
+	p.fillBuf(0)
+	if len(p.buf) > 0 {
+		tok := p.buf[0]
+		p.buf = p.buf[1:]
+		return tok
 	}
-	return tok
+	return lexer.Token{Type: lexer.TokenEOF}
 }
 
 func (p *Parser) expect(tt lexer.TokenType) (lexer.Token, error) {
@@ -49,7 +71,6 @@ func (p *Parser) expect(tt lexer.TokenType) (lexer.Token, error) {
 }
 
 func (p *Parser) parseQuery() (*ast.Query, error) {
-	// Parse source: filename (could contain dots like "users.csv")
 	source, err := p.parseSource()
 	if err != nil {
 		return nil, err
@@ -73,30 +94,16 @@ func (p *Parser) parseQuery() (*ast.Query, error) {
 }
 
 func (p *Parser) parseSource() (*ast.SourceOp, error) {
-	// Filename can be like "path/to/users.csv" which tokenizes as
-	// IDENT SLASH IDENT SLASH IDENT DOT IDENT
-	// Or a quoted string: "my file.csv"
-	tok := p.advance()
-	if tok.Type == lexer.TokenString {
-		return &ast.SourceOp{Filename: tok.Val}, nil
+	// Clear any buffered tokens
+	p.buf = nil
+	tok, err := p.lexer.ScanFilename()
+	if err != nil {
+		return nil, err
 	}
-	if tok.Type != lexer.TokenIdent && tok.Type != lexer.TokenBacktickIdent {
-		return nil, fmt.Errorf("expected filename, got %s (%q) at position %d", tok.Type, tok.Val, tok.Pos)
+	if tok.Val == "" {
+		return nil, fmt.Errorf("expected filename at position %d", tok.Pos)
 	}
-
-	filename := tok.Val
-
-	// Consume subsequent /ident and .ident sequences to form full file path
-	for p.peek().Type == lexer.TokenDot || p.peek().Type == lexer.TokenSlash {
-		sep := p.advance()
-		next := p.advance()
-		if next.Type != lexer.TokenIdent && next.Type != lexer.TokenInt {
-			return nil, fmt.Errorf("expected path component after %q, got %s at position %d", sep.Val, next.Type, next.Pos)
-		}
-		filename += sep.Val + next.Val
-	}
-
-	return &ast.SourceOp{Filename: filename}, nil
+	return &ast.SourceOp{Filename: tok.Val}, nil
 }
 
 func (p *Parser) parseOp() (ast.Op, error) {
@@ -240,37 +247,15 @@ func (p *Parser) parseTransform() (ast.Op, error) {
 
 func (p *Parser) parseReduce() (ast.Op, error) {
 	p.advance() // consume "reduce"
-
-	// The nested name is optional. We need to look ahead to determine
-	// if the first identifier is a nested name or the start of assignments.
-	// If we see: IDENT IDENT = expr  -> first IDENT is nested name
-	// If we see: IDENT = expr        -> no nested name, first IDENT is column in assignment
 	nestedName := "grouped"
 
 	if p.peek().Type == lexer.TokenIdent {
-		// Look ahead: is the token after the ident an "=" or another ident?
-		saved := p.pos
-		firstIdent := p.advance()
-
-		if p.peek().Type == lexer.TokenEquals {
-			// This is "col = expr" pattern, no nested name
-			p.pos = saved // rewind
-		} else if p.peek().Type == lexer.TokenIdent || p.peek().Type == lexer.TokenBacktickIdent {
-			// Could be "nested_name col = expr"
-			// Check if the second ident is followed by =
-			secondPos := p.pos
-			p.advance() // consume second ident
-			if p.peek().Type == lexer.TokenEquals {
-				// Yes: first ident is nested name
-				nestedName = firstIdent.Val
-				p.pos = secondPos // rewind to second ident
-			} else {
-				// Not an assignment pattern, rewind everything
-				p.pos = saved
-			}
-		} else {
-			// Just a single ident not followed by = or ident; rewind
-			p.pos = saved
+		if p.peekAt(1).Type == lexer.TokenEquals {
+			// "col = expr" pattern -- no nested name
+		} else if (p.peekAt(1).Type == lexer.TokenIdent || p.peekAt(1).Type == lexer.TokenBacktickIdent) &&
+			p.peekAt(2).Type == lexer.TokenEquals {
+			// "nested_name col = expr" pattern
+			nestedName = p.advance().Val
 		}
 	}
 
