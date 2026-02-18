@@ -1,282 +1,168 @@
-## Query Language Overview
+# dq
 
-### Core structure
+Query CSV, JSON, and Avro files from the command line. Pipe operations together, like `jq` but for tables.
 
-```
-dq 'filename | op [args] | op2 [args] ...'
-```
-
-* The entire query is passed as a **single-quoted string** to avoid shell interpretation of `|`, `{`, `}`, `>`, `<`, and backticks.
-* Takes a file (csv, avro, json, etc.) as input.
-* Everything is **pipe-based** — each op takes a table and returns a table.
-* Arguments are **space-separated**, strings use double quotes.
-* Column lists use spaces, not commas (avoids escaping issues).
-* `transform` and `reduce` use commas to separate assignments (because expressions contain spaces).
-* Default state: all columns are selected unless explicitly changed.
-
-**Why single quotes?** Characters like `|`, `{`, `}`, `>`, `` ` `` are special in most shells. Wrapping the query in single quotes passes it through to `dq` untouched, similar to how `jq` works.
-
-**If your query contains single quotes** (e.g. string `"O'Brien"`), use double quotes for the outer wrapper instead:
-
-```
-dq "users.csv | filter { name == \"O'Brien\" }"
+```bash
+dq 'users.csv | filter { age > 25 } | select name city | sorta name'
 ```
 
----
+## Install
 
-## Expression Grammar
-
-Before operations, understand expressions used in `filter` and `transform`:
-
-```
-expr ::= literal | column | expr op expr | func(expr, expr, ...)
-literal ::= number | "string" | true | false | null
-column ::= identifier | `identifier with spaces`
-op ::= + | - | * | / | == | != | < | > | <= | >= | and | or | not
+```bash
+go install github.com/razeghi71/dq/cmd/dq@latest
 ```
 
-**Key rules:**
-* String literals MUST be quoted: `"NY"` (unquoted `NY` is a column reference)
-* Comparisons use `==`: `age == 20` (single `=` is invalid in expressions)
-* Backticks for column names with special chars: `` `first name` ``
-* Null checks: `age is null`, `age is not null` (do NOT use `== null`)
+Or build from source:
 
----
+```bash
+git clone https://github.com/razeghi71/dq.git
+cd dq
+go build -ldflags="-s -w" -o dq ./cmd/dq
+```
+
+## How It Works
+
+Every query starts with a file and pipes it through operations. Each operation takes a table in and returns a table out.
+
+```
+dq 'file.csv | operation1 | operation2 | ...'
+```
+
+Wrap queries in single quotes so your shell doesn't interpret `|`, `{`, `}`, or `>`.
 
 ## Operations
 
-### 1. `head n`
+### `head` / `tail` - Get rows from the start or end
 
-Return the first `n` rows.
-
-```
-dq 'users.csv | head 10'
-```
-
-### 2. `tail n`
-
-Return the last `n` rows.
-
-```
-dq 'users.csv | tail 5'
+```bash
+dq 'users.csv | head 10'       # first 10 rows
+dq 'users.csv | tail 5'        # last 5 rows
 ```
 
-### 3. `sorta col1 col2 ...`
+### `select` - Keep only the columns you want
 
-Sort ascending by columns (space-separated).
-
-```
-dq 'users.csv | sorta age name'
+```bash
+dq 'users.csv | select name age city'
 ```
 
-### 4. `sortd col1 col2 ...`
+### `remove` - Drop columns you don't need
 
-Sort descending by columns.
-
-```
-dq 'users.csv | sortd created_at id'
+```bash
+dq 'users.csv | remove password ssn'
 ```
 
-### 5. `select col1 col2 ...`
+### `filter` - Keep rows that match a condition
 
-Project specific columns. All columns selected by default.
+Expressions go inside `{ }`. Use `==` for equality, `and`/`or` for logic.
 
-```
-dq 'users.csv | select name age'
-```
-
-### 6. `filter { expression }`
-
-Filter rows by expression. Expression is wrapped in braces `{ }` for clear boundaries.
-
-```
-dq 'users.csv | filter { age > 20 and city == "NY" }'
+```bash
+dq 'users.csv | filter { age > 25 }'
+dq 'users.csv | filter { age > 25 and city == "NY" }'
+dq 'users.csv | filter { email is not null }'
 ```
 
-**Null handling:**
-```
-dq 'users.csv | filter { age is not null }'
-dq 'users.csv | filter { city is null }'
-```
+### `sorta` / `sortd` - Sort rows ascending or descending
 
-### 7. `group col1 col2 ... [as nested_name]`
-
-Group rows by columns; nested rows stored under a nested column. The `as nested_name` part is optional -- if omitted, defaults to `grouped`.
-
-```
-dq 'users.csv | group name'
+```bash
+dq 'users.csv | sorta age'          # youngest first
+dq 'users.csv | sortd age'          # oldest first
+dq 'users.csv | sorta city age'     # sort by city, then age
 ```
 
-Output:
+### `count` - Count how many rows
 
-```
-name | grouped
----- | -------------------------
-a    | [ {age:20,city:x}, {age:22,city:y} ]
-b    | [ {age:25,city:z} ]
-```
-
-**With a custom nested name:**
-
-```
-dq 'users.csv | group name as entries'
-```
-
-**Multi-column grouping:**
-
-```
-dq 'users.csv | group city department'
-```
-
-Output:
-
-```
-city | department | grouped
----- | ---------- | -------------------------
-NY   | sales      | [ {name:a,age:20}, {name:b,age:22} ]
-NY   | engineering| [ {name:c,age:25} ]
-LA   | sales      | [ {name:d,age:30} ]
-```
-
-### 8. `transform col = expr, col2 = expr2, ...`
-
-Row-wise transformation — create or overwrite columns with computed values.
-
-```
-dq 'users.csv | transform age2 = age * 2, city = upper(city)'
-```
-
-**Arithmetic propagates nulls by default:**
-```
-dq 'sales.csv | transform total = quantity * price'  // null if either is null
-```
-
-Use `coalesce` for defaults:
-```
-dq 'sales.csv | transform total = coalesce(quantity, 0) * coalesce(price, 0)'
-```
-
-### 9. `reduce [nested_name] col = expr, col2 = expr2, ...`
-
-Apply aggregations over nested table. The nested name is optional -- if omitted, defaults to `grouped`. Nested field is **kept** after reduction.
-
-```
-dq 'users.csv | group name | reduce max_age = max(age), count = count()'
-```
-
-Output:
-
-```
-name | grouped                            | max_age | count
----- | ---------------------------------- | --------| ------
-a    | [ {age:20,city:x}, {age:22,city:y}] | 22      | 2
-b    | [ {age:25,city:z} ]                | 25      | 1
-```
-
-**With a custom nested name (must match the name used in `group`):**
-
-```
-dq 'users.csv | group name as entries | reduce entries max_age = max(age), count = count()'
-```
-
-To drop the nested field, use `remove`:
-
-```
-dq 'users.csv | group name | reduce max_age = max(age), count = count() | remove grouped'
-```
-
-### 10. `count`
-
-Return the number of rows as a single-row, single-column table.
-
-```
+```bash
 dq 'users.csv | count'
-dq 'users.csv | filter { age > 20 } | count'
+dq 'users.csv | filter { age > 30 } | count'
 ```
 
-### 11. `distinct [col1 col2 ...]`
+### `distinct` - Remove duplicate rows
 
-Return unique rows. If columns are specified, deduplicates by those columns. If no columns are given, deduplicates by the entire row.
-
-```
-dq 'users.csv | distinct'                // unique rows
-dq 'users.csv | distinct city'           // unique cities
-dq 'users.csv | distinct city age'       // unique combinations
+```bash
+dq 'users.csv | distinct'             # unique rows
+dq 'users.csv | distinct city'        # unique cities (keeps first occurrence)
+dq 'users.csv | distinct city age'    # unique city+age combinations
 ```
 
-### 12. `rename old_name new_name [old_name2 new_name2 ...]`
+### `rename` - Rename columns
 
-Rename one or more columns. Names are paired: old then new.
+Names are paired: old then new. Use backticks for column names with spaces.
 
-```
-dq 'users.csv | rename `first name` first_name'
+```bash
+dq 'users.csv | rename name username'
 dq 'users.csv | rename `first name` first_name `last name` last_name'
 ```
 
-### 13. `remove col1 col2 ...`
+### `transform` - Create or overwrite columns with computed values
 
-Remove columns from output.
+Assignments are comma-separated. Works row by row.
 
-```
-dq 'users.csv | remove password ssn'
-dq 'users.csv | group name | reduce total = sum(amount) | remove grouped'
-```
-
----
-
-## Built-in Functions
-
-These are available in `transform` and `reduce` expressions:
-
-**Aggregations (for `reduce` only):**
-* `count()` — number of rows in group
-* `sum(col)` — sum of values (nulls ignored)
-* `avg(col)` — average (nulls ignored)
-* `min(col)`, `max(col)` — min/max (nulls ignored)
-* `first(col)`, `last(col)` — first/last value in group
-
-**Transformations (for `transform` only):**
-* `upper(s)`, `lower(s)` — case conversion
-* `len(s)` — string length
-* `substr(s, start, len)` — substring
-* `trim(s)` — remove whitespace
-* `coalesce(a, b, ...)` — first non-null value
-* `if(cond, then, else)` — conditional
-* `year(date)`, `month(date)`, `day(date)` — date extraction
-
-**Operators work in both:**
-* Arithmetic: `+`, `-`, `*`, `/`
-* Comparison: `==`, `!=`, `<`, `>`, `<=`, `>=`
-* Logical: `and`, `or`, `not`
-
----
-
-## Example: Full Query
-
-Given `sales.csv` with columns: `date, product, category, quantity, price, city`
-
-Find the top 3 categories by revenue in 2024, showing only cities with total revenue over 1000:
-
-```
-dq 'sales.csv
-  | filter { year(date) == 2024 }
-  | transform revenue = coalesce(quantity, 0) * coalesce(price, 0)
-  | group category city
-  | reduce total_revenue = sum(revenue), order_count = count()
-  | remove grouped
-  | filter { total_revenue > 1000 }
-  | sortd total_revenue
-  | head 3
-  | select category city total_revenue order_count'
+```bash
+dq 'users.csv | transform age2 = age * 2'
+dq 'users.csv | transform name = upper(name), age_months = age * 12'
+dq 'sales.csv | transform total = coalesce(quantity, 0) * coalesce(price, 0)'
 ```
 
----
+### `group` - Group rows by column values
 
-## Philosophy
+Collects rows that share the same value(s) into groups. The non-grouped columns are nested into a column called `grouped` (or a custom name with `as`).
 
-* Everything is a **table-in, table-out** operation.
-* **Explicit boundaries** — braces for expressions, no ambiguous parsing.
-* **Type clarity** — quoted strings, `==` for equality, no guessing.
-* **Null-safe by design** — explicit null handling, predictable propagation.
-* **Flat by default, nested when grouped** — use `remove` to drop nested fields.
-* **Composable** — operations chain cleanly without edge cases.
+```bash
+dq 'users.csv | group city'
+```
+
+```
+city | grouped
+---- | -------------------------
+NY   | [ {name:alice,age:30}, {name:bob,age:25} ]
+LA   | [ {name:carol,age:28} ]
+```
+
+```bash
+dq 'users.csv | group city as people'       # custom nested column name
+dq 'users.csv | group city department'       # group by multiple columns
+```
+
+### `reduce` - Aggregate over grouped rows
+
+Runs aggregation functions (`sum`, `avg`, `count`, etc.) over the nested rows created by `group`. The nested column is kept after reduction -- use `remove` to drop it.
+
+```bash
+dq 'users.csv | group city | reduce avg_age = avg(age), n = count()'
+```
+
+```
+city | grouped                                      | avg_age | n
+---- | -------------------------------------------- | ------- | -
+NY   | [ {name:alice,age:30}, {name:bob,age:25} ]   | 27.5    | 2
+LA   | [ {name:carol,age:28} ]                      | 28      | 1
+```
+
+### `group` + `reduce` - Putting them together
+
+```bash
+# average age per city, clean output
+dq 'users.csv | group city | reduce avg_age = avg(age) | remove grouped'
+
+# total revenue per category, top 3
+dq 'sales.csv | group category | reduce total = sum(price), n = count() | remove grouped | sortd total | head 3'
+```
+
+## Functions
+
+**For `reduce`** (aggregate across rows):
+`count()`, `sum(col)`, `avg(col)`, `min(col)`, `max(col)`, `first(col)`, `last(col)`
+
+**For `transform`** (compute per row):
+`upper(s)`, `lower(s)`, `len(s)`, `trim(s)`, `substr(s, start, len)`, `coalesce(a, b, ...)`, `if(cond, then, else)`, `year(d)`, `month(d)`, `day(d)`
+
+**Operators** (work everywhere):
+`+`, `-`, `*`, `/`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `and`, `or`, `not`
+
+## Supported Formats
+
+CSV (`.csv`), JSON (`.json`), Avro (`.avro`)
+
+## License
+
+MIT
