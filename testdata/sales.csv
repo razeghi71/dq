@@ -1,0 +1,10 @@
+date,product,category,quantity,price,city
+2024-01-15,Widget A,electronics,10,99.99,NY
+2024-02-20,Widget B,electronics,5,149.99,LA
+2024-03-10,Gadget C,home,20,29.99,NY
+2024-04-05,Widget A,electronics,8,99.99,SF
+2024-05-12,Gadget D,home,15,49.99,LA
+2024-06-18,Widget B,electronics,3,149.99,NY
+2024-07-22,Gadget C,home,25,29.99,SF
+2024-08-30,Widget A,electronics,12,99.99,LA
+2023-11-15,Old Product,legacy,100,9.99,NY
