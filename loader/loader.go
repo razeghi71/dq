@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	goavro "github.com/linkedin/goavro/v2"
+	parquet "github.com/parquet-go/parquet-go"
 	"github.com/razeghi71/dq/table"
 )
 
@@ -31,11 +32,13 @@ func Load(filename, format string) (*table.Table, error) {
 		return loadJSONL(filename)
 	case "avro":
 		return loadAvro(filename)
+	case "parquet":
+		return loadParquet(filename)
 	default:
 		if format == "" {
-			return nil, fmt.Errorf("cannot determine file format for %q: use -f to specify (csv, json, jsonl, avro)", filename)
+			return nil, fmt.Errorf("cannot determine file format for %q: use -f to specify (csv, json, jsonl, avro, parquet)", filename)
 		}
-		return nil, fmt.Errorf("unsupported format %q (supported: csv, json, jsonl, avro)", format)
+		return nil, fmt.Errorf("unsupported format %q (supported: csv, json, jsonl, avro, parquet)", format)
 	}
 }
 
@@ -271,6 +274,77 @@ func loadAvro(filename string) (*table.Table, error) {
 	}
 
 	return t, nil
+}
+
+func loadParquet(filename string) (*table.Table, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return nil, fmt.Errorf("cannot open %s: %w", filename, err)
+	}
+	defer f.Close()
+
+	stat, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("cannot stat %s: %w", filename, err)
+	}
+
+	pf, err := parquet.OpenFile(f, stat.Size())
+	if err != nil {
+		return nil, fmt.Errorf("cannot read Parquet file %s: %w", filename, err)
+	}
+
+	fields := pf.Schema().Fields()
+	columns := make([]string, len(fields))
+	for i, field := range fields {
+		columns[i] = field.Name()
+	}
+
+	t := table.NewTable(columns)
+	reader := parquet.NewReader(pf)
+	buf := make([]parquet.Row, 128)
+	for {
+		n, err := reader.ReadRows(buf)
+		for i := 0; i < n; i++ {
+			vals := make([]table.Value, len(columns))
+			for j := range columns {
+				if j < len(buf[i]) {
+					vals[j] = parquetValue(buf[i][j])
+				} else {
+					vals[j] = table.Null()
+				}
+			}
+			t.AddRow(vals)
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("error reading Parquet rows: %w", err)
+		}
+	}
+	return t, nil
+}
+
+func parquetValue(v parquet.Value) table.Value {
+	if v.IsNull() {
+		return table.Null()
+	}
+	switch v.Kind() {
+	case parquet.Boolean:
+		return table.BoolVal(v.Boolean())
+	case parquet.Int32:
+		return table.IntVal(int64(v.Int32()))
+	case parquet.Int64:
+		return table.IntVal(v.Int64())
+	case parquet.Float:
+		return table.FloatVal(float64(v.Float()))
+	case parquet.Double:
+		return table.FloatVal(v.Double())
+	case parquet.ByteArray, parquet.FixedLenByteArray:
+		return table.StrVal(string(v.ByteArray()))
+	default:
+		return table.StrVal(fmt.Sprintf("%v", v))
+	}
 }
 
 func avroValue(v interface{}) table.Value {

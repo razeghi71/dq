@@ -1,6 +1,6 @@
 # dq
 
-Query CSV, JSON, and Avro files from the command line. Pipe operations together, like `jq` but for tables.
+Query CSV, JSON, Avro, and Parquet files from the command line. Pipe operations together, like `jq` but for tables.
 
 ```bash
 dq 'users.csv | filter { age > 25 } | select name city | sorta name'
@@ -163,7 +163,7 @@ dq 'sales.csv | group category | reduce total = sum(price), n = count() | remove
 
 ## Supported Formats
 
-CSV (`.csv`), JSON (`.json`), JSONL (`.jsonl`), Avro (`.avro`)
+CSV (`.csv`), JSON (`.json`), JSONL (`.jsonl`), Avro (`.avro`), Parquet (`.parquet`)
 
 ## License
 
