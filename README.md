@@ -8,6 +8,15 @@ dq 'users.csv | filter { age > 25 } | select name city | sorta name'
 
 ## Install
 
+**Homebrew:**
+
+```bash
+brew tap razeghi71/tap
+brew install dq
+```
+
+**Go:**
+
 ```bash
 go install github.com/razeghi71/dq/cmd/dq@latest
 ```
