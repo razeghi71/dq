@@ -55,6 +55,57 @@ func execOp(op ast.Op, t *table.Table) (*table.Table, error) {
 	}
 }
 
+// resolveColumnPath walks a dot-path (e.g. ["address", "city"]) to extract a value from a row.
+func resolveColumnPath(path []string, t *table.Table, row *table.Row) (table.Value, error) {
+	idx := t.ColIndex(path[0])
+	if idx < 0 {
+		return table.Null(), fmt.Errorf("column %q not found", path[0])
+	}
+	val := row.Values[idx]
+	for _, seg := range path[1:] {
+		if val.Type != table.TypeRecord {
+			return table.Null(), fmt.Errorf("cannot access field %q: value is not a record", seg)
+		}
+		found := false
+		for _, f := range val.Fields {
+			if f.Name == seg {
+				val = f.Value
+				found = true
+				break
+			}
+		}
+		if !found {
+			return table.Null(), nil
+		}
+	}
+	return val, nil
+}
+
+// pathToColumnName flattens a dot-path to an output column name using underscores.
+func pathToColumnName(path []string) string {
+	if len(path) == 1 {
+		return path[0]
+	}
+	return strings.Join(path, "_")
+}
+
+// uniqueColumnName returns base if it's not in existing, otherwise base_2, base_3, etc.
+func uniqueColumnName(base string, existing []string) string {
+	taken := make(map[string]bool, len(existing))
+	for _, e := range existing {
+		taken[e] = true
+	}
+	if !taken[base] {
+		return base
+	}
+	for i := 2; ; i++ {
+		candidate := fmt.Sprintf("%s_%d", base, i)
+		if !taken[candidate] {
+			return candidate
+		}
+	}
+}
+
 func execHead(o *ast.HeadOp, t *table.Table) *table.Table {
 	n := o.N
 	if n > len(t.Rows) {
@@ -75,12 +126,12 @@ func execTail(o *ast.TailOp, t *table.Table) *table.Table {
 	return result
 }
 
-func execSort(cols []string, asc bool, t *table.Table) (*table.Table, error) {
+func execSort(cols [][]string, asc bool, t *table.Table) (*table.Table, error) {
 	indices := make([]int, len(cols))
-	for i, c := range cols {
-		idx := t.ColIndex(c)
+	for i, path := range cols {
+		idx := t.ColIndex(path[0])
 		if idx < 0 {
-			return nil, fmt.Errorf("sort: column %q not found", c)
+			return nil, fmt.Errorf("sort: column %q not found", path[0])
 		}
 		indices[i] = idx
 	}
@@ -133,20 +184,23 @@ func compareValues(a, b table.Value) int {
 }
 
 func execSelect(o *ast.SelectOp, t *table.Table) (*table.Table, error) {
-	indices := make([]int, len(o.Columns))
-	for i, c := range o.Columns {
-		idx := t.ColIndex(c)
-		if idx < 0 {
-			return nil, fmt.Errorf("select: column %q not found", c)
-		}
-		indices[i] = idx
+	// Build output column names with dedup
+	var resultCols []string
+	for _, path := range o.Columns {
+		base := pathToColumnName(path)
+		name := uniqueColumnName(base, resultCols)
+		resultCols = append(resultCols, name)
 	}
 
-	result := table.NewTable(o.Columns)
+	result := table.NewTable(resultCols)
 	for _, row := range t.Rows {
-		vals := make([]table.Value, len(indices))
-		for i, idx := range indices {
-			vals[i] = row.Values[idx]
+		vals := make([]table.Value, len(o.Columns))
+		for i, path := range o.Columns {
+			v, err := resolveColumnPath(path, t, &row)
+			if err != nil {
+				return nil, fmt.Errorf("select: %w", err)
+			}
+			vals[i] = v
 		}
 		result.AddRow(vals)
 	}
@@ -173,21 +227,20 @@ func execFilter(o *ast.FilterOp, t *table.Table) (*table.Table, error) {
 }
 
 func execGroup(o *ast.GroupOp, t *table.Table) (*table.Table, error) {
-	groupIndices := make([]int, len(o.Columns))
-	for i, c := range o.Columns {
-		idx := t.ColIndex(c)
-		if idx < 0 {
-			return nil, fmt.Errorf("group: column %q not found", c)
-		}
-		groupIndices[i] = idx
-	}
-
 	// All columns go into the nested records (including group keys)
 	nestedCols := make([]string, len(t.Columns))
 	nestedIndices := make([]int, len(t.Columns))
 	for i, col := range t.Columns {
 		nestedCols[i] = col
 		nestedIndices[i] = i
+	}
+
+	// Build output key column names with dedup
+	var keyColNames []string
+	for _, path := range o.Columns {
+		base := pathToColumnName(path)
+		name := uniqueColumnName(base, keyColNames)
+		keyColNames = append(keyColNames, name)
 	}
 
 	// Build groups preserving order
@@ -199,12 +252,16 @@ func execGroup(o *ast.GroupOp, t *table.Table) (*table.Table, error) {
 	keyMap := make(map[string]int) // key string -> index in groups
 
 	for _, row := range t.Rows {
-		// Build key
-		keyParts := make([]string, len(groupIndices))
-		keyVals := make([]table.Value, len(groupIndices))
-		for i, idx := range groupIndices {
-			keyVals[i] = row.Values[idx]
-			keyParts[i] = row.Values[idx].AsString()
+		// Build key by resolving each path
+		keyParts := make([]string, len(o.Columns))
+		keyVals := make([]table.Value, len(o.Columns))
+		for i, path := range o.Columns {
+			v, err := resolveColumnPath(path, t, &row)
+			if err != nil {
+				return nil, fmt.Errorf("group: %w", err)
+			}
+			keyVals[i] = v
+			keyParts[i] = v.AsString()
 		}
 		keyStr := strings.Join(keyParts, "\x00")
 
@@ -223,9 +280,9 @@ func execGroup(o *ast.GroupOp, t *table.Table) (*table.Table, error) {
 		groups[gi].records = append(groups[gi].records, table.RecordVal(fields))
 	}
 
-	// Build result table: group columns + list column
-	resultCols := make([]string, len(o.Columns))
-	copy(resultCols, o.Columns)
+	// Build result table: key columns + list column
+	resultCols := make([]string, len(keyColNames))
+	copy(resultCols, keyColNames)
 	resultCols = append(resultCols, o.NestedName)
 
 	result := table.NewTable(resultCols)
@@ -347,8 +404,8 @@ func execDistinct(o *ast.DistinctOp, t *table.Table) *table.Table {
 	var indices []int
 	if len(o.Columns) > 0 {
 		indices = make([]int, len(o.Columns))
-		for i, c := range o.Columns {
-			idx := t.ColIndex(c)
+		for i, path := range o.Columns {
+			idx := t.ColIndex(path[0])
 			if idx < 0 {
 				// Column not found - return empty
 				return table.NewTable(t.Columns)
@@ -408,7 +465,8 @@ func execRename(o *ast.RenameOp, t *table.Table) (*table.Table, error) {
 
 func execRemove(o *ast.RemoveOp, t *table.Table) (*table.Table, error) {
 	removeSet := make(map[string]bool)
-	for _, c := range o.Columns {
+	for _, path := range o.Columns {
+		c := path[0]
 		if t.ColIndex(c) < 0 {
 			return nil, fmt.Errorf("remove: column %q not found", c)
 		}

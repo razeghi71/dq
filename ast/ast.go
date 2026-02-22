@@ -93,21 +93,21 @@ func (o *TailOp) opNode() {}
 
 // SortAscOp sorts ascending by columns.
 type SortAscOp struct {
-	Columns []string
+	Columns [][]string
 }
 
 func (o *SortAscOp) opNode() {}
 
 // SortDescOp sorts descending by columns.
 type SortDescOp struct {
-	Columns []string
+	Columns [][]string
 }
 
 func (o *SortDescOp) opNode() {}
 
 // SelectOp projects specific columns.
 type SelectOp struct {
-	Columns []string
+	Columns [][]string
 }
 
 func (o *SelectOp) opNode() {}
@@ -121,7 +121,7 @@ func (o *FilterOp) opNode() {}
 
 // GroupOp groups rows by columns, nesting the rest.
 type GroupOp struct {
-	Columns    []string
+	Columns    [][]string
 	NestedName string // default "grouped"
 }
 
@@ -149,7 +149,7 @@ func (o *CountOp) opNode() {}
 
 // DistinctOp deduplicates rows.
 type DistinctOp struct {
-	Columns []string // empty = all columns
+	Columns [][]string // empty = all columns
 }
 
 func (o *DistinctOp) opNode() {}
@@ -168,7 +168,7 @@ func (o *RenameOp) opNode() {}
 
 // RemoveOp removes columns.
 type RemoveOp struct {
-	Columns []string
+	Columns [][]string
 }
 
 func (o *RemoveOp) opNode() {}

@@ -401,3 +401,97 @@ func TestGroupWithCustomName(t *testing.T) {
 		t.Errorf("expected 3 rows, got %d", len(result.Rows))
 	}
 }
+
+// nestedTable creates a table with record-typed columns for testing dot-path operations.
+func nestedTable() *table.Table {
+	t := table.NewTable([]string{"name", "address"})
+	t.AddRow([]table.Value{
+		table.StrVal("Alice"),
+		table.RecordVal([]table.RecordField{
+			{Name: "city", Value: table.StrVal("New York")},
+			{Name: "zip", Value: table.StrVal("10001")},
+		}),
+	})
+	t.AddRow([]table.Value{
+		table.StrVal("Bob"),
+		table.RecordVal([]table.RecordField{
+			{Name: "city", Value: table.StrVal("Los Angeles")},
+			{Name: "zip", Value: table.StrVal("90001")},
+		}),
+	})
+	t.AddRow([]table.Value{
+		table.StrVal("Charlie"),
+		table.RecordVal([]table.RecordField{
+			{Name: "city", Value: table.StrVal("New York")},
+			{Name: "zip", Value: table.StrVal("10002")},
+		}),
+	})
+	return t
+}
+
+func TestSelectDotPath(t *testing.T) {
+	result := runQuery(t, nestedTable(), "select name address.city")
+	if len(result.Columns) != 2 {
+		t.Fatalf("expected 2 columns, got %d", len(result.Columns))
+	}
+	if result.Columns[0] != "name" {
+		t.Errorf("col 0: expected 'name', got %q", result.Columns[0])
+	}
+	if result.Columns[1] != "address_city" {
+		t.Errorf("col 1: expected 'address_city', got %q", result.Columns[1])
+	}
+	if result.Rows[0].Values[1].Str != "New York" {
+		t.Errorf("row 0 city: expected 'New York', got %q", result.Rows[0].Values[1].Str)
+	}
+}
+
+func TestSelectDotPathDedup(t *testing.T) {
+	// Create a table that already has an address_city column
+	tbl := table.NewTable([]string{"address_city", "address"})
+	tbl.AddRow([]table.Value{
+		table.StrVal("existing"),
+		table.RecordVal([]table.RecordField{
+			{Name: "city", Value: table.StrVal("New York")},
+		}),
+	})
+	result := runQuery(t, tbl, "select address_city address.city")
+	if result.Columns[0] != "address_city" {
+		t.Errorf("col 0: expected 'address_city', got %q", result.Columns[0])
+	}
+	if result.Columns[1] != "address_city_2" {
+		t.Errorf("col 1: expected 'address_city_2', got %q", result.Columns[1])
+	}
+}
+
+func TestGroupDotPath(t *testing.T) {
+	result := runQuery(t, nestedTable(), "group address.city")
+	if len(result.Columns) != 2 {
+		t.Fatalf("expected 2 columns, got %v", result.Columns)
+	}
+	if result.Columns[0] != "address_city" {
+		t.Errorf("col 0: expected 'address_city', got %q", result.Columns[0])
+	}
+	if result.Columns[1] != "grouped" {
+		t.Errorf("col 1: expected 'grouped', got %q", result.Columns[1])
+	}
+	// 2 groups: New York and Los Angeles
+	if len(result.Rows) != 2 {
+		t.Fatalf("expected 2 groups, got %d", len(result.Rows))
+	}
+}
+
+func TestGroupDotPathReduce(t *testing.T) {
+	result := runQuery(t, nestedTable(), "group address.city | reduce n = count() | remove grouped")
+	if len(result.Columns) != 2 {
+		t.Fatalf("expected 2 columns (address_city, n), got %v", result.Columns)
+	}
+	// Find the New York group
+	for _, row := range result.Rows {
+		if row.Values[0].Str == "New York" {
+			nIdx := result.ColIndex("n")
+			if row.Values[nIdx].Int != 2 {
+				t.Errorf("expected count 2 for New York, got %d", row.Values[nIdx].Int)
+			}
+		}
+	}
+}

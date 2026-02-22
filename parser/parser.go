@@ -314,6 +314,11 @@ func (p *Parser) parseRemove() (ast.Op, error) {
 	if len(cols) == 0 {
 		return nil, fmt.Errorf("remove: expected at least one column")
 	}
+	for _, path := range cols {
+		if len(path) > 1 {
+			return nil, fmt.Errorf("remove: dot paths not supported, got %q", strings.Join(path, "."))
+		}
+	}
 	return &ast.RemoveOp{Columns: cols}, nil
 }
 
@@ -331,25 +336,43 @@ func (p *Parser) parseInt() (int, error) {
 	return n, nil
 }
 
-// parseColumnList reads identifiers until we hit something that isn't a column name.
-func (p *Parser) parseColumnList() ([]string, error) {
-	var cols []string
+// parseColumnList reads dot-separated identifier paths until we hit something that isn't a column name.
+func (p *Parser) parseColumnList() ([][]string, error) {
+	var cols [][]string
 	for p.peek().Type == lexer.TokenIdent || p.peek().Type == lexer.TokenBacktickIdent {
 		tok := p.advance()
-		cols = append(cols, tok.Val)
+		path := []string{tok.Val}
+		for p.peek().Type == lexer.TokenDot {
+			p.advance() // consume .
+			seg := p.advance()
+			if seg.Type != lexer.TokenIdent && seg.Type != lexer.TokenBacktickIdent {
+				return nil, fmt.Errorf("expected field name after '.', got %s (%q)", seg.Type, seg.Val)
+			}
+			path = append(path, seg.Val)
+		}
+		cols = append(cols, path)
 	}
 	return cols, nil
 }
 
-// parseColumnListUntilAs reads identifiers but stops at "as" keyword.
-func (p *Parser) parseColumnListUntilAs() ([]string, error) {
-	var cols []string
+// parseColumnListUntilAs reads dot-separated identifier paths but stops at "as" keyword.
+func (p *Parser) parseColumnListUntilAs() ([][]string, error) {
+	var cols [][]string
 	for p.peek().Type == lexer.TokenIdent || p.peek().Type == lexer.TokenBacktickIdent {
 		if p.peek().Type == lexer.TokenAs {
 			break
 		}
 		tok := p.advance()
-		cols = append(cols, tok.Val)
+		path := []string{tok.Val}
+		for p.peek().Type == lexer.TokenDot {
+			p.advance() // consume .
+			seg := p.advance()
+			if seg.Type != lexer.TokenIdent && seg.Type != lexer.TokenBacktickIdent {
+				return nil, fmt.Errorf("expected field name after '.', got %s (%q)", seg.Type, seg.Val)
+			}
+			path = append(path, seg.Val)
+		}
+		cols = append(cols, path)
 	}
 	return cols, nil
 }

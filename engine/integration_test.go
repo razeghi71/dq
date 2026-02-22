@@ -253,3 +253,80 @@ func TestIntegrationNestedAvro(t *testing.T) {
 func TestIntegrationNestedParquet(t *testing.T) {
 	assertNestedQueries(t, testdataDir+"/nested.parquet")
 }
+
+// assertNestedDotPathOps tests select and group with dot-path columns on nested files.
+func assertNestedDotPathOps(t *testing.T, file string) {
+	t.Helper()
+
+	t.Run("select_dot_path", func(t *testing.T) {
+		result := loadAndQuery(t, file, "select name address.city")
+		if len(result.Columns) != 2 {
+			t.Fatalf("expected 2 columns, got %v", result.Columns)
+		}
+		if result.Columns[1] != "address_city" {
+			t.Errorf("expected column name 'address_city', got %q", result.Columns[1])
+		}
+		wantCities := []string{"New York", "Los Angeles", "Chicago"}
+		for i, want := range wantCities {
+			got := result.Rows[i].Values[1].Str
+			if got != want {
+				t.Errorf("row %d: want %q, got %q", i, want, got)
+			}
+		}
+	})
+
+	t.Run("select_deep_dot_path", func(t *testing.T) {
+		result := loadAndQuery(t, file, "select name profile.stats.score")
+		if result.Columns[1] != "profile_stats_score" {
+			t.Errorf("expected column name 'profile_stats_score', got %q", result.Columns[1])
+		}
+	})
+
+	t.Run("select_dot_path_dedup", func(t *testing.T) {
+		result := loadAndQuery(t, file, `transform address_city = "test" | select address_city address.city`)
+		if len(result.Columns) != 2 {
+			t.Fatalf("expected 2 columns, got %v", result.Columns)
+		}
+		if result.Columns[0] != "address_city" {
+			t.Errorf("col 0: expected 'address_city', got %q", result.Columns[0])
+		}
+		if result.Columns[1] != "address_city_2" {
+			t.Errorf("col 1: expected 'address_city_2', got %q", result.Columns[1])
+		}
+		// First column should all be "test", second should be actual cities
+		for _, row := range result.Rows {
+			if row.Values[0].Str != "test" {
+				t.Errorf("col 0: expected 'test', got %q", row.Values[0].Str)
+			}
+			if row.Values[1].Str == "test" || row.Values[1].Str == "" {
+				t.Errorf("col 1: expected a real city, got %q", row.Values[1].Str)
+			}
+		}
+	})
+
+	t.Run("group_dot_path", func(t *testing.T) {
+		result := loadAndQuery(t, file, "group address.city | reduce n = count() | remove grouped")
+		if result.Columns[0] != "address_city" {
+			t.Errorf("expected column name 'address_city', got %q", result.Columns[0])
+		}
+		if len(result.Rows) != 3 {
+			t.Fatalf("expected 3 groups, got %d", len(result.Rows))
+		}
+	})
+}
+
+func TestIntegrationNestedDotPathJSON(t *testing.T) {
+	assertNestedDotPathOps(t, testdataDir+"/nested.json")
+}
+
+func TestIntegrationNestedDotPathJSONL(t *testing.T) {
+	assertNestedDotPathOps(t, testdataDir+"/nested.jsonl")
+}
+
+func TestIntegrationNestedDotPathAvro(t *testing.T) {
+	assertNestedDotPathOps(t, testdataDir+"/nested.avro")
+}
+
+func TestIntegrationNestedDotPathParquet(t *testing.T) {
+	assertNestedDotPathOps(t, testdataDir+"/nested.parquet")
+}

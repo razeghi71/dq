@@ -69,8 +69,8 @@ func TestParseGroup(t *testing.T) {
 	if len(g.Columns) != 2 {
 		t.Fatalf("expected 2 group columns, got %d", len(g.Columns))
 	}
-	if g.Columns[0] != "city" || g.Columns[1] != "department" {
-		t.Errorf("expected [city, department], got %v", g.Columns)
+	if len(g.Columns[0]) != 1 || g.Columns[0][0] != "city" || len(g.Columns[1]) != 1 || g.Columns[1][0] != "department" {
+		t.Errorf("expected [[city], [department]], got %v", g.Columns)
 	}
 	if g.NestedName != "entries" {
 		t.Errorf("expected nested name 'entries', got %q", g.NestedName)
@@ -361,5 +361,66 @@ func TestParseDotPathDeep(t *testing.T) {
 	}
 	if col.Path[0] != "profile" || col.Path[1] != "stats" || col.Path[2] != "logins" {
 		t.Errorf("unexpected path: %v", col.Path)
+	}
+}
+
+func TestParseDotPathInSelect(t *testing.T) {
+	q, err := Parse("users.csv | select name address.city profile.stats.logins")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := q.Ops[0].(*ast.SelectOp)
+	if len(s.Columns) != 3 {
+		t.Fatalf("expected 3 columns, got %d", len(s.Columns))
+	}
+	// name -> ["name"]
+	if len(s.Columns[0]) != 1 || s.Columns[0][0] != "name" {
+		t.Errorf("col[0]: expected [name], got %v", s.Columns[0])
+	}
+	// address.city -> ["address", "city"]
+	if len(s.Columns[1]) != 2 || s.Columns[1][0] != "address" || s.Columns[1][1] != "city" {
+		t.Errorf("col[1]: expected [address city], got %v", s.Columns[1])
+	}
+	// profile.stats.logins -> ["profile", "stats", "logins"]
+	if len(s.Columns[2]) != 3 {
+		t.Errorf("col[2]: expected 3 segments, got %v", s.Columns[2])
+	}
+}
+
+func TestParseDotPathInGroup(t *testing.T) {
+	q, err := Parse("users.csv | group address.city")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := q.Ops[0].(*ast.GroupOp)
+	if len(g.Columns) != 1 {
+		t.Fatalf("expected 1 group column, got %d", len(g.Columns))
+	}
+	if len(g.Columns[0]) != 2 || g.Columns[0][0] != "address" || g.Columns[0][1] != "city" {
+		t.Errorf("expected [address city], got %v", g.Columns[0])
+	}
+	if g.NestedName != "grouped" {
+		t.Errorf("expected default nested name, got %q", g.NestedName)
+	}
+}
+
+func TestParseDotPathInGroupWithAs(t *testing.T) {
+	q, err := Parse("users.csv | group address.city as entries")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := q.Ops[0].(*ast.GroupOp)
+	if len(g.Columns[0]) != 2 || g.Columns[0][0] != "address" || g.Columns[0][1] != "city" {
+		t.Errorf("expected [address city], got %v", g.Columns[0])
+	}
+	if g.NestedName != "entries" {
+		t.Errorf("expected 'entries', got %q", g.NestedName)
+	}
+}
+
+func TestParseRemoveRejectsDotPath(t *testing.T) {
+	_, err := Parse("users.csv | remove address.city")
+	if err == nil {
+		t.Fatal("expected error for dot path in remove")
 	}
 }
