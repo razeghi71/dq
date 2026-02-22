@@ -283,9 +283,9 @@ func getColValues(e *ast.FuncCallExpr, nested *table.Table) ([]table.Value, erro
 	if len(nested.Rows) == 0 {
 		return nil, nil
 	}
-	idx := nested.ColIndex(colExpr.Name)
+	idx := nested.ColIndex(colExpr.Path[0])
 	if idx < 0 {
-		return nil, fmt.Errorf("%s(): column %q not found in nested table", e.Name, colExpr.Name)
+		return nil, fmt.Errorf("%s(): column %q not found in nested table", e.Name, colExpr.Path[0])
 	}
 	vals := make([]table.Value, len(nested.Rows))
 	for i, r := range nested.Rows {

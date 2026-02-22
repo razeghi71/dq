@@ -197,7 +197,7 @@ func TestEvalExpr(t *testing.T) {
 	// Test: x + 3 * 2 should be 5 + 6 = 11 (not 16)
 	expr := &ast.BinaryExpr{
 		Op:   "+",
-		Left: &ast.ColumnExpr{Name: "x"},
+		Left: &ast.ColumnExpr{Path: []string{"x"}},
 		Right: &ast.BinaryExpr{
 			Op:    "*",
 			Left:  &ast.LiteralExpr{Kind: "int", Int: 3},

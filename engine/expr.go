@@ -53,11 +53,29 @@ func evalLiteral(e *ast.LiteralExpr) table.Value {
 }
 
 func evalColumn(e *ast.ColumnExpr, ctx *EvalContext) (table.Value, error) {
-	idx := ctx.Table.ColIndex(e.Name)
+	idx := ctx.Table.ColIndex(e.Path[0])
 	if idx < 0 {
-		return table.Null(), fmt.Errorf("column %q not found", e.Name)
+		return table.Null(), fmt.Errorf("column %q not found", e.Path[0])
 	}
-	return ctx.Row.Values[idx], nil
+	val := ctx.Row.Values[idx]
+
+	for _, seg := range e.Path[1:] {
+		if val.Type != table.TypeRecord {
+			return table.Null(), fmt.Errorf("cannot access field %q: value is not a record", seg)
+		}
+		found := false
+		for _, f := range val.Fields {
+			if f.Name == seg {
+				val = f.Value
+				found = true
+				break
+			}
+		}
+		if !found {
+			return table.Null(), nil
+		}
+	}
+	return val, nil
 }
 
 func evalBinary(e *ast.BinaryExpr, ctx *EvalContext) (table.Value, error) {

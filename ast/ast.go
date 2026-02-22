@@ -17,9 +17,9 @@ type LiteralExpr struct {
 
 func (e *LiteralExpr) exprNode() {}
 
-// ColumnExpr references a column by name.
+// ColumnExpr references a column by name or a nested field via dot path.
 type ColumnExpr struct {
-	Name string
+	Path []string // e.g. ["address"] or ["address", "city"]
 }
 
 func (e *ColumnExpr) exprNode() {}

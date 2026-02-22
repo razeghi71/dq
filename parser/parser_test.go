@@ -328,3 +328,38 @@ func TestParseFilenameEmpty(t *testing.T) {
 		t.Fatal("expected error for empty filename")
 	}
 }
+
+func TestParseDotPathExpr(t *testing.T) {
+	q, err := Parse(`users.csv | filter { address.city == "Chicago" }`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := q.Ops[0].(*ast.FilterOp)
+	bin, ok := f.Expr.(*ast.BinaryExpr)
+	if !ok {
+		t.Fatalf("expected BinaryExpr, got %T", f.Expr)
+	}
+	col, ok := bin.Left.(*ast.ColumnExpr)
+	if !ok {
+		t.Fatalf("expected ColumnExpr on left, got %T", bin.Left)
+	}
+	if len(col.Path) != 2 || col.Path[0] != "address" || col.Path[1] != "city" {
+		t.Errorf("expected path [address city], got %v", col.Path)
+	}
+}
+
+func TestParseDotPathDeep(t *testing.T) {
+	q, err := Parse("users.csv | filter { profile.stats.logins > 10 }")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := q.Ops[0].(*ast.FilterOp)
+	bin := f.Expr.(*ast.BinaryExpr)
+	col := bin.Left.(*ast.ColumnExpr)
+	if len(col.Path) != 3 {
+		t.Fatalf("expected 3-segment path, got %v", col.Path)
+	}
+	if col.Path[0] != "profile" || col.Path[1] != "stats" || col.Path[2] != "logins" {
+		t.Errorf("unexpected path: %v", col.Path)
+	}
+}

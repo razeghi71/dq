@@ -536,7 +536,16 @@ func (p *Parser) parsePrimary() (ast.Expr, error) {
 
 	case lexer.TokenBacktickIdent:
 		p.advance()
-		return &ast.ColumnExpr{Name: tok.Val}, nil
+		path := []string{tok.Val}
+		for p.peek().Type == lexer.TokenDot {
+			p.advance() // consume .
+			seg := p.advance()
+			if seg.Type != lexer.TokenIdent && seg.Type != lexer.TokenBacktickIdent {
+				return nil, fmt.Errorf("expected field name after '.', got %s (%q)", seg.Type, seg.Val)
+			}
+			path = append(path, seg.Val)
+		}
+		return &ast.ColumnExpr{Path: path}, nil
 
 	case lexer.TokenIdent:
 		p.advance()
@@ -544,7 +553,16 @@ func (p *Parser) parsePrimary() (ast.Expr, error) {
 		if p.peek().Type == lexer.TokenLParen {
 			return p.parseFuncCall(tok.Val)
 		}
-		return &ast.ColumnExpr{Name: tok.Val}, nil
+		path := []string{tok.Val}
+		for p.peek().Type == lexer.TokenDot {
+			p.advance() // consume .
+			seg := p.advance()
+			if seg.Type != lexer.TokenIdent && seg.Type != lexer.TokenBacktickIdent {
+				return nil, fmt.Errorf("expected field name after '.', got %s (%q)", seg.Type, seg.Val)
+			}
+			path = append(path, seg.Val)
+		}
+		return &ast.ColumnExpr{Path: path}, nil
 
 	case lexer.TokenLParen:
 		p.advance() // consume (
