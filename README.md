@@ -70,6 +70,7 @@ Expressions go inside `{ }`. Use `==` for equality, `and`/`or` for logic.
 dq 'users.csv | filter { age > 25 }'
 dq 'users.csv | filter { age > 25 and city == "NY" }'
 dq 'users.csv | filter { email is not null }'
+dq 'data.json | filter { address.city == "NY" }'    # nested field access
 ```
 
 ### `sorta` / `sortd` - Sort rows ascending or descending
@@ -176,6 +177,18 @@ dq 'sales.csv | group category | reduce total = sum(price), n = count() | remove
 
 **Operators** (work everywhere):
 `+`, `-`, `*`, `/`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `and`, `or`, `not`
+
+## Nested Fields
+
+JSON, Avro, and Parquet files can contain nested records. Use dot notation to access sub-fields:
+
+```bash
+dq 'data.json | filter { address.city == "Chicago" }'
+dq 'data.json | transform city = address.city | select name city'
+dq 'data.json | filter { profile.stats.logins > 10 }'
+```
+
+Missing sub-fields return null.
 
 ## Supported Formats
 
