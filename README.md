@@ -4,6 +4,7 @@ Query CSV, JSON, Avro, and Parquet files from the command line. Pipe operations 
 
 ```bash
 dq 'users.csv | filter { age > 25 } | select name city | sorta name'
+dq -o csv 'users.json | filter { age > 25 }' > filtered.csv
 ```
 
 ## Install
@@ -198,7 +199,25 @@ Dot paths in `select` and `group` flatten to underscore-separated column names (
 
 Missing sub-fields return null.
 
-## Supported Formats
+## Output Formats
+
+By default `dq` prints a pretty ASCII table. Use `-o` to change the output format:
+
+```bash
+dq 'users.csv | select name age'                        # table (default)
+dq -o csv  'users.csv | select name age' > out.csv      # CSV
+dq -o json 'users.csv | select name age' > out.json     # JSON array of objects
+dq -o jsonl 'users.csv | select name age' > out.jsonl   # one JSON object per line
+```
+
+| Format  | Flag          | Notes                                                    |
+|---------|---------------|----------------------------------------------------------|
+| `table` | default       | Pretty-printed ASCII table                               |
+| `csv`   | `-o csv`      | Standard CSV. Nulls render as empty strings.             |
+| `json`  | `-o json`     | JSON array. Preserves types (ints, bools, nulls, nested).|
+| `jsonl` | `-o jsonl`    | One JSON object per line. Same type preservation as JSON. |
+
+## Supported Input Formats
 
 CSV (`.csv`), JSON (`.json`), JSONL (`.jsonl`), Avro (`.avro`), Parquet (`.parquet`)
 

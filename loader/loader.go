@@ -43,20 +43,38 @@ func Load(filename, format string) (*table.Table, error) {
 	}
 }
 
+// LoadReader reads a table from r in the given format.
+// Supported formats: csv, json, jsonl.
+func LoadReader(r io.Reader, format string) (*table.Table, error) {
+	switch format {
+	case "csv":
+		return loadCSVReader(r)
+	case "json":
+		return loadJSONReader(r)
+	case "jsonl":
+		return loadJSONLReader(r)
+	default:
+		return nil, fmt.Errorf("LoadReader: unsupported format %q (supported: csv, json, jsonl)", format)
+	}
+}
+
 func loadCSV(filename string) (*table.Table, error) {
 	f, err := os.Open(filename)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open %s: %w", filename, err)
 	}
 	defer f.Close()
+	return loadCSVReader(f)
+}
 
-	reader := csv.NewReader(f)
+func loadCSVReader(r io.Reader) (*table.Table, error) {
+	reader := csv.NewReader(r)
 	reader.TrimLeadingSpace = true
 
 	// Read header
 	header, err := reader.Read()
 	if err != nil {
-		return nil, fmt.Errorf("cannot read CSV header from %s: %w", filename, err)
+		return nil, fmt.Errorf("cannot read CSV header: %w", err)
 	}
 
 	// Trim whitespace from column names
@@ -119,14 +137,23 @@ func parseValue(s string) table.Value {
 }
 
 func loadJSON(filename string) (*table.Table, error) {
-	data, err := os.ReadFile(filename)
+	f, err := os.Open(filename)
 	if err != nil {
-		return nil, fmt.Errorf("cannot read %s: %w", filename, err)
+		return nil, fmt.Errorf("cannot open %s: %w", filename, err)
+	}
+	defer f.Close()
+	return loadJSONReader(f)
+}
+
+func loadJSONReader(r io.Reader) (*table.Table, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read JSON: %w", err)
 	}
 
 	var records []map[string]interface{}
 	if err := json.Unmarshal(data, &records); err != nil {
-		return nil, fmt.Errorf("cannot parse JSON from %s: %w (expected array of objects)", filename, err)
+		return nil, fmt.Errorf("cannot parse JSON: %w (expected array of objects)", err)
 	}
 
 	return buildTableFromRecords(records), nil
@@ -138,8 +165,11 @@ func loadJSONL(filename string) (*table.Table, error) {
 		return nil, fmt.Errorf("cannot open %s: %w", filename, err)
 	}
 	defer f.Close()
+	return loadJSONLReader(f)
+}
 
-	scanner := bufio.NewScanner(f)
+func loadJSONLReader(r io.Reader) (*table.Table, error) {
+	scanner := bufio.NewScanner(r)
 	var records []map[string]interface{}
 	lineNum := 0
 	for scanner.Scan() {
@@ -155,7 +185,7 @@ func loadJSONL(filename string) (*table.Table, error) {
 		records = append(records, rec)
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error reading %s: %w", filename, err)
+		return nil, fmt.Errorf("error reading JSONL: %w", err)
 	}
 
 	return buildTableFromRecords(records), nil
