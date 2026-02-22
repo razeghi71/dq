@@ -149,6 +149,47 @@ func TestGroupReduce(t *testing.T) {
 	}
 }
 
+func TestGroupKeepsKeyInNestedRows(t *testing.T) {
+	result := runQuery(t, usersTable(), "group city")
+	groupedIdx := result.ColIndex("grouped")
+	if groupedIdx < 0 {
+		t.Fatal("grouped column not found")
+	}
+	// Pick the first group row and check nested records contain the key column
+	nested := result.Rows[0].Values[groupedIdx]
+	if nested.Type != table.TypeList {
+		t.Fatalf("expected TypeList, got %v", nested.Type)
+	}
+	rec := nested.List[0]
+	if rec.Type != table.TypeRecord {
+		t.Fatalf("expected TypeRecord, got %v", rec.Type)
+	}
+	// The nested record should contain all 3 original columns: name, age, city
+	fieldNames := make(map[string]bool)
+	for _, f := range rec.Fields {
+		fieldNames[f.Name] = true
+	}
+	for _, col := range []string{"name", "age", "city"} {
+		if !fieldNames[col] {
+			t.Errorf("nested record missing field %q, got fields %v", col, fieldNames)
+		}
+	}
+}
+
+func TestGroupKeepsKeyInNestedRowsReduceStillWorks(t *testing.T) {
+	// Since the key column is now in the nested rows, reduce should still
+	// be able to aggregate on it (e.g. first(city) should return the group key).
+	result := runQuery(t, usersTable(), "group city | reduce city_check = first(city), n = count() | remove grouped")
+	for _, row := range result.Rows {
+		cityIdx := result.ColIndex("city")
+		checkIdx := result.ColIndex("city_check")
+		if row.Values[cityIdx].Str != row.Values[checkIdx].Str {
+			t.Errorf("expected city_check to match city, got %q vs %q",
+				row.Values[checkIdx].Str, row.Values[cityIdx].Str)
+		}
+	}
+}
+
 func TestRename(t *testing.T) {
 	result := runQuery(t, usersTable(), "rename name first_name")
 	if result.Columns[0] != "first_name" {

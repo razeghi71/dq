@@ -182,18 +182,12 @@ func execGroup(o *ast.GroupOp, t *table.Table) (*table.Table, error) {
 		groupIndices[i] = idx
 	}
 
-	// Determine which columns go into the nested records
-	nestedCols := make([]string, 0)
-	nestedIndices := make([]int, 0)
-	groupColSet := make(map[int]bool)
-	for _, idx := range groupIndices {
-		groupColSet[idx] = true
-	}
+	// All columns go into the nested records (including group keys)
+	nestedCols := make([]string, len(t.Columns))
+	nestedIndices := make([]int, len(t.Columns))
 	for i, col := range t.Columns {
-		if !groupColSet[i] {
-			nestedCols = append(nestedCols, col)
-			nestedIndices = append(nestedIndices, i)
-		}
+		nestedCols[i] = col
+		nestedIndices[i] = i
 	}
 
 	// Build groups preserving order
