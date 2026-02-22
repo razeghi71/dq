@@ -149,6 +149,13 @@ NY   | [ {name:alice,age:30}, {name:bob,age:25} ]   | 27.5    | 2
 LA   | [ {name:carol,age:28} ]                      | 28      | 1
 ```
 
+By default `reduce` operates on the column named `grouped`. If you used a custom name with `group ... as`, or if you have a pre-existing list column (e.g. from a Parquet/JSON file), pass the column name as the first argument:
+
+```bash
+dq 'users.csv | group city as people | reduce people avg_age = avg(age)'
+dq 'orders.parquet | reduce orders total = sum(amount), n = count()'
+```
+
 ### `group` + `reduce` - Putting them together
 
 ```bash
