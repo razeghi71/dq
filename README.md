@@ -54,6 +54,7 @@ dq 'users.csv | tail 5'        # last 5 rows
 
 ```bash
 dq 'users.csv | select name age city'
+dq 'data.json | select name address.city'        # nested field -> column "address_city"
 ```
 
 ### `remove` - Drop columns you don't need
@@ -126,13 +127,16 @@ dq 'users.csv | group city'
 ```
 city | grouped
 ---- | -------------------------
-NY   | [ {name:alice,age:30}, {name:bob,age:25} ]
-LA   | [ {name:carol,age:28} ]
+NY   | [ {name:alice,age:30,city:NY}, {name:bob,age:25,city:NY} ]
+LA   | [ {name:carol,age:28,city:LA} ]
 ```
+
+All original columns (including group keys) are preserved in the nested records.
 
 ```bash
 dq 'users.csv | group city as people'       # custom nested column name
 dq 'users.csv | group city department'       # group by multiple columns
+dq 'data.json | group address.city'          # group by nested field -> key column "address_city"
 ```
 
 ### `reduce` - Aggregate over grouped rows
@@ -144,10 +148,10 @@ dq 'users.csv | group city | reduce avg_age = avg(age), n = count()'
 ```
 
 ```
-city | grouped                                      | avg_age | n
----- | -------------------------------------------- | ------- | -
-NY   | [ {name:alice,age:30}, {name:bob,age:25} ]   | 27.5    | 2
-LA   | [ {name:carol,age:28} ]                      | 28      | 1
+city | grouped                                                | avg_age | n
+---- | ------------------------------------------------------ | ------- | -
+NY   | [ {name:alice,age:30,city:NY}, {name:bob,age:25,city:NY} ] | 27.5    | 2
+LA   | [ {name:carol,age:28,city:LA} ]                        | 28      | 1
 ```
 
 By default `reduce` operates on the column named `grouped`. If you used a custom name with `group ... as`, or if you have a pre-existing list column (e.g. from a Parquet/JSON file), pass the column name as the first argument:
@@ -180,13 +184,17 @@ dq 'sales.csv | group category | reduce total = sum(price), n = count() | remove
 
 ## Nested Fields
 
-JSON, Avro, and Parquet files can contain nested records. Use dot notation to access sub-fields:
+JSON, Avro, and Parquet files can contain nested records. Use dot notation to access sub-fields in `filter`, `transform`, `select`, and `group`:
 
 ```bash
 dq 'data.json | filter { address.city == "Chicago" }'
 dq 'data.json | transform city = address.city | select name city'
 dq 'data.json | filter { profile.stats.logins > 10 }'
+dq 'data.json | select name address.city'                          # -> columns: name, address_city
+dq 'data.json | group address.city | reduce n = count() | remove grouped'
 ```
+
+Dot paths in `select` and `group` flatten to underscore-separated column names (e.g., `address.city` becomes `address_city`). If a column with that name already exists, a numeric suffix is added (`address_city_2`).
 
 Missing sub-fields return null.
 
