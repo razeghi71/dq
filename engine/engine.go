@@ -182,7 +182,7 @@ func execGroup(o *ast.GroupOp, t *table.Table) (*table.Table, error) {
 		groupIndices[i] = idx
 	}
 
-	// Determine which columns go into the nested table
+	// Determine which columns go into the nested records
 	nestedCols := make([]string, 0)
 	nestedIndices := make([]int, 0)
 	groupColSet := make(map[int]bool)
@@ -198,8 +198,8 @@ func execGroup(o *ast.GroupOp, t *table.Table) (*table.Table, error) {
 
 	// Build groups preserving order
 	type groupEntry struct {
-		key    []table.Value
-		nested *table.Table
+		key     []table.Value
+		records []table.Value // each a TypeRecord
 	}
 	var groups []groupEntry
 	keyMap := make(map[string]int) // key string -> index in groups
@@ -216,21 +216,20 @@ func execGroup(o *ast.GroupOp, t *table.Table) (*table.Table, error) {
 
 		gi, exists := keyMap[keyStr]
 		if !exists {
-			nested := table.NewTable(nestedCols)
 			gi = len(groups)
-			groups = append(groups, groupEntry{key: keyVals, nested: nested})
+			groups = append(groups, groupEntry{key: keyVals})
 			keyMap[keyStr] = gi
 		}
 
-		// Add nested row
-		nestedVals := make([]table.Value, len(nestedIndices))
+		// Build a TypeRecord for this row's nested columns
+		fields := make([]table.RecordField, len(nestedIndices))
 		for i, idx := range nestedIndices {
-			nestedVals[i] = row.Values[idx]
+			fields[i] = table.RecordField{Name: nestedCols[i], Value: row.Values[idx]}
 		}
-		groups[gi].nested.AddRow(nestedVals)
+		groups[gi].records = append(groups[gi].records, table.RecordVal(fields))
 	}
 
-	// Build result table: group columns + nested column
+	// Build result table: group columns + list column
 	resultCols := make([]string, len(o.Columns))
 	copy(resultCols, o.Columns)
 	resultCols = append(resultCols, o.NestedName)
@@ -239,7 +238,7 @@ func execGroup(o *ast.GroupOp, t *table.Table) (*table.Table, error) {
 	for _, g := range groups {
 		vals := make([]table.Value, len(g.key)+1)
 		copy(vals, g.key)
-		vals[len(g.key)] = table.NestedVal(g.nested)
+		vals[len(g.key)] = table.ListVal(g.records)
 		result.AddRow(vals)
 	}
 	return result, nil
@@ -317,8 +316,13 @@ func execReduce(o *ast.ReduceOp, t *table.Table) (*table.Table, error) {
 	result := table.NewTable(newCols)
 	for _, row := range t.Rows {
 		nested := row.Values[nestedIdx]
-		if nested.Type != table.TypeNested || nested.Nested == nil {
-			return nil, fmt.Errorf("reduce: column %q is not a nested table", o.NestedName)
+		if nested.Type != table.TypeList {
+			return nil, fmt.Errorf("reduce: column %q is not a list (did you forget to group first?)", o.NestedName)
+		}
+
+		nestedTable, err := table.ListToTable(nested)
+		if err != nil {
+			return nil, fmt.Errorf("reduce: %w", err)
 		}
 
 		vals := make([]table.Value, len(newCols))
@@ -328,7 +332,7 @@ func execReduce(o *ast.ReduceOp, t *table.Table) (*table.Table, error) {
 		}
 
 		for i, a := range o.Assignments {
-			v, err := EvalAggregate(a.Expr, nested.Nested)
+			v, err := EvalAggregate(a.Expr, nestedTable)
 			if err != nil {
 				return nil, fmt.Errorf("reduce %q: %w", a.Column, err)
 			}

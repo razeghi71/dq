@@ -280,6 +280,9 @@ func getColValues(e *ast.FuncCallExpr, nested *table.Table) ([]table.Value, erro
 	if !ok {
 		return nil, fmt.Errorf("%s() argument must be a column reference", e.Name)
 	}
+	if len(nested.Rows) == 0 {
+		return nil, nil
+	}
 	idx := nested.ColIndex(colExpr.Name)
 	if idx < 0 {
 		return nil, fmt.Errorf("%s(): column %q not found in nested table", e.Name, colExpr.Name)

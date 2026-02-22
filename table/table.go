@@ -14,8 +14,15 @@ const (
 	TypeFloat
 	TypeString
 	TypeBool
-	TypeNested // nested table (from group)
+	TypeList   // List  []Value
+	TypeRecord // Fields []RecordField
 )
+
+// RecordField is a named field in a record value.
+type RecordField struct {
+	Name  string
+	Value Value
+}
 
 // Value is a dynamically-typed cell in a table.
 type Value struct {
@@ -24,7 +31,8 @@ type Value struct {
 	Float  float64
 	Str    string
 	Bool   bool
-	Nested *Table
+	List   []Value
+	Fields []RecordField
 }
 
 // Null returns a null value.
@@ -52,9 +60,14 @@ func BoolVal(v bool) Value {
 	return Value{Type: TypeBool, Bool: v}
 }
 
-// NestedVal creates a nested table value.
-func NestedVal(t *Table) Value {
-	return Value{Type: TypeNested, Nested: t}
+// ListVal creates a list value.
+func ListVal(elems []Value) Value {
+	return Value{Type: TypeList, List: elems}
+}
+
+// RecordVal creates a record value.
+func RecordVal(fields []RecordField) Value {
+	return Value{Type: TypeRecord, Fields: fields}
 }
 
 // IsNull returns true if the value is null.
@@ -90,8 +103,18 @@ func (v Value) AsString() string {
 			return "true"
 		}
 		return "false"
-	case TypeNested:
-		return v.Nested.String()
+	case TypeList:
+		parts := make([]string, len(v.List))
+		for i, e := range v.List {
+			parts[i] = e.AsString()
+		}
+		return "[" + strings.Join(parts, ", ") + "]"
+	case TypeRecord:
+		parts := make([]string, len(v.Fields))
+		for i, f := range v.Fields {
+			parts[i] = f.Name + ":" + f.Value.AsString()
+		}
+		return "{" + strings.Join(parts, ", ") + "}"
 	default:
 		return "?"
 	}
@@ -107,6 +130,51 @@ func (v Value) AsBool() (bool, bool) {
 	default:
 		return false, false
 	}
+}
+
+// ListToTable converts a TypeList of TypeRecord values into a *Table.
+// Used internally by execReduce.
+func ListToTable(v Value) (*Table, error) {
+	if v.Type != TypeList {
+		return nil, fmt.Errorf("expected TypeList, got %v", v.Type)
+	}
+	if len(v.List) == 0 {
+		return NewTable(nil), nil
+	}
+
+	first := v.List[0]
+	if first.Type != TypeRecord {
+		return nil, fmt.Errorf("expected list of TypeRecord, got element of type %v", first.Type)
+	}
+
+	columns := make([]string, len(first.Fields))
+	for i, f := range first.Fields {
+		columns[i] = f.Name
+	}
+
+	t := NewTable(columns)
+	for _, elem := range v.List {
+		if elem.Type != TypeRecord {
+			return nil, fmt.Errorf("list element is not a TypeRecord")
+		}
+		vals := make([]Value, len(columns))
+		// build index from field name -> position in columns
+		for j, col := range columns {
+			found := false
+			for _, f := range elem.Fields {
+				if f.Name == col {
+					vals[j] = f.Value
+					found = true
+					break
+				}
+			}
+			if !found {
+				vals[j] = Null()
+			}
+		}
+		t.AddRow(vals)
+	}
+	return t, nil
 }
 
 // Row is a single row in a table, mapping column index to value.
@@ -191,3 +259,4 @@ func (t *Table) String() string {
 	sb.WriteString(" ]")
 	return sb.String()
 }
+

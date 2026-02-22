@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -185,7 +186,7 @@ func buildTableFromRecords(records []map[string]interface{}) *table.Table {
 				vals[i] = table.Null()
 				continue
 			}
-			vals[i] = jsonValue(v)
+			vals[i] = anyToValue(v)
 		}
 		t.AddRow(vals)
 	}
@@ -193,8 +194,13 @@ func buildTableFromRecords(records []map[string]interface{}) *table.Table {
 	return t
 }
 
-func jsonValue(v interface{}) table.Value {
+// anyToValue converts any Go value (from JSON, Avro, Parquet generic reader) to a table.Value.
+func anyToValue(v interface{}) table.Value {
 	switch val := v.(type) {
+	case nil:
+		return table.Null()
+	case bool:
+		return table.BoolVal(val)
 	case float64:
 		// JSON numbers are float64; check if it's actually an integer
 		if val == float64(int64(val)) {
@@ -203,15 +209,58 @@ func jsonValue(v interface{}) table.Value {
 		return table.FloatVal(val)
 	case string:
 		return table.StrVal(val)
-	case bool:
-		return table.BoolVal(val)
-	case nil:
-		return table.Null()
+	case int32:
+		return table.IntVal(int64(val))
+	case int64:
+		return table.IntVal(val)
+	case float32:
+		return table.FloatVal(float64(val))
+	case []byte:
+		return table.StrVal(string(val))
+	case []interface{}:
+		elems := make([]table.Value, len(val))
+		for i, e := range val {
+			elems[i] = anyToValue(e)
+		}
+		return table.ListVal(elems)
+	case map[string]interface{}:
+		fields := buildRecordFields(val)
+		return table.RecordVal(fields)
 	default:
-		// For nested objects/arrays, just stringify
 		b, _ := json.Marshal(val)
 		return table.StrVal(string(b))
 	}
+}
+
+// buildRecordFields creates a sorted []RecordField from a map.
+func buildRecordFields(m map[string]interface{}) []table.RecordField {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	fields := make([]table.RecordField, len(keys))
+	for i, k := range keys {
+		fields[i] = table.RecordField{Name: k, Value: anyToValue(m[k])}
+	}
+	return fields
+}
+
+var avroPrimitives = map[string]bool{
+	"null": true, "boolean": true, "int": true, "long": true,
+	"float": true, "double": true, "bytes": true, "string": true,
+}
+
+func avroValue(v interface{}) table.Value {
+	m, isMap := v.(map[string]interface{})
+	if isMap && len(m) == 1 {
+		for k, inner := range m {
+			if avroPrimitives[k] || (len(k) > 0 && k[0] >= 'A' && k[0] <= 'Z') {
+				return avroValue(inner) // union: unwrap
+			}
+		}
+	}
+	return anyToValue(v)
 }
 
 func loadAvro(filename string) (*table.Table, error) {
@@ -283,35 +332,29 @@ func loadParquet(filename string) (*table.Table, error) {
 	}
 	defer f.Close()
 
-	stat, err := f.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("cannot stat %s: %w", filename, err)
-	}
+	// Use NewGenericReader[any]: typeOf[any]() == nil so it uses the file's own schema
+	// and Reconstruct populates each row as map[string]any.
+	reader := parquet.NewGenericReader[any](f)
+	defer reader.Close()
 
-	pf, err := parquet.OpenFile(f, stat.Size())
-	if err != nil {
-		return nil, fmt.Errorf("cannot read Parquet file %s: %w", filename, err)
+	schema := reader.Schema()
+	var columns []string
+	for _, field := range schema.Fields() {
+		columns = append(columns, field.Name())
 	}
-
-	fields := pf.Schema().Fields()
-	columns := make([]string, len(fields))
-	for i, field := range fields {
-		columns[i] = field.Name()
-	}
-
 	t := table.NewTable(columns)
-	reader := parquet.NewReader(pf)
-	buf := make([]parquet.Row, 128)
+
+	buf := make([]any, 128)
 	for {
-		n, err := reader.ReadRows(buf)
+		n, err := reader.Read(buf)
 		for i := 0; i < n; i++ {
+			row, ok := buf[i].(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("unexpected parquet row type %T", buf[i])
+			}
 			vals := make([]table.Value, len(columns))
-			for j := range columns {
-				if j < len(buf[i]) {
-					vals[j] = parquetValue(buf[i][j])
-				} else {
-					vals[j] = table.Null()
-				}
+			for j, col := range columns {
+				vals[j] = anyToValue(row[col])
 			}
 			t.AddRow(vals)
 		}
@@ -323,56 +366,4 @@ func loadParquet(filename string) (*table.Table, error) {
 		}
 	}
 	return t, nil
-}
-
-func parquetValue(v parquet.Value) table.Value {
-	if v.IsNull() {
-		return table.Null()
-	}
-	switch v.Kind() {
-	case parquet.Boolean:
-		return table.BoolVal(v.Boolean())
-	case parquet.Int32:
-		return table.IntVal(int64(v.Int32()))
-	case parquet.Int64:
-		return table.IntVal(v.Int64())
-	case parquet.Float:
-		return table.FloatVal(float64(v.Float()))
-	case parquet.Double:
-		return table.FloatVal(v.Double())
-	case parquet.ByteArray, parquet.FixedLenByteArray:
-		return table.StrVal(string(v.ByteArray()))
-	default:
-		return table.StrVal(fmt.Sprintf("%v", v))
-	}
-}
-
-func avroValue(v interface{}) table.Value {
-	if v == nil {
-		return table.Null()
-	}
-	switch val := v.(type) {
-	case int32:
-		return table.IntVal(int64(val))
-	case int64:
-		return table.IntVal(val)
-	case float32:
-		return table.FloatVal(float64(val))
-	case float64:
-		return table.FloatVal(val)
-	case string:
-		return table.StrVal(val)
-	case bool:
-		return table.BoolVal(val)
-	case []byte:
-		return table.StrVal(string(val))
-	case map[string]interface{}:
-		// Avro unions decode as {"type": value} - extract the value
-		for _, inner := range val {
-			return avroValue(inner)
-		}
-		return table.Null()
-	default:
-		return table.StrVal(fmt.Sprintf("%v", val))
-	}
 }
