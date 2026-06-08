@@ -45,6 +45,9 @@ func LoadInput(filename, format string, stdin io.Reader) (*table.Table, error) {
 // the file extension; otherwise the extension is used. An error is returned if
 // neither provides a recognisable format.
 func Load(filename, format string) (*table.Table, error) {
+	if IsStdin(filename) {
+		return LoadInput(filename, format, nil)
+	}
 	if format == "" {
 		format = strings.TrimPrefix(strings.ToLower(filepath.Ext(filename)), ".")
 	}

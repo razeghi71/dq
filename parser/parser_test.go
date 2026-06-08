@@ -322,6 +322,19 @@ func TestParseHeadDefaultTailExplicit(t *testing.T) {
 	}
 }
 
+func TestParseDashOnly(t *testing.T) {
+	q, err := Parse("-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Source.Filename != "-" {
+		t.Errorf("expected '-', got %q", q.Source.Filename)
+	}
+	if len(q.Ops) != 0 {
+		t.Errorf("expected no ops, got %d", len(q.Ops))
+	}
+}
+
 func TestParseStdinSource(t *testing.T) {
 	q, err := Parse("- | head 10")
 	if err != nil {

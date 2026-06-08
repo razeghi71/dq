@@ -388,6 +388,32 @@ func TestIntegrationColumnTypeWidening(t *testing.T) {
 // Stdin source (-)
 // ============================================================
 
+func TestIntegrationStdinDashOnly(t *testing.T) {
+	data, err := os.ReadFile(testdataDir + "/sales.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tbl, err := loader.LoadInput("-", "csv", strings.NewReader(string(data)))
+	if err != nil {
+		t.Fatalf("load stdin: %v", err)
+	}
+
+	q, err := parser.Parse("-")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	result, err := Execute(q, tbl)
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+
+	if result.NumRows != 9 {
+		t.Fatalf("expected 9 sales rows, got %d", result.NumRows)
+	}
+}
+
 func TestIntegrationStdinPipeline(t *testing.T) {
 	data, err := os.ReadFile(testdataDir + "/users.csv")
 	if err != nil {

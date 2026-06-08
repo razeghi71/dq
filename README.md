@@ -42,12 +42,15 @@ Wrap queries in single quotes so your shell doesn't interpret `|`, `{`, `}`, or 
 
 ### Reading from stdin
 
-Use `-` as the source to read from a pipe. The `-f` flag is required (csv, json, or jsonl):
+Use `-` as the source to read from a pipe, or omit the query when stdin is piped. The `-f` flag is required (csv, json, or jsonl):
 
 ```bash
+cat users.csv | dq -f csv
 cat users.csv | dq -f csv '- | filter { age > 25 } | select name'
 curl -s https://api.example.com/users | dq -f json '- | head 10'
 ```
+
+Rebuild after pulling: `go build -o dq ./cmd/dq`
 
 Avro and Parquet are not supported on stdin (they require seekable files).
 
