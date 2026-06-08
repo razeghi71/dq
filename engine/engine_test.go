@@ -34,38 +34,38 @@ func runQuery(t *testing.T, input *table.Table, query string) *table.Table {
 
 func TestHead(t *testing.T) {
 	result := runQuery(t, usersTable(), "head 3")
-	if len(result.Rows) != 3 {
-		t.Errorf("expected 3 rows, got %d", len(result.Rows))
+	if result.NumRows != 3 {
+		t.Errorf("expected 3 rows, got %d", result.NumRows)
 	}
-	if result.Rows[0].Values[0].Str != "Alice" {
+	if result.GetAt(0, 0).Str != "Alice" {
 		t.Errorf("expected first row to be Alice")
 	}
 }
 
 func TestTail(t *testing.T) {
 	result := runQuery(t, usersTable(), "tail 2")
-	if len(result.Rows) != 2 {
-		t.Errorf("expected 2 rows, got %d", len(result.Rows))
+	if result.NumRows != 2 {
+		t.Errorf("expected 2 rows, got %d", result.NumRows)
 	}
-	if result.Rows[0].Values[0].Str != "Eve" {
-		t.Errorf("expected first row to be Eve, got %s", result.Rows[0].Values[0].Str)
+	if result.GetAt(0, 0).Str != "Eve" {
+		t.Errorf("expected first row to be Eve, got %s", result.GetAt(0, 0).Str)
 	}
 }
 
 func TestSortAsc(t *testing.T) {
 	result := runQuery(t, usersTable(), "sorta age")
-	if result.Rows[0].Values[1].Int != 22 {
-		t.Errorf("expected first age to be 22, got %d", result.Rows[0].Values[1].Int)
+	if result.GetAt(0, 1).Int != 22 {
+		t.Errorf("expected first age to be 22, got %d", result.GetAt(0, 1).Int)
 	}
-	if result.Rows[5].Values[1].Int != 40 {
-		t.Errorf("expected last age to be 40, got %d", result.Rows[5].Values[1].Int)
+	if result.GetAt(5, 1).Int != 40 {
+		t.Errorf("expected last age to be 40, got %d", result.GetAt(5, 1).Int)
 	}
 }
 
 func TestSortDesc(t *testing.T) {
 	result := runQuery(t, usersTable(), "sortd age")
-	if result.Rows[0].Values[1].Int != 40 {
-		t.Errorf("expected first age to be 40, got %d", result.Rows[0].Values[1].Int)
+	if result.GetAt(0, 1).Int != 40 {
+		t.Errorf("expected first age to be 40, got %d", result.GetAt(0, 1).Int)
 	}
 }
 
@@ -81,32 +81,32 @@ func TestSelect(t *testing.T) {
 
 func TestFilter(t *testing.T) {
 	result := runQuery(t, usersTable(), `filter { age > 30 }`)
-	if len(result.Rows) != 2 {
-		t.Errorf("expected 2 rows (Charlie, Frank), got %d", len(result.Rows))
+	if result.NumRows != 2 {
+		t.Errorf("expected 2 rows (Charlie, Frank), got %d", result.NumRows)
 	}
 }
 
 func TestFilterAnd(t *testing.T) {
 	result := runQuery(t, usersTable(), `filter { age > 25 and city == "NY" }`)
-	if len(result.Rows) != 3 {
-		t.Errorf("expected 3 rows, got %d", len(result.Rows))
+	if result.NumRows != 3 {
+		t.Errorf("expected 3 rows, got %d", result.NumRows)
 	}
 }
 
 func TestCount(t *testing.T) {
 	result := runQuery(t, usersTable(), "count")
-	if len(result.Rows) != 1 || len(result.Columns) != 1 {
+	if result.NumRows != 1 || len(result.Columns) != 1 {
 		t.Fatal("count should return 1x1 table")
 	}
-	if result.Rows[0].Values[0].Int != 6 {
-		t.Errorf("expected 6, got %d", result.Rows[0].Values[0].Int)
+	if result.GetAt(0, 0).Int != 6 {
+		t.Errorf("expected 6, got %d", result.GetAt(0, 0).Int)
 	}
 }
 
 func TestDistinct(t *testing.T) {
 	result := runQuery(t, usersTable(), "distinct city")
-	if len(result.Rows) != 3 {
-		t.Errorf("expected 3 distinct cities, got %d", len(result.Rows))
+	if result.NumRows != 3 {
+		t.Errorf("expected 3 distinct cities, got %d", result.NumRows)
 	}
 }
 
@@ -119,8 +119,8 @@ func TestTransform(t *testing.T) {
 		t.Errorf("expected column 'doubled', got %q", result.Columns[3])
 	}
 	// Alice: age=30, doubled=60
-	if result.Rows[0].Values[3].Int != 60 {
-		t.Errorf("expected 60, got %d", result.Rows[0].Values[3].Int)
+	if result.GetAt(0, 3).Int != 60 {
+		t.Errorf("expected 60, got %d", result.GetAt(0, 3).Int)
 	}
 }
 
@@ -131,8 +131,8 @@ func TestGroupReduce(t *testing.T) {
 	}
 	// NY: 30+35+40=105, count=3
 	nyIdx := -1
-	for i, r := range result.Rows {
-		if r.Values[0].Str == "NY" {
+	for i := 0; i < result.NumRows; i++ {
+		if result.GetAt(i, 0).Str == "NY" {
 			nyIdx = i
 		}
 	}
@@ -141,11 +141,11 @@ func TestGroupReduce(t *testing.T) {
 	}
 	totalIdx := result.ColIndex("total")
 	nIdx := result.ColIndex("n")
-	if result.Rows[nyIdx].Values[totalIdx].Int != 105 {
-		t.Errorf("expected NY total=105, got %d", result.Rows[nyIdx].Values[totalIdx].Int)
+	if result.GetAt(nyIdx, totalIdx).Int != 105 {
+		t.Errorf("expected NY total=105, got %d", result.GetAt(nyIdx, totalIdx).Int)
 	}
-	if result.Rows[nyIdx].Values[nIdx].Int != 3 {
-		t.Errorf("expected NY count=3, got %d", result.Rows[nyIdx].Values[nIdx].Int)
+	if result.GetAt(nyIdx, nIdx).Int != 3 {
+		t.Errorf("expected NY count=3, got %d", result.GetAt(nyIdx, nIdx).Int)
 	}
 }
 
@@ -156,7 +156,7 @@ func TestGroupKeepsKeyInNestedRows(t *testing.T) {
 		t.Fatal("grouped column not found")
 	}
 	// Pick the first group row and check nested records contain the key column
-	nested := result.Rows[0].Values[groupedIdx]
+	nested := result.GetAt(0, groupedIdx)
 	if nested.Type != table.TypeList {
 		t.Fatalf("expected TypeList, got %v", nested.Type)
 	}
@@ -180,12 +180,12 @@ func TestGroupKeepsKeyInNestedRowsReduceStillWorks(t *testing.T) {
 	// Since the key column is now in the nested rows, reduce should still
 	// be able to aggregate on it (e.g. first(city) should return the group key).
 	result := runQuery(t, usersTable(), "group city | reduce city_check = first(city), n = count() | remove grouped")
-	for _, row := range result.Rows {
-		cityIdx := result.ColIndex("city")
-		checkIdx := result.ColIndex("city_check")
-		if row.Values[cityIdx].Str != row.Values[checkIdx].Str {
+	cityIdx := result.ColIndex("city")
+	checkIdx := result.ColIndex("city_check")
+	for i := 0; i < result.NumRows; i++ {
+		if result.GetAt(i, cityIdx).Str != result.GetAt(i, checkIdx).Str {
 			t.Errorf("expected city_check to match city, got %q vs %q",
-				row.Values[checkIdx].Str, row.Values[cityIdx].Str)
+				result.GetAt(i, checkIdx).Str, result.GetAt(i, cityIdx).Str)
 		}
 	}
 }
@@ -214,8 +214,8 @@ func TestNullArithmetic(t *testing.T) {
 	tbl.AddRow([]table.Value{table.IntVal(10), table.Null()})
 
 	result := runQuery(t, tbl, "transform c = a * b")
-	if !result.Rows[0].Values[2].IsNull() {
-		t.Errorf("expected null from 10 * null, got %v", result.Rows[0].Values[2].AsString())
+	if !result.GetAt(0, 2).IsNull() {
+		t.Errorf("expected null from 10 * null, got %v", result.GetAt(0, 2).AsString())
 	}
 }
 
@@ -224,16 +224,15 @@ func TestCoalesce(t *testing.T) {
 	tbl.AddRow([]table.Value{table.Null(), table.IntVal(42)})
 
 	result := runQuery(t, tbl, "transform c = coalesce(a, b)")
-	if result.Rows[0].Values[2].Int != 42 {
-		t.Errorf("expected 42, got %v", result.Rows[0].Values[2].AsString())
+	if result.GetAt(0, 2).Int != 42 {
+		t.Errorf("expected 42, got %v", result.GetAt(0, 2).AsString())
 	}
 }
 
 func TestEvalExpr(t *testing.T) {
 	tbl := table.NewTable([]string{"x"})
 	tbl.AddRow([]table.Value{table.IntVal(5)})
-	row := &tbl.Rows[0]
-	ctx := &EvalContext{Table: tbl, Row: row}
+	ctx := &EvalContext{Table: tbl, RowIdx: 0}
 
 	// Test: x + 3 * 2 should be 5 + 6 = 11 (not 16)
 	expr := &ast.BinaryExpr{
@@ -260,34 +259,34 @@ func TestIsNull(t *testing.T) {
 	tbl.AddRow([]table.Value{table.IntVal(1)})
 
 	result := runQuery(t, tbl, "filter { a is null }")
-	if len(result.Rows) != 1 {
-		t.Errorf("expected 1 row, got %d", len(result.Rows))
+	if result.NumRows != 1 {
+		t.Errorf("expected 1 row, got %d", result.NumRows)
 	}
 
 	result2 := runQuery(t, tbl, "filter { a is not null }")
-	if len(result2.Rows) != 1 {
-		t.Errorf("expected 1 row, got %d", len(result2.Rows))
+	if result2.NumRows != 1 {
+		t.Errorf("expected 1 row, got %d", result2.NumRows)
 	}
 }
 
 func TestIfFunction(t *testing.T) {
 	result := runQuery(t, usersTable(), `transform label = if(age > 30, "old", "young") | select name label`)
 	// Alice(30) -> young, Charlie(35) -> old
-	if result.Rows[0].Values[1].Str != "young" {
-		t.Errorf("expected 'young' for Alice, got %q", result.Rows[0].Values[1].Str)
+	if result.GetAt(0, 1).Str != "young" {
+		t.Errorf("expected 'young' for Alice, got %q", result.GetAt(0, 1).Str)
 	}
-	if result.Rows[2].Values[1].Str != "old" {
-		t.Errorf("expected 'old' for Charlie, got %q", result.Rows[2].Values[1].Str)
+	if result.GetAt(2, 1).Str != "old" {
+		t.Errorf("expected 'old' for Charlie, got %q", result.GetAt(2, 1).Str)
 	}
 }
 
 func TestUpperLower(t *testing.T) {
 	result := runQuery(t, usersTable(), `transform up = upper(city), lo = lower(name) | select up lo | head 1`)
-	if result.Rows[0].Values[0].Str != "NY" {
-		t.Errorf("expected 'NY', got %q", result.Rows[0].Values[0].Str)
+	if result.GetAt(0, 0).Str != "NY" {
+		t.Errorf("expected 'NY', got %q", result.GetAt(0, 0).Str)
 	}
-	if result.Rows[0].Values[1].Str != "alice" {
-		t.Errorf("expected 'alice', got %q", result.Rows[0].Values[1].Str)
+	if result.GetAt(0, 1).Str != "alice" {
+		t.Errorf("expected 'alice', got %q", result.GetAt(0, 1).Str)
 	}
 }
 
@@ -310,18 +309,17 @@ func salesTable() *table.Table {
 
 func TestDatePartValidDate(t *testing.T) {
 	result := runQuery(t, salesTable(), "transform y = year(date), m = month(date), d = day(date) | head 1")
-	row := result.Rows[0]
 	yIdx := result.ColIndex("y")
 	mIdx := result.ColIndex("m")
 	dIdx := result.ColIndex("d")
-	if row.Values[yIdx].Int != 2024 {
-		t.Errorf("expected year 2024, got %d", row.Values[yIdx].Int)
+	if result.GetAt(0, yIdx).Int != 2024 {
+		t.Errorf("expected year 2024, got %d", result.GetAt(0, yIdx).Int)
 	}
-	if row.Values[mIdx].Int != 1 {
-		t.Errorf("expected month 1, got %d", row.Values[mIdx].Int)
+	if result.GetAt(0, mIdx).Int != 1 {
+		t.Errorf("expected month 1, got %d", result.GetAt(0, mIdx).Int)
 	}
-	if row.Values[dIdx].Int != 15 {
-		t.Errorf("expected day 15, got %d", row.Values[dIdx].Int)
+	if result.GetAt(0, dIdx).Int != 15 {
+		t.Errorf("expected day 15, got %d", result.GetAt(0, dIdx).Int)
 	}
 }
 
@@ -330,8 +328,8 @@ func TestDatePartNullPropagation(t *testing.T) {
 	tbl.AddRow([]table.Value{table.Null()})
 
 	result := runQuery(t, tbl, "transform y = year(d)")
-	if !result.Rows[0].Values[1].IsNull() {
-		t.Errorf("expected null for year(null), got %v", result.Rows[0].Values[1].AsString())
+	if !result.GetAt(0, 1).IsNull() {
+		t.Errorf("expected null for year(null), got %v", result.GetAt(0, 1).AsString())
 	}
 }
 
@@ -362,8 +360,8 @@ func TestDatePartErrorOnIntResult(t *testing.T) {
 
 func TestStringFuncsCoerceInt(t *testing.T) {
 	result := runQuery(t, usersTable(), "transform x = upper(age) | head 1")
-	if result.Rows[0].Values[3].Str != "30" {
-		t.Errorf("expected '30', got %q", result.Rows[0].Values[3].Str)
+	if result.GetAt(0, 3).Str != "30" {
+		t.Errorf("expected '30', got %q", result.GetAt(0, 3).Str)
 	}
 }
 
@@ -397,8 +395,8 @@ func TestComparisonErrorOnTypeMismatch(t *testing.T) {
 
 func TestGroupWithCustomName(t *testing.T) {
 	result := runQuery(t, usersTable(), "group city as entries | reduce entries total = sum(age) | remove entries | select city total")
-	if len(result.Rows) != 3 {
-		t.Errorf("expected 3 rows, got %d", len(result.Rows))
+	if result.NumRows != 3 {
+		t.Errorf("expected 3 rows, got %d", result.NumRows)
 	}
 }
 
@@ -440,8 +438,8 @@ func TestSelectDotPath(t *testing.T) {
 	if result.Columns[1] != "address_city" {
 		t.Errorf("col 1: expected 'address_city', got %q", result.Columns[1])
 	}
-	if result.Rows[0].Values[1].Str != "New York" {
-		t.Errorf("row 0 city: expected 'New York', got %q", result.Rows[0].Values[1].Str)
+	if result.GetAt(0, 1).Str != "New York" {
+		t.Errorf("row 0 city: expected 'New York', got %q", result.GetAt(0, 1).Str)
 	}
 }
 
@@ -475,8 +473,8 @@ func TestGroupDotPath(t *testing.T) {
 		t.Errorf("col 1: expected 'grouped', got %q", result.Columns[1])
 	}
 	// 2 groups: New York and Los Angeles
-	if len(result.Rows) != 2 {
-		t.Fatalf("expected 2 groups, got %d", len(result.Rows))
+	if result.NumRows != 2 {
+		t.Fatalf("expected 2 groups, got %d", result.NumRows)
 	}
 }
 
@@ -486,11 +484,11 @@ func TestGroupDotPathReduce(t *testing.T) {
 		t.Fatalf("expected 2 columns (address_city, n), got %v", result.Columns)
 	}
 	// Find the New York group
-	for _, row := range result.Rows {
-		if row.Values[0].Str == "New York" {
-			nIdx := result.ColIndex("n")
-			if row.Values[nIdx].Int != 2 {
-				t.Errorf("expected count 2 for New York, got %d", row.Values[nIdx].Int)
+	nIdx := result.ColIndex("n")
+	for i := 0; i < result.NumRows; i++ {
+		if result.GetAt(i, 0).Str == "New York" {
+			if result.GetAt(i, nIdx).Int != 2 {
+				t.Errorf("expected count 2 for New York, got %d", result.GetAt(i, nIdx).Int)
 			}
 		}
 	}

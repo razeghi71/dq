@@ -56,12 +56,12 @@ func execOp(op ast.Op, t *table.Table) (*table.Table, error) {
 }
 
 // resolveColumnPath walks a dot-path (e.g. ["address", "city"]) to extract a value from a row.
-func resolveColumnPath(path []string, t *table.Table, row *table.Row) (table.Value, error) {
+func resolveColumnPath(path []string, t *table.Table, rowIdx int) (table.Value, error) {
 	idx := t.ColIndex(path[0])
 	if idx < 0 {
 		return table.Null(), fmt.Errorf("column %q not found", path[0])
 	}
-	val := row.Values[idx]
+	val := t.Col(idx).Get(rowIdx)
 	for _, seg := range path[1:] {
 		if val.Type != table.TypeRecord {
 			return table.Null(), fmt.Errorf("cannot access field %q: value is not a record", seg)
@@ -106,42 +106,50 @@ func uniqueColumnName(base string, existing []string) string {
 	}
 }
 
+// rowVals materializes all column values for row i as a []Value slice.
+func rowVals(t *table.Table, i int) []table.Value {
+	vals := make([]table.Value, len(t.Columns))
+	for j := range t.Columns {
+		vals[j] = t.Col(j).Get(i)
+	}
+	return vals
+}
+
 func execHead(o *ast.HeadOp, t *table.Table) *table.Table {
 	n := o.N
-	if n > len(t.Rows) {
-		n = len(t.Rows)
+	if n > t.NumRows {
+		n = t.NumRows
 	}
-	result := table.NewTable(t.Columns)
-	result.Rows = t.Rows[:n]
-	return result
+	return t.SliceRows(0, n)
 }
 
 func execTail(o *ast.TailOp, t *table.Table) *table.Table {
 	n := o.N
-	if n > len(t.Rows) {
-		n = len(t.Rows)
+	if n > t.NumRows {
+		n = t.NumRows
 	}
-	result := table.NewTable(t.Columns)
-	result.Rows = t.Rows[len(t.Rows)-n:]
-	return result
+	return t.SliceRows(t.NumRows-n, t.NumRows)
 }
 
 func execSort(cols [][]string, asc bool, t *table.Table) (*table.Table, error) {
-	indices := make([]int, len(cols))
+	colIndices := make([]int, len(cols))
 	for i, path := range cols {
 		idx := t.ColIndex(path[0])
 		if idx < 0 {
 			return nil, fmt.Errorf("sort: column %q not found", path[0])
 		}
-		indices[i] = idx
+		colIndices[i] = idx
 	}
 
-	result := t.Clone()
-	sort.SliceStable(result.Rows, func(i, j int) bool {
-		for _, idx := range indices {
-			a := result.Rows[i].Values[idx]
-			b := result.Rows[j].Values[idx]
-			cmp := compareValues(a, b)
+	perm := make([]int, t.NumRows)
+	for i := range perm {
+		perm[i] = i
+	}
+	sort.SliceStable(perm, func(a, b int) bool {
+		for _, idx := range colIndices {
+			va := t.Col(idx).Get(perm[a])
+			vb := t.Col(idx).Get(perm[b])
+			cmp := compareValues(va, vb)
 			if cmp != 0 {
 				if asc {
 					return cmp < 0
@@ -151,7 +159,7 @@ func execSort(cols [][]string, asc bool, t *table.Table) (*table.Table, error) {
 		}
 		return false
 	})
-	return result, nil
+	return t.ApplyPermutation(perm), nil
 }
 
 func compareValues(a, b table.Value) int {
@@ -184,7 +192,6 @@ func compareValues(a, b table.Value) int {
 }
 
 func execSelect(o *ast.SelectOp, t *table.Table) (*table.Table, error) {
-	// Build output column names with dedup
 	var resultCols []string
 	for _, path := range o.Columns {
 		base := pathToColumnName(path)
@@ -193,14 +200,14 @@ func execSelect(o *ast.SelectOp, t *table.Table) (*table.Table, error) {
 	}
 
 	result := table.NewTable(resultCols)
-	for _, row := range t.Rows {
+	for i := 0; i < t.NumRows; i++ {
 		vals := make([]table.Value, len(o.Columns))
-		for i, path := range o.Columns {
-			v, err := resolveColumnPath(path, t, &row)
+		for j, path := range o.Columns {
+			v, err := resolveColumnPath(path, t, i)
 			if err != nil {
 				return nil, fmt.Errorf("select: %w", err)
 			}
-			vals[i] = v
+			vals[j] = v
 		}
 		result.AddRow(vals)
 	}
@@ -209,8 +216,8 @@ func execSelect(o *ast.SelectOp, t *table.Table) (*table.Table, error) {
 
 func execFilter(o *ast.FilterOp, t *table.Table) (*table.Table, error) {
 	result := table.NewTable(t.Columns)
-	for _, row := range t.Rows {
-		ctx := &EvalContext{Table: t, Row: &row}
+	for i := 0; i < t.NumRows; i++ {
+		ctx := &EvalContext{Table: t, RowIdx: i}
 		val, err := Eval(o.Expr, ctx)
 		if err != nil {
 			return nil, fmt.Errorf("filter: %w", err)
@@ -220,21 +227,13 @@ func execFilter(o *ast.FilterOp, t *table.Table) (*table.Table, error) {
 			return nil, fmt.Errorf("filter: expression did not return boolean, got %v", val.AsString())
 		}
 		if b {
-			result.AddRow(row.Values)
+			result.AddRow(rowVals(t, i))
 		}
 	}
 	return result, nil
 }
 
 func execGroup(o *ast.GroupOp, t *table.Table) (*table.Table, error) {
-	// All columns go into the nested records (including group keys)
-	nestedCols := make([]string, len(t.Columns))
-	nestedIndices := make([]int, len(t.Columns))
-	for i, col := range t.Columns {
-		nestedCols[i] = col
-		nestedIndices[i] = i
-	}
-
 	// Build output key column names with dedup
 	var keyColNames []string
 	for _, path := range o.Columns {
@@ -251,17 +250,16 @@ func execGroup(o *ast.GroupOp, t *table.Table) (*table.Table, error) {
 	var groups []groupEntry
 	keyMap := make(map[string]int) // key string -> index in groups
 
-	for _, row := range t.Rows {
-		// Build key by resolving each path
+	for i := 0; i < t.NumRows; i++ {
 		keyParts := make([]string, len(o.Columns))
 		keyVals := make([]table.Value, len(o.Columns))
-		for i, path := range o.Columns {
-			v, err := resolveColumnPath(path, t, &row)
+		for j, path := range o.Columns {
+			v, err := resolveColumnPath(path, t, i)
 			if err != nil {
 				return nil, fmt.Errorf("group: %w", err)
 			}
-			keyVals[i] = v
-			keyParts[i] = v.AsString()
+			keyVals[j] = v
+			keyParts[j] = v.AsString()
 		}
 		keyStr := strings.Join(keyParts, "\x00")
 
@@ -272,19 +270,16 @@ func execGroup(o *ast.GroupOp, t *table.Table) (*table.Table, error) {
 			keyMap[keyStr] = gi
 		}
 
-		// Build a TypeRecord for this row's nested columns
-		fields := make([]table.RecordField, len(nestedIndices))
-		for i, idx := range nestedIndices {
-			fields[i] = table.RecordField{Name: nestedCols[i], Value: row.Values[idx]}
+		// Build a TypeRecord for this row (all columns including key)
+		fields := make([]table.RecordField, len(t.Columns))
+		for j, colName := range t.Columns {
+			fields[j] = table.RecordField{Name: colName, Value: t.Col(j).Get(i)}
 		}
 		groups[gi].records = append(groups[gi].records, table.RecordVal(fields))
 	}
 
 	// Build result table: key columns + list column
-	resultCols := make([]string, len(keyColNames))
-	copy(resultCols, keyColNames)
-	resultCols = append(resultCols, o.NestedName)
-
+	resultCols := append(append([]string{}, keyColNames...), o.NestedName)
 	result := table.NewTable(resultCols)
 	for _, g := range groups {
 		vals := make([]table.Value, len(g.key)+1)
@@ -296,55 +291,6 @@ func execGroup(o *ast.GroupOp, t *table.Table) (*table.Table, error) {
 }
 
 func execTransform(o *ast.TransformOp, t *table.Table) (*table.Table, error) {
-	// Figure out which columns are new vs existing
-	newCols := make([]string, len(t.Columns))
-	copy(newCols, t.Columns)
-	assignTargets := make([]int, len(o.Assignments)) // index in newCols
-
-	for i, a := range o.Assignments {
-		idx := -1
-		for j, c := range newCols {
-			if c == a.Column {
-				idx = j
-				break
-			}
-		}
-		if idx < 0 {
-			idx = len(newCols)
-			newCols = append(newCols, a.Column)
-		}
-		assignTargets[i] = idx
-	}
-
-	result := table.NewTable(newCols)
-	for _, row := range t.Rows {
-		vals := make([]table.Value, len(newCols))
-		copy(vals, row.Values)
-		// Fill new columns with null
-		for i := len(row.Values); i < len(newCols); i++ {
-			vals[i] = table.Null()
-		}
-
-		ctx := &EvalContext{Table: t, Row: &row}
-		for i, a := range o.Assignments {
-			v, err := Eval(a.Expr, ctx)
-			if err != nil {
-				return nil, fmt.Errorf("transform %q: %w", a.Column, err)
-			}
-			vals[assignTargets[i]] = v
-		}
-		result.AddRow(vals)
-	}
-	return result, nil
-}
-
-func execReduce(o *ast.ReduceOp, t *table.Table) (*table.Table, error) {
-	nestedIdx := t.ColIndex(o.NestedName)
-	if nestedIdx < 0 {
-		return nil, fmt.Errorf("reduce: nested column %q not found (did you forget to group first?)", o.NestedName)
-	}
-
-	// Result columns: existing columns + new aggregated columns
 	newCols := make([]string, len(t.Columns))
 	copy(newCols, t.Columns)
 	assignTargets := make([]int, len(o.Assignments))
@@ -365,8 +311,58 @@ func execReduce(o *ast.ReduceOp, t *table.Table) (*table.Table, error) {
 	}
 
 	result := table.NewTable(newCols)
-	for _, row := range t.Rows {
-		nested := row.Values[nestedIdx]
+	for i := 0; i < t.NumRows; i++ {
+		vals := make([]table.Value, len(newCols))
+		// Copy existing column values
+		for j := 0; j < len(t.Columns); j++ {
+			vals[j] = t.Col(j).Get(i)
+		}
+		// Fill new columns with null
+		for j := len(t.Columns); j < len(newCols); j++ {
+			vals[j] = table.Null()
+		}
+
+		ctx := &EvalContext{Table: t, RowIdx: i}
+		for j, a := range o.Assignments {
+			v, err := Eval(a.Expr, ctx)
+			if err != nil {
+				return nil, fmt.Errorf("transform %q: %w", a.Column, err)
+			}
+			vals[assignTargets[j]] = v
+		}
+		result.AddRow(vals)
+	}
+	return result, nil
+}
+
+func execReduce(o *ast.ReduceOp, t *table.Table) (*table.Table, error) {
+	nestedIdx := t.ColIndex(o.NestedName)
+	if nestedIdx < 0 {
+		return nil, fmt.Errorf("reduce: nested column %q not found (did you forget to group first?)", o.NestedName)
+	}
+
+	newCols := make([]string, len(t.Columns))
+	copy(newCols, t.Columns)
+	assignTargets := make([]int, len(o.Assignments))
+
+	for i, a := range o.Assignments {
+		idx := -1
+		for j, c := range newCols {
+			if c == a.Column {
+				idx = j
+				break
+			}
+		}
+		if idx < 0 {
+			idx = len(newCols)
+			newCols = append(newCols, a.Column)
+		}
+		assignTargets[i] = idx
+	}
+
+	result := table.NewTable(newCols)
+	for i := 0; i < t.NumRows; i++ {
+		nested := t.Col(nestedIdx).Get(i)
 		if nested.Type != table.TypeList {
 			return nil, fmt.Errorf("reduce: column %q is not a list (did you forget to group first?)", o.NestedName)
 		}
@@ -377,17 +373,19 @@ func execReduce(o *ast.ReduceOp, t *table.Table) (*table.Table, error) {
 		}
 
 		vals := make([]table.Value, len(newCols))
-		copy(vals, row.Values)
-		for i := len(row.Values); i < len(newCols); i++ {
-			vals[i] = table.Null()
+		for j := 0; j < len(t.Columns); j++ {
+			vals[j] = t.Col(j).Get(i)
+		}
+		for j := len(t.Columns); j < len(newCols); j++ {
+			vals[j] = table.Null()
 		}
 
-		for i, a := range o.Assignments {
+		for j, a := range o.Assignments {
 			v, err := EvalAggregate(a.Expr, nestedTable)
 			if err != nil {
 				return nil, fmt.Errorf("reduce %q: %w", a.Column, err)
 			}
-			vals[assignTargets[i]] = v
+			vals[assignTargets[j]] = v
 		}
 		result.AddRow(vals)
 	}
@@ -396,7 +394,7 @@ func execReduce(o *ast.ReduceOp, t *table.Table) (*table.Table, error) {
 
 func execCount(t *table.Table) *table.Table {
 	result := table.NewTable([]string{"count"})
-	result.AddRow([]table.Value{table.IntVal(int64(len(t.Rows)))})
+	result.AddRow([]table.Value{table.IntVal(int64(t.NumRows))})
 	return result
 }
 
@@ -407,7 +405,6 @@ func execDistinct(o *ast.DistinctOp, t *table.Table) *table.Table {
 		for i, path := range o.Columns {
 			idx := t.ColIndex(path[0])
 			if idx < 0 {
-				// Column not found - return empty
 				return table.NewTable(t.Columns)
 			}
 			indices[i] = idx
@@ -416,25 +413,25 @@ func execDistinct(o *ast.DistinctOp, t *table.Table) *table.Table {
 
 	seen := make(map[string]bool)
 	result := table.NewTable(t.Columns)
-	for _, row := range t.Rows {
+	for i := 0; i < t.NumRows; i++ {
 		var key string
 		if len(indices) > 0 {
 			parts := make([]string, len(indices))
-			for i, idx := range indices {
-				parts[i] = row.Values[idx].AsString()
+			for j, idx := range indices {
+				parts[j] = t.Col(idx).Get(i).AsString()
 			}
 			key = strings.Join(parts, "\x00")
 		} else {
-			parts := make([]string, len(row.Values))
-			for i, v := range row.Values {
-				parts[i] = v.AsString()
+			parts := make([]string, len(t.Columns))
+			for j := range t.Columns {
+				parts[j] = t.Col(j).Get(i).AsString()
 			}
 			key = strings.Join(parts, "\x00")
 		}
 
 		if !seen[key] {
 			seen[key] = true
-			result.AddRow(row.Values)
+			result.AddRow(rowVals(t, i))
 		}
 	}
 	return result
@@ -458,9 +455,7 @@ func execRename(o *ast.RenameOp, t *table.Table) (*table.Table, error) {
 		}
 	}
 
-	result := table.NewTable(newCols)
-	result.Rows = t.Rows
-	return result, nil
+	return t.ShallowClone(newCols), nil
 }
 
 func execRemove(o *ast.RemoveOp, t *table.Table) (*table.Table, error) {
@@ -482,13 +477,5 @@ func execRemove(o *ast.RemoveOp, t *table.Table) (*table.Table, error) {
 		}
 	}
 
-	result := table.NewTable(keepCols)
-	for _, row := range t.Rows {
-		vals := make([]table.Value, len(keepIndices))
-		for i, idx := range keepIndices {
-			vals[i] = row.Values[idx]
-		}
-		result.AddRow(vals)
-	}
-	return result, nil
+	return t.SelectCols(keepIndices, keepCols), nil
 }

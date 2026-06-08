@@ -162,8 +162,8 @@ func TestIntegrationCSVRoundTrip(t *testing.T) {
 	if len(tbl.Columns) != 2 {
 		t.Fatalf("expected 2 columns, got %v", tbl.Columns)
 	}
-	if len(tbl.Rows) != 6 {
-		t.Fatalf("expected 6 rows, got %d", len(tbl.Rows))
+	if tbl.NumRows != 6 {
+		t.Fatalf("expected 6 rows, got %d", tbl.NumRows)
 	}
 }
 
@@ -176,16 +176,16 @@ func TestIntegrationJSONRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload JSON: %v", err)
 	}
-	if len(tbl.Rows) != 6 {
-		t.Fatalf("expected 6 rows, got %d", len(tbl.Rows))
+	if tbl.NumRows != 6 {
+		t.Fatalf("expected 6 rows, got %d", tbl.NumRows)
 	}
 
 	nameIdx := tbl.ColIndex("name")
 	if nameIdx < 0 {
 		t.Fatal("missing 'name' column")
 	}
-	if tbl.Rows[0].Values[nameIdx].Str != "Alice" {
-		t.Errorf("first name: want Alice, got %q", tbl.Rows[0].Values[nameIdx].Str)
+	if tbl.GetAt(0, nameIdx).Str != "Alice" {
+		t.Errorf("first name: want Alice, got %q", tbl.GetAt(0, nameIdx).Str)
 	}
 }
 
@@ -198,8 +198,8 @@ func TestIntegrationJSONLRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload JSONL: %v", err)
 	}
-	if len(tbl.Rows) != 6 {
-		t.Fatalf("expected 6 rows, got %d", len(tbl.Rows))
+	if tbl.NumRows != 6 {
+		t.Fatalf("expected 6 rows, got %d", tbl.NumRows)
 	}
 }
 

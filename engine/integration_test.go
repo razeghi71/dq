@@ -39,11 +39,12 @@ func assertFlatQueries(t *testing.T, file string) {
 
 	t.Run("filter", func(t *testing.T) {
 		result := loadAndQuery(t, file, `filter { age > 30 }`)
-		if len(result.Rows) != 2 {
-			t.Fatalf("expected 2 rows, got %d", len(result.Rows))
+		if result.NumRows != 2 {
+			t.Fatalf("expected 2 rows, got %d", result.NumRows)
 		}
-		for _, row := range result.Rows {
-			age := row.Values[result.ColIndex("age")]
+		ageIdx := result.ColIndex("age")
+		for i := 0; i < result.NumRows; i++ {
+			age := result.GetAt(i, ageIdx)
 			if age.Int <= 30 {
 				t.Errorf("expected age > 30, got %d", age.Int)
 			}
@@ -52,16 +53,17 @@ func assertFlatQueries(t *testing.T, file string) {
 
 	t.Run("sort_select_head", func(t *testing.T) {
 		result := loadAndQuery(t, file, "sorta age | select name age | head 3")
-		if len(result.Rows) != 3 {
-			t.Fatalf("expected 3 rows, got %d", len(result.Rows))
+		if result.NumRows != 3 {
+			t.Fatalf("expected 3 rows, got %d", result.NumRows)
 		}
 		if len(result.Columns) != 2 {
 			t.Fatalf("expected 2 columns, got %v", result.Columns)
 		}
 		// youngest first
 		ages := []int64{22, 25, 28}
+		ageIdx := result.ColIndex("age")
 		for i, want := range ages {
-			got := result.Rows[i].Values[result.ColIndex("age")].Int
+			got := result.GetAt(i, ageIdx).Int
 			if got != want {
 				t.Errorf("row %d age: want %d, got %d", i, want, got)
 			}
@@ -71,12 +73,12 @@ func assertFlatQueries(t *testing.T, file string) {
 	t.Run("group_reduce", func(t *testing.T) {
 		result := loadAndQuery(t, file, "group city | reduce n = count(), total = sum(age) | remove grouped | sortd n")
 		// 3 cities: NY(3), LA(2), SF(1)
-		if len(result.Rows) != 3 {
-			t.Fatalf("expected 3 rows, got %d", len(result.Rows))
+		if result.NumRows != 3 {
+			t.Fatalf("expected 3 rows, got %d", result.NumRows)
 		}
 		nIdx := result.ColIndex("n")
-		if result.Rows[0].Values[nIdx].Int != 3 {
-			t.Errorf("top group count: want 3, got %d", result.Rows[0].Values[nIdx].Int)
+		if result.GetAt(0, nIdx).Int != 3 {
+			t.Errorf("top group count: want 3, got %d", result.GetAt(0, nIdx).Int)
 		}
 	})
 
@@ -87,8 +89,8 @@ func assertFlatQueries(t *testing.T, file string) {
 			t.Fatal("column 'doubled' not found")
 		}
 		ageIdx := result.ColIndex("age")
-		got := result.Rows[0].Values[dIdx].Int
-		want := result.Rows[0].Values[ageIdx].Int * 2
+		got := result.GetAt(0, dIdx).Int
+		want := result.GetAt(0, ageIdx).Int * 2
 		if got != want {
 			t.Errorf("doubled: want %d, got %d", want, got)
 		}
@@ -96,15 +98,15 @@ func assertFlatQueries(t *testing.T, file string) {
 
 	t.Run("distinct", func(t *testing.T) {
 		result := loadAndQuery(t, file, "distinct city")
-		if len(result.Rows) != 3 {
-			t.Errorf("expected 3 distinct cities, got %d", len(result.Rows))
+		if result.NumRows != 3 {
+			t.Errorf("expected 3 distinct cities, got %d", result.NumRows)
 		}
 	})
 
 	t.Run("count", func(t *testing.T) {
 		result := loadAndQuery(t, file, "count")
-		if result.Rows[0].Values[0].Int != 6 {
-			t.Errorf("expected count 6, got %d", result.Rows[0].Values[0].Int)
+		if result.GetAt(0, 0).Int != 6 {
+			t.Errorf("expected count 6, got %d", result.GetAt(0, 0).Int)
 		}
 	})
 }
@@ -128,8 +130,9 @@ func assertFlatQueriesSmall(t *testing.T, file string) {
 
 	t.Run("filter", func(t *testing.T) {
 		result := loadAndQuery(t, file, `filter { age > 25 }`)
-		for _, row := range result.Rows {
-			if row.Values[result.ColIndex("age")].Int <= 25 {
+		ageIdx := result.ColIndex("age")
+		for i := 0; i < result.NumRows; i++ {
+			if result.GetAt(i, ageIdx).Int <= 25 {
 				t.Error("filter did not exclude rows with age <= 25")
 			}
 		}
@@ -137,16 +140,16 @@ func assertFlatQueriesSmall(t *testing.T, file string) {
 
 	t.Run("count", func(t *testing.T) {
 		result := loadAndQuery(t, file, "count")
-		if result.Rows[0].Values[0].Int != 3 {
-			t.Errorf("expected count 3, got %d", result.Rows[0].Values[0].Int)
+		if result.GetAt(0, 0).Int != 3 {
+			t.Errorf("expected count 3, got %d", result.GetAt(0, 0).Int)
 		}
 	})
 
 	t.Run("sort_head", func(t *testing.T) {
 		result := loadAndQuery(t, file, "sorta age | head 1")
 		nameIdx := result.ColIndex("name")
-		if result.Rows[0].Values[nameIdx].Str != "Bob" {
-			t.Errorf("youngest should be Bob, got %q", result.Rows[0].Values[nameIdx].Str)
+		if result.GetAt(0, nameIdx).Str != "Bob" {
+			t.Errorf("youngest should be Bob, got %q", result.GetAt(0, nameIdx).Str)
 		}
 	})
 }
@@ -170,23 +173,23 @@ func assertNestedQueries(t *testing.T, file string) {
 
 	t.Run("filter_address_city", func(t *testing.T) {
 		result := loadAndQuery(t, file, `filter { address.city == "Chicago" }`)
-		if len(result.Rows) != 1 {
-			t.Fatalf("expected 1 row, got %d", len(result.Rows))
+		if result.NumRows != 1 {
+			t.Fatalf("expected 1 row, got %d", result.NumRows)
 		}
 		nameIdx := result.ColIndex("name")
-		if result.Rows[0].Values[nameIdx].Str != "Charlie" {
-			t.Errorf("expected Charlie, got %q", result.Rows[0].Values[nameIdx].Str)
+		if result.GetAt(0, nameIdx).Str != "Charlie" {
+			t.Errorf("expected Charlie, got %q", result.GetAt(0, nameIdx).Str)
 		}
 	})
 
 	t.Run("filter_deep_path", func(t *testing.T) {
 		result := loadAndQuery(t, file, "filter { profile.stats.logins > 10 }")
-		if len(result.Rows) != 1 {
-			t.Fatalf("expected 1 row, got %d", len(result.Rows))
+		if result.NumRows != 1 {
+			t.Fatalf("expected 1 row, got %d", result.NumRows)
 		}
 		nameIdx := result.ColIndex("name")
-		if result.Rows[0].Values[nameIdx].Str != "Alice" {
-			t.Errorf("expected Alice, got %q", result.Rows[0].Values[nameIdx].Str)
+		if result.GetAt(0, nameIdx).Str != "Alice" {
+			t.Errorf("expected Alice, got %q", result.GetAt(0, nameIdx).Str)
 		}
 	})
 
@@ -196,8 +199,9 @@ func assertNestedQueries(t *testing.T, file string) {
 			t.Fatalf("expected 2 columns, got %v", result.Columns)
 		}
 		wantCities := []string{"New York", "Los Angeles", "Chicago"}
+		cityIdx := result.ColIndex("city")
 		for i, want := range wantCities {
-			got := result.Rows[i].Values[result.ColIndex("city")].Str
+			got := result.GetAt(i, cityIdx).Str
 			if got != want {
 				t.Errorf("row %d city: want %q, got %q", i, want, got)
 			}
@@ -207,9 +211,9 @@ func assertNestedQueries(t *testing.T, file string) {
 	t.Run("transform_deep_score", func(t *testing.T) {
 		result := loadAndQuery(t, file, "transform score = profile.stats.score | select name score")
 		wantScores := []float64{9.5, 6.2, 0}
+		scoreIdx := result.ColIndex("score")
 		for i, want := range wantScores {
-			v := result.Rows[i].Values[result.ColIndex("score")]
-			got, _ := v.AsFloat()
+			got, _ := result.GetAt(i, scoreIdx).AsFloat()
 			if got != want {
 				t.Errorf("row %d score: want %v, got %v", i, want, got)
 			}
@@ -218,9 +222,10 @@ func assertNestedQueries(t *testing.T, file string) {
 
 	t.Run("missing_subfield_null", func(t *testing.T) {
 		result := loadAndQuery(t, file, "transform x = address.nonexistent | select name x")
-		for i, row := range result.Rows {
-			if !row.Values[result.ColIndex("x")].IsNull() {
-				t.Errorf("row %d: expected null for missing field, got %v", i, row.Values[result.ColIndex("x")])
+		xIdx := result.ColIndex("x")
+		for i := 0; i < result.NumRows; i++ {
+			if !result.GetAt(i, xIdx).IsNull() {
+				t.Errorf("row %d: expected null for missing field, got %v", i, result.GetAt(i, xIdx))
 			}
 		}
 	})
@@ -229,8 +234,9 @@ func assertNestedQueries(t *testing.T, file string) {
 		result := loadAndQuery(t, file, "transform city = address.city | sorta city | select name city")
 		// Chicago < Los Angeles < New York
 		wantOrder := []string{"Charlie", "Bob", "Alice"}
+		nameIdx := result.ColIndex("name")
 		for i, want := range wantOrder {
-			got := result.Rows[i].Values[result.ColIndex("name")].Str
+			got := result.GetAt(i, nameIdx).Str
 			if got != want {
 				t.Errorf("row %d: want %q, got %q", i, want, got)
 			}
@@ -268,7 +274,7 @@ func assertNestedDotPathOps(t *testing.T, file string) {
 		}
 		wantCities := []string{"New York", "Los Angeles", "Chicago"}
 		for i, want := range wantCities {
-			got := result.Rows[i].Values[1].Str
+			got := result.GetAt(i, 1).Str
 			if got != want {
 				t.Errorf("row %d: want %q, got %q", i, want, got)
 			}
@@ -294,12 +300,12 @@ func assertNestedDotPathOps(t *testing.T, file string) {
 			t.Errorf("col 1: expected 'address_city_2', got %q", result.Columns[1])
 		}
 		// First column should all be "test", second should be actual cities
-		for _, row := range result.Rows {
-			if row.Values[0].Str != "test" {
-				t.Errorf("col 0: expected 'test', got %q", row.Values[0].Str)
+		for i := 0; i < result.NumRows; i++ {
+			if result.GetAt(i, 0).Str != "test" {
+				t.Errorf("col 0: expected 'test', got %q", result.GetAt(i, 0).Str)
 			}
-			if row.Values[1].Str == "test" || row.Values[1].Str == "" {
-				t.Errorf("col 1: expected a real city, got %q", row.Values[1].Str)
+			if result.GetAt(i, 1).Str == "test" || result.GetAt(i, 1).Str == "" {
+				t.Errorf("col 1: expected a real city, got %q", result.GetAt(i, 1).Str)
 			}
 		}
 	})
@@ -309,8 +315,8 @@ func assertNestedDotPathOps(t *testing.T, file string) {
 		if result.Columns[0] != "address_city" {
 			t.Errorf("expected column name 'address_city', got %q", result.Columns[0])
 		}
-		if len(result.Rows) != 3 {
-			t.Fatalf("expected 3 groups, got %d", len(result.Rows))
+		if result.NumRows != 3 {
+			t.Fatalf("expected 3 groups, got %d", result.NumRows)
 		}
 	})
 }
@@ -329,4 +335,49 @@ func TestIntegrationNestedDotPathAvro(t *testing.T) {
 
 func TestIntegrationNestedDotPathParquet(t *testing.T) {
 	assertNestedDotPathOps(t, testdataDir+"/nested.parquet")
+}
+
+// ============================================================
+// Column type widening (mixed_types.csv)
+// ============================================================
+
+func TestIntegrationColumnTypeWidening(t *testing.T) {
+	// val column: 1 (int) → 2.5 (float) → "something" (string)
+	// After loading, the whole column must be TypeString and all three
+	// values must survive the round-trip through filter + select.
+	result := loadAndQuery(t, testdataDir+"/mixed_types.csv", "select id val")
+
+	if result.NumRows != 3 {
+		t.Fatalf("expected 3 rows, got %d", result.NumRows)
+	}
+
+	valIdx := result.ColIndex("val")
+	if valIdx < 0 {
+		t.Fatal("column 'val' not found")
+	}
+	if result.Col(valIdx).ColType() != table.TypeString {
+		t.Fatalf("expected column type String after widening, got %v", result.Col(valIdx).ColType())
+	}
+
+	want := []string{"1", "2.5", "something"}
+	for i, w := range want {
+		got := result.GetAt(i, valIdx)
+		if got.Type != table.TypeString {
+			t.Errorf("row %d: expected TypeString, got %v", i, got.Type)
+		}
+		if got.Str != w {
+			t.Errorf("row %d: want %q, got %q", i, w, got.Str)
+		}
+	}
+
+	t.Run("filter_on_widened_column", func(t *testing.T) {
+		// filter treats the widened string column as strings; only "something" != "1"/"2.5"
+		result := loadAndQuery(t, testdataDir+"/mixed_types.csv", `filter { val == "something" }`)
+		if result.NumRows != 1 {
+			t.Fatalf("expected 1 row, got %d", result.NumRows)
+		}
+		if result.GetAt(0, result.ColIndex("val")).Str != "something" {
+			t.Errorf("unexpected val: %q", result.GetAt(0, result.ColIndex("val")).Str)
+		}
+	})
 }

@@ -1,6 +1,7 @@
 package loader
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/razeghi71/dq/table"
@@ -55,8 +56,8 @@ func elem(t *testing.T, v table.Value, i int) table.Value {
 func checkUsersTable(t *testing.T, tbl *table.Table) {
 	t.Helper()
 
-	if len(tbl.Rows) != 6 {
-		t.Fatalf("expected 6 rows, got %d", len(tbl.Rows))
+	if tbl.NumRows != 6 {
+		t.Fatalf("expected 6 rows, got %d", tbl.NumRows)
 	}
 
 	nameIdx := tbl.ColIndex("name")
@@ -67,24 +68,22 @@ func checkUsersTable(t *testing.T, tbl *table.Table) {
 	}
 
 	// row 0: Alice, 30, NY
-	r0 := tbl.Rows[0]
-	if r0.Values[nameIdx].Type != table.TypeString || r0.Values[nameIdx].Str != "Alice" {
-		t.Errorf("row 0 name: want Alice, got %q", r0.Values[nameIdx].Str)
+	if tbl.GetAt(0, nameIdx).Type != table.TypeString || tbl.GetAt(0, nameIdx).Str != "Alice" {
+		t.Errorf("row 0 name: want Alice, got %q", tbl.GetAt(0, nameIdx).Str)
 	}
-	if r0.Values[ageIdx].Type != table.TypeInt || r0.Values[ageIdx].Int != 30 {
-		t.Errorf("row 0 age: want int 30, got %v", r0.Values[ageIdx].AsString())
+	if tbl.GetAt(0, ageIdx).Type != table.TypeInt || tbl.GetAt(0, ageIdx).Int != 30 {
+		t.Errorf("row 0 age: want int 30, got %v", tbl.GetAt(0, ageIdx).AsString())
 	}
-	if r0.Values[cityIdx].Str != "NY" {
-		t.Errorf("row 0 city: want NY, got %q", r0.Values[cityIdx].Str)
+	if tbl.GetAt(0, cityIdx).Str != "NY" {
+		t.Errorf("row 0 city: want NY, got %q", tbl.GetAt(0, cityIdx).Str)
 	}
 
 	// row 5: Frank, 40, NY
-	r5 := tbl.Rows[5]
-	if r5.Values[nameIdx].Str != "Frank" {
-		t.Errorf("row 5 name: want Frank, got %q", r5.Values[nameIdx].Str)
+	if tbl.GetAt(5, nameIdx).Str != "Frank" {
+		t.Errorf("row 5 name: want Frank, got %q", tbl.GetAt(5, nameIdx).Str)
 	}
-	if r5.Values[ageIdx].Int != 40 {
-		t.Errorf("row 5 age: want 40, got %d", r5.Values[ageIdx].Int)
+	if tbl.GetAt(5, ageIdx).Int != 40 {
+		t.Errorf("row 5 age: want 40, got %d", tbl.GetAt(5, ageIdx).Int)
 	}
 }
 
@@ -96,21 +95,69 @@ func TestLoadCSV(t *testing.T) {
 	checkUsersTable(t, tbl)
 }
 
+func TestCSVColumnTypeWideningIntFloat(t *testing.T) {
+	csv := "val\n1\n2.5\n3\n"
+	tbl, err := LoadReader(strings.NewReader(csv), "csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx := tbl.ColIndex("val")
+	if tbl.Col(idx).ColType() != table.TypeFloat {
+		t.Fatalf("expected column type Float, got %v", tbl.Col(idx).ColType())
+	}
+	want := []float64{1, 2.5, 3}
+	for i, w := range want {
+		got := tbl.GetAt(i, idx)
+		if got.Type != table.TypeFloat {
+			t.Errorf("row %d: expected TypeFloat, got %v", i, got.Type)
+		}
+		if got.Float != w {
+			t.Errorf("row %d: want %g, got %g", i, w, got.Float)
+		}
+	}
+}
+
+func TestCSVColumnTypeWidening(t *testing.T) {
+	// Column "val" goes int → float → string; all three rows must end up as strings.
+	csv := "val\n1\n2.5\nsomething\n"
+	tbl, err := LoadReader(strings.NewReader(csv), "csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tbl.NumRows != 3 {
+		t.Fatalf("expected 3 rows, got %d", tbl.NumRows)
+	}
+	idx := tbl.ColIndex("val")
+	if tbl.Col(idx).ColType() != table.TypeString {
+		t.Fatalf("expected column type String after widening, got %v", tbl.Col(idx).ColType())
+	}
+	want := []string{"1", "2.5", "something"}
+	for i, w := range want {
+		got := tbl.GetAt(i, idx)
+		if got.Type != table.TypeString {
+			t.Errorf("row %d: expected TypeString, got %v", i, got.Type)
+		}
+		if got.Str != w {
+			t.Errorf("row %d: want %q, got %q", i, w, got.Str)
+		}
+	}
+}
+
 func TestLoadUsersJSON(t *testing.T) {
 	tbl, err := Load(testdataDir+"/users.json", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// users.json has 3 rows only
-	if len(tbl.Rows) != 3 {
-		t.Fatalf("expected 3 rows, got %d", len(tbl.Rows))
+	if tbl.NumRows != 3 {
+		t.Fatalf("expected 3 rows, got %d", tbl.NumRows)
 	}
 	nameIdx := tbl.ColIndex("name")
-	if tbl.Rows[0].Values[nameIdx].Str != "Alice" {
-		t.Errorf("row 0: want Alice, got %q", tbl.Rows[0].Values[nameIdx].Str)
+	if tbl.GetAt(0, nameIdx).Str != "Alice" {
+		t.Errorf("row 0: want Alice, got %q", tbl.GetAt(0, nameIdx).Str)
 	}
-	if tbl.Rows[0].Values[tbl.ColIndex("age")].Int != 30 {
-		t.Errorf("Alice age: want 30, got %d", tbl.Rows[0].Values[tbl.ColIndex("age")].Int)
+	if tbl.GetAt(0, tbl.ColIndex("age")).Int != 30 {
+		t.Errorf("Alice age: want 30, got %d", tbl.GetAt(0, tbl.ColIndex("age")).Int)
 	}
 }
 
@@ -119,11 +166,11 @@ func TestLoadUsersJSONL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tbl.Rows) != 3 {
-		t.Fatalf("expected 3 rows, got %d", len(tbl.Rows))
+	if tbl.NumRows != 3 {
+		t.Fatalf("expected 3 rows, got %d", tbl.NumRows)
 	}
-	if tbl.Rows[2].Values[tbl.ColIndex("name")].Str != "Charlie" {
-		t.Errorf("row 2: want Charlie, got %q", tbl.Rows[2].Values[tbl.ColIndex("name")].Str)
+	if tbl.GetAt(2, tbl.ColIndex("name")).Str != "Charlie" {
+		t.Errorf("row 2: want Charlie, got %q", tbl.GetAt(2, tbl.ColIndex("name")).Str)
 	}
 }
 
@@ -156,8 +203,8 @@ func TestLoadUsersParquet(t *testing.T) {
 func checkNestedTable(t *testing.T, tbl *table.Table) {
 	t.Helper()
 
-	if len(tbl.Rows) != 3 {
-		t.Fatalf("expected 3 rows, got %d", len(tbl.Rows))
+	if tbl.NumRows != 3 {
+		t.Fatalf("expected 3 rows, got %d", tbl.NumRows)
 	}
 	for _, col := range []string{"id", "name", "address", "tags", "orders", "profile"} {
 		if tbl.ColIndex(col) < 0 {
@@ -173,17 +220,15 @@ func checkNestedTable(t *testing.T, tbl *table.Table) {
 	profileIdx := tbl.ColIndex("profile")
 
 	// ---- Row 0: Alice ----
-	alice := tbl.Rows[0].Values
-
-	if alice[idIdx].Int != 1 {
-		t.Errorf("Alice id: want 1, got %d", alice[idIdx].Int)
+	if tbl.GetAt(0, idIdx).Int != 1 {
+		t.Errorf("Alice id: want 1, got %d", tbl.GetAt(0, idIdx).Int)
 	}
-	if alice[nameIdx].Str != "Alice" {
-		t.Errorf("Alice name: want Alice, got %q", alice[nameIdx].Str)
+	if tbl.GetAt(0, nameIdx).Str != "Alice" {
+		t.Errorf("Alice name: want Alice, got %q", tbl.GetAt(0, nameIdx).Str)
 	}
 
 	// address is a record with city, street, zip
-	addr := alice[addressIdx]
+	addr := tbl.GetAt(0, addressIdx)
 	if addr.Type != table.TypeRecord {
 		t.Fatalf("address: want TypeRecord, got %v", addr.Type)
 	}
@@ -198,7 +243,7 @@ func checkNestedTable(t *testing.T, tbl *table.Table) {
 	}
 
 	// tags is a list of strings: ["admin", "user"]
-	tags := alice[tagsIdx]
+	tags := tbl.GetAt(0, tagsIdx)
 	if listLen(t, tags) != 2 {
 		t.Errorf("Alice tags len: want 2, got %d", listLen(t, tags))
 	}
@@ -210,7 +255,7 @@ func checkNestedTable(t *testing.T, tbl *table.Table) {
 	}
 
 	// orders is a list of 2 records
-	orders := alice[ordersIdx]
+	orders := tbl.GetAt(0, ordersIdx)
 	if listLen(t, orders) != 2 {
 		t.Errorf("Alice orders len: want 2, got %d", listLen(t, orders))
 	}
@@ -236,7 +281,7 @@ func checkNestedTable(t *testing.T, tbl *table.Table) {
 	}
 
 	// profile is a record with stats (record) and history (list)
-	profile := alice[profileIdx]
+	profile := tbl.GetAt(0, profileIdx)
 	if profile.Type != table.TypeRecord {
 		t.Fatalf("profile: want TypeRecord, got %v", profile.Type)
 	}
@@ -291,13 +336,11 @@ func checkNestedTable(t *testing.T, tbl *table.Table) {
 	}
 
 	// ---- Row 1: Bob ----
-	bob := tbl.Rows[1].Values
-
-	if bob[nameIdx].Str != "Bob" {
-		t.Errorf("row 1 name: want Bob, got %q", bob[nameIdx].Str)
+	if tbl.GetAt(1, nameIdx).Str != "Bob" {
+		t.Errorf("row 1 name: want Bob, got %q", tbl.GetAt(1, nameIdx).Str)
 	}
 
-	bobOrders := bob[ordersIdx]
+	bobOrders := tbl.GetAt(1, ordersIdx)
 	if listLen(t, bobOrders) != 1 {
 		t.Errorf("Bob orders len: want 1, got %d", listLen(t, bobOrders))
 	}
@@ -305,7 +348,7 @@ func checkNestedTable(t *testing.T, tbl *table.Table) {
 		t.Errorf("Bob orders[0].order_id: want 201, got %d", v.Int)
 	}
 
-	bobProfile := bob[profileIdx]
+	bobProfile := tbl.GetAt(1, profileIdx)
 	bobStats := fieldVal(t, bobProfile, "stats")
 	if v := fieldVal(t, bobStats, "logins"); v.Int != 7 {
 		t.Errorf("Bob stats.logins: want 7, got %d", v.Int)
@@ -323,19 +366,17 @@ func checkNestedTable(t *testing.T, tbl *table.Table) {
 	}
 
 	// ---- Row 2: Charlie ----
-	charlie := tbl.Rows[2].Values
-
-	if charlie[nameIdx].Str != "Charlie" {
-		t.Errorf("row 2 name: want Charlie, got %q", charlie[nameIdx].Str)
+	if tbl.GetAt(2, nameIdx).Str != "Charlie" {
+		t.Errorf("row 2 name: want Charlie, got %q", tbl.GetAt(2, nameIdx).Str)
 	}
 
 	// orders: empty
-	if listLen(t, charlie[ordersIdx]) != 0 {
-		t.Errorf("Charlie orders: want empty list, got len %d", listLen(t, charlie[ordersIdx]))
+	if listLen(t, tbl.GetAt(2, ordersIdx)) != 0 {
+		t.Errorf("Charlie orders: want empty list, got len %d", listLen(t, tbl.GetAt(2, ordersIdx)))
 	}
 
 	// tags: ["moderator", "user", "beta"]
-	charlieTags := charlie[tagsIdx]
+	charlieTags := tbl.GetAt(2, tagsIdx)
 	if listLen(t, charlieTags) != 3 {
 		t.Errorf("Charlie tags len: want 3, got %d", listLen(t, charlieTags))
 	}
@@ -344,7 +385,7 @@ func checkNestedTable(t *testing.T, tbl *table.Table) {
 	}
 
 	// profile.history: empty
-	charlieProfile := charlie[profileIdx]
+	charlieProfile := tbl.GetAt(2, profileIdx)
 	charlieHistory := fieldVal(t, charlieProfile, "history")
 	if listLen(t, charlieHistory) != 0 {
 		t.Errorf("Charlie history: want empty list, got len %d", listLen(t, charlieHistory))

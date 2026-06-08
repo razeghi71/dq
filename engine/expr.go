@@ -11,8 +11,8 @@ import (
 
 // EvalContext provides column lookup for expression evaluation.
 type EvalContext struct {
-	Table *table.Table
-	Row   *table.Row
+	Table  *table.Table
+	RowIdx int
 }
 
 // Eval evaluates an expression against a row context.
@@ -53,7 +53,7 @@ func evalLiteral(e *ast.LiteralExpr) table.Value {
 }
 
 func evalColumn(e *ast.ColumnExpr, ctx *EvalContext) (table.Value, error) {
-	return resolveColumnPath(e.Path, ctx.Table, ctx.Row)
+	return resolveColumnPath(e.Path, ctx.Table, ctx.RowIdx)
 }
 
 func evalBinary(e *ast.BinaryExpr, ctx *EvalContext) (table.Value, error) {

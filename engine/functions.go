@@ -234,7 +234,7 @@ func EvalAggregate(expr ast.Expr, nested *table.Table) (table.Value, error) {
 	case *ast.FuncCallExpr:
 		switch e.Name {
 		case "count":
-			return table.IntVal(int64(len(nested.Rows))), nil
+			return table.IntVal(int64(nested.NumRows)), nil
 		case "sum":
 			return aggSum(e, nested)
 		case "avg":
@@ -280,16 +280,17 @@ func getColValues(e *ast.FuncCallExpr, nested *table.Table) ([]table.Value, erro
 	if !ok {
 		return nil, fmt.Errorf("%s() argument must be a column reference", e.Name)
 	}
-	if len(nested.Rows) == 0 {
+	if nested.NumRows == 0 {
 		return nil, nil
 	}
 	idx := nested.ColIndex(colExpr.Path[0])
 	if idx < 0 {
 		return nil, fmt.Errorf("%s(): column %q not found in nested table", e.Name, colExpr.Path[0])
 	}
-	vals := make([]table.Value, len(nested.Rows))
-	for i, r := range nested.Rows {
-		vals[i] = r.Values[idx]
+	col := nested.Col(idx)
+	vals := make([]table.Value, nested.NumRows)
+	for i := range vals {
+		vals[i] = col.Get(i)
 	}
 	return vals, nil
 }

@@ -39,15 +39,11 @@ func writeTable(w io.Writer, t *table.Table) error {
 		widths[i] = len(col)
 	}
 
-	cells := make([][]string, len(t.Rows))
-	for i, row := range t.Rows {
+	cells := make([][]string, t.NumRows)
+	for i := 0; i < t.NumRows; i++ {
 		cells[i] = make([]string, len(t.Columns))
 		for j := range t.Columns {
-			if j < len(row.Values) {
-				cells[i][j] = row.Values[j].AsString()
-			} else {
-				cells[i][j] = "null"
-			}
+			cells[i][j] = t.Col(j).Get(i).AsString()
 			if len(cells[i][j]) > widths[j] {
 				widths[j] = len(cells[i][j])
 			}
@@ -96,16 +92,14 @@ func writeCSV(w io.Writer, t *table.Table) error {
 		return err
 	}
 
-	for _, row := range t.Rows {
+	for i := 0; i < t.NumRows; i++ {
 		record := make([]string, len(t.Columns))
 		for j := range t.Columns {
-			if j < len(row.Values) {
-				v := row.Values[j]
-				if v.IsNull() {
-					record[j] = ""
-				} else {
-					record[j] = v.AsString()
-				}
+			v := t.Col(j).Get(i)
+			if v.IsNull() {
+				record[j] = ""
+			} else {
+				record[j] = v.AsString()
 			}
 		}
 		if err := cw.Write(record); err != nil {
@@ -118,15 +112,11 @@ func writeCSV(w io.Writer, t *table.Table) error {
 // --- JSON ---
 
 func writeJSON(w io.Writer, t *table.Table) error {
-	rows := make([]map[string]interface{}, len(t.Rows))
-	for i, row := range t.Rows {
+	rows := make([]map[string]interface{}, t.NumRows)
+	for i := 0; i < t.NumRows; i++ {
 		obj := make(map[string]interface{}, len(t.Columns))
 		for j, col := range t.Columns {
-			if j < len(row.Values) {
-				obj[col] = valueToJSON(row.Values[j])
-			} else {
-				obj[col] = nil
-			}
+			obj[col] = valueToJSON(t.Col(j).Get(i))
 		}
 		rows[i] = obj
 	}
@@ -140,14 +130,10 @@ func writeJSON(w io.Writer, t *table.Table) error {
 
 func writeJSONL(w io.Writer, t *table.Table) error {
 	enc := json.NewEncoder(w)
-	for _, row := range t.Rows {
+	for i := 0; i < t.NumRows; i++ {
 		obj := make(map[string]interface{}, len(t.Columns))
 		for j, col := range t.Columns {
-			if j < len(row.Values) {
-				obj[col] = valueToJSON(row.Values[j])
-			} else {
-				obj[col] = nil
-			}
+			obj[col] = valueToJSON(t.Col(j).Get(i))
 		}
 		if err := enc.Encode(obj); err != nil {
 			return err

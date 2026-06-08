@@ -24,7 +24,8 @@ type RecordField struct {
 	Value Value
 }
 
-// Value is a dynamically-typed cell in a table.
+// Value is a dynamically-typed cell used during computation.
+// It is NOT used for table storage; Table stores data in typed Column slices.
 type Value struct {
 	Type   ValueType
 	Int    int64
@@ -158,7 +159,6 @@ func ListToTable(v Value) (*Table, error) {
 			return nil, fmt.Errorf("list element is not a TypeRecord")
 		}
 		vals := make([]Value, len(columns))
-		// build index from field name -> position in columns
 		for j, col := range columns {
 			found := false
 			for _, f := range elem.Fields {
@@ -177,23 +177,187 @@ func ListToTable(v Value) (*Table, error) {
 	return t, nil
 }
 
-// Row is a single row in a table, mapping column index to value.
-type Row struct {
-	Values []Value
+// Column stores all values for one column as a typed slice plus a null bitmap.
+// The Type field records the inferred type; TypeNull means no non-null data has
+// been appended yet. Only the slice matching Type is populated.
+type Column struct {
+	name    string
+	typ     ValueType
+	nulls   []bool          // true = null at that row index
+	ints    []int64         // TypeInt
+	floats  []float64       // TypeFloat
+	strs    []string        // TypeString
+	bools   []bool          // TypeBool
+	lists   [][]Value       // TypeList
+	records [][]RecordField // TypeRecord
 }
 
-// Table is the core data structure: columns + rows.
-type Table struct {
-	Columns []string
-	Rows    []Row
-}
-
-// NewTable creates an empty table with the given columns.
-func NewTable(columns []string) *Table {
-	return &Table{
-		Columns: columns,
-		Rows:    nil,
+// Get materializes a Value for row i (used during computation).
+func (c *Column) Get(i int) Value {
+	if i < 0 || i >= len(c.nulls) || c.nulls[i] {
+		return Null()
 	}
+	switch c.typ {
+	case TypeInt:
+		return IntVal(c.ints[i])
+	case TypeFloat:
+		return FloatVal(c.floats[i])
+	case TypeString:
+		return StrVal(c.strs[i])
+	case TypeBool:
+		return BoolVal(c.bools[i])
+	case TypeList:
+		return ListVal(c.lists[i])
+	case TypeRecord:
+		return RecordVal(c.records[i])
+	default:
+		return Null()
+	}
+}
+
+// Append adds a value to the column, widening the column type if necessary.
+func (c *Column) Append(v Value) {
+	if v.Type == TypeNull {
+		c.appendNull()
+		return
+	}
+	newType := widenType(c.typ, v.Type)
+	if newType != c.typ {
+		c.convertTo(newType)
+	}
+	c.nulls = append(c.nulls, false)
+	switch c.typ {
+	case TypeInt:
+		c.ints = append(c.ints, v.Int)
+	case TypeFloat:
+		f, _ := v.AsFloat()
+		c.floats = append(c.floats, f)
+	case TypeString:
+		c.strs = append(c.strs, v.Str)
+	case TypeBool:
+		c.bools = append(c.bools, v.Bool)
+	case TypeList:
+		c.lists = append(c.lists, v.List)
+	case TypeRecord:
+		c.records = append(c.records, v.Fields)
+	}
+}
+
+func (c *Column) appendNull() {
+	c.nulls = append(c.nulls, true)
+	// keep typed slice length in sync (TypeNull has no slice yet)
+	switch c.typ {
+	case TypeInt:
+		c.ints = append(c.ints, 0)
+	case TypeFloat:
+		c.floats = append(c.floats, 0)
+	case TypeString:
+		c.strs = append(c.strs, "")
+	case TypeBool:
+		c.bools = append(c.bools, false)
+	case TypeList:
+		c.lists = append(c.lists, nil)
+	case TypeRecord:
+		c.records = append(c.records, nil)
+	}
+}
+
+// widenType returns the type that can represent both existing and incoming.
+func widenType(existing, incoming ValueType) ValueType {
+	if existing == TypeNull {
+		return incoming
+	}
+	if existing == incoming {
+		return existing
+	}
+	if (existing == TypeInt && incoming == TypeFloat) || (existing == TypeFloat && incoming == TypeInt) {
+		return TypeFloat
+	}
+	return TypeString
+}
+
+// convertTo changes the column's storage type, converting existing data in-place.
+func (c *Column) convertTo(newType ValueType) {
+	n := len(c.nulls)
+	oldType := c.typ
+
+	switch newType {
+	case TypeInt:
+		c.ints = make([]int64, n)
+	case TypeFloat:
+		newFloats := make([]float64, n)
+		if oldType == TypeInt {
+			for i, v := range c.ints {
+				newFloats[i] = float64(v)
+			}
+			c.ints = nil
+		}
+		c.floats = newFloats
+	case TypeString:
+		newStrs := make([]string, n)
+		for i := range c.nulls {
+			if !c.nulls[i] {
+				switch oldType {
+				case TypeInt:
+					newStrs[i] = fmt.Sprintf("%d", c.ints[i])
+				case TypeFloat:
+					newStrs[i] = fmt.Sprintf("%g", c.floats[i])
+				case TypeBool:
+					if c.bools[i] {
+						newStrs[i] = "true"
+					} else {
+						newStrs[i] = "false"
+					}
+				case TypeList:
+					newStrs[i] = ListVal(c.lists[i]).AsString()
+				case TypeRecord:
+					newStrs[i] = RecordVal(c.records[i]).AsString()
+				}
+			}
+		}
+		c.strs = newStrs
+		c.ints = nil
+		c.floats = nil
+		c.bools = nil
+		c.lists = nil
+		c.records = nil
+	case TypeBool:
+		c.bools = make([]bool, n)
+	case TypeList:
+		c.lists = make([][]Value, n)
+	case TypeRecord:
+		c.records = make([][]RecordField, n)
+	}
+	c.typ = newType
+}
+
+// Len returns the number of rows in this column.
+func (c *Column) Len() int { return len(c.nulls) }
+
+// ColType returns the column's ValueType.
+func (c *Column) ColType() ValueType { return c.typ }
+
+// ColName returns the column's name.
+func (c *Column) ColName() string { return c.name }
+
+// Table is the core data structure: named columns with per-column typed storage.
+type Table struct {
+	Columns []string  // column names (kept exported for backward compat)
+	cols    []*Column // typed column storage (one per column)
+	NumRows int
+}
+
+// NewTable creates an empty table with the given column names.
+func NewTable(columns []string) *Table {
+	t := &Table{
+		Columns: make([]string, len(columns)),
+		cols:    make([]*Column, len(columns)),
+	}
+	copy(t.Columns, columns)
+	for i, name := range columns {
+		t.cols[i] = &Column{name: name, typ: TypeNull}
+	}
+	return t
 }
 
 // ColIndex returns the index of a column by name, or -1.
@@ -206,57 +370,235 @@ func (t *Table) ColIndex(name string) int {
 	return -1
 }
 
-// AddRow appends a row to the table.
+// Col returns the Column at index i, or nil if out of range.
+func (t *Table) Col(i int) *Column {
+	if i < 0 || i >= len(t.cols) {
+		return nil
+	}
+	return t.cols[i]
+}
+
+// AddRow appends a row, distributing values to typed column slices.
+// If values is shorter than the number of columns, remaining columns get null.
 func (t *Table) AddRow(values []Value) {
-	t.Rows = append(t.Rows, Row{Values: values})
+	for i, col := range t.cols {
+		if i < len(values) {
+			col.Append(values[i])
+		} else {
+			col.Append(Null())
+		}
+	}
+	t.NumRows++
+}
+
+// GetAt returns the Value at row row, column col (by index).
+func (t *Table) GetAt(row, col int) Value {
+	if col < 0 || col >= len(t.cols) || row < 0 || row >= t.NumRows {
+		return Null()
+	}
+	return t.cols[col].Get(row)
 }
 
 // Get returns the value at a given row and column name.
 func (t *Table) Get(row int, col string) Value {
-	idx := t.ColIndex(col)
-	if idx < 0 || row < 0 || row >= len(t.Rows) {
-		return Null()
-	}
-	return t.Rows[row].Values[idx]
+	return t.GetAt(row, t.ColIndex(col))
 }
 
-// Clone creates a deep copy of the table structure (shares Value data).
-func (t *Table) Clone() *Table {
-	cols := make([]string, len(t.Columns))
-	copy(cols, t.Columns)
-	rows := make([]Row, len(t.Rows))
-	for i, r := range t.Rows {
-		vals := make([]Value, len(r.Values))
-		copy(vals, r.Values)
-		rows[i] = Row{Values: vals}
+// SliceRows returns a new Table containing only rows [from, to).
+// Column data is copied (not shared).
+func (t *Table) SliceRows(from, to int) *Table {
+	if from < 0 {
+		from = 0
 	}
-	return &Table{Columns: cols, Rows: rows}
+	if to > t.NumRows {
+		to = t.NumRows
+	}
+	result := &Table{
+		Columns: make([]string, len(t.Columns)),
+		cols:    make([]*Column, len(t.cols)),
+		NumRows: to - from,
+	}
+	copy(result.Columns, t.Columns)
+	for i, c := range t.cols {
+		result.cols[i] = sliceColumn(c, from, to)
+	}
+	return result
+}
+
+func sliceColumn(c *Column, from, to int) *Column {
+	n := to - from
+	nc := &Column{name: c.name, typ: c.typ, nulls: make([]bool, n)}
+	copy(nc.nulls, c.nulls[from:to])
+	switch c.typ {
+	case TypeInt:
+		nc.ints = make([]int64, n)
+		copy(nc.ints, c.ints[from:to])
+	case TypeFloat:
+		nc.floats = make([]float64, n)
+		copy(nc.floats, c.floats[from:to])
+	case TypeString:
+		nc.strs = make([]string, n)
+		copy(nc.strs, c.strs[from:to])
+	case TypeBool:
+		nc.bools = make([]bool, n)
+		copy(nc.bools, c.bools[from:to])
+	case TypeList:
+		nc.lists = make([][]Value, n)
+		copy(nc.lists, c.lists[from:to])
+	case TypeRecord:
+		nc.records = make([][]RecordField, n)
+		copy(nc.records, c.records[from:to])
+	}
+	return nc
+}
+
+// ApplyPermutation returns a new Table with rows reordered by perm.
+func (t *Table) ApplyPermutation(perm []int) *Table {
+	n := len(perm)
+	result := &Table{
+		Columns: make([]string, len(t.Columns)),
+		cols:    make([]*Column, len(t.cols)),
+		NumRows: n,
+	}
+	copy(result.Columns, t.Columns)
+	for i, c := range t.cols {
+		result.cols[i] = permuteColumn(c, perm)
+	}
+	return result
+}
+
+func permuteColumn(c *Column, perm []int) *Column {
+	n := len(perm)
+	nc := &Column{name: c.name, typ: c.typ, nulls: make([]bool, n)}
+	for i, p := range perm {
+		nc.nulls[i] = c.nulls[p]
+	}
+	switch c.typ {
+	case TypeInt:
+		nc.ints = make([]int64, n)
+		for i, p := range perm {
+			nc.ints[i] = c.ints[p]
+		}
+	case TypeFloat:
+		nc.floats = make([]float64, n)
+		for i, p := range perm {
+			nc.floats[i] = c.floats[p]
+		}
+	case TypeString:
+		nc.strs = make([]string, n)
+		for i, p := range perm {
+			nc.strs[i] = c.strs[p]
+		}
+	case TypeBool:
+		nc.bools = make([]bool, n)
+		for i, p := range perm {
+			nc.bools[i] = c.bools[p]
+		}
+	case TypeList:
+		nc.lists = make([][]Value, n)
+		for i, p := range perm {
+			nc.lists[i] = c.lists[p]
+		}
+	case TypeRecord:
+		nc.records = make([][]RecordField, n)
+		for i, p := range perm {
+			nc.records[i] = c.records[p]
+		}
+	}
+	return nc
+}
+
+// SelectCols returns a new Table with only the specified column indices (data shared).
+// Used by execRemove and similar operations that don't need a data copy.
+func (t *Table) SelectCols(indices []int, names []string) *Table {
+	result := &Table{
+		Columns: make([]string, len(indices)),
+		cols:    make([]*Column, len(indices)),
+		NumRows: t.NumRows,
+	}
+	copy(result.Columns, names)
+	for i, idx := range indices {
+		result.cols[i] = t.cols[idx]
+	}
+	return result
+}
+
+// ShallowClone returns a new Table with the same column data but new column names.
+// Column data pointers are shared -- use only when the result's data won't be mutated.
+func (t *Table) ShallowClone(newColNames []string) *Table {
+	result := &Table{
+		Columns: make([]string, len(newColNames)),
+		cols:    make([]*Column, len(t.cols)),
+		NumRows: t.NumRows,
+	}
+	copy(result.Columns, newColNames)
+	copy(result.cols, t.cols)
+	return result
+}
+
+// Clone creates a deep copy of the table.
+func (t *Table) Clone() *Table {
+	result := &Table{
+		Columns: make([]string, len(t.Columns)),
+		cols:    make([]*Column, len(t.cols)),
+		NumRows: t.NumRows,
+	}
+	copy(result.Columns, t.Columns)
+	for i, c := range t.cols {
+		result.cols[i] = cloneColumn(c)
+	}
+	return result
+}
+
+func cloneColumn(c *Column) *Column {
+	n := c.Len()
+	nc := &Column{name: c.name, typ: c.typ, nulls: make([]bool, n)}
+	copy(nc.nulls, c.nulls)
+	switch c.typ {
+	case TypeInt:
+		nc.ints = make([]int64, n)
+		copy(nc.ints, c.ints)
+	case TypeFloat:
+		nc.floats = make([]float64, n)
+		copy(nc.floats, c.floats)
+	case TypeString:
+		nc.strs = make([]string, n)
+		copy(nc.strs, c.strs)
+	case TypeBool:
+		nc.bools = make([]bool, n)
+		copy(nc.bools, c.bools)
+	case TypeList:
+		nc.lists = make([][]Value, n)
+		copy(nc.lists, c.lists)
+	case TypeRecord:
+		nc.records = make([][]RecordField, n)
+		copy(nc.records, c.records)
+	}
+	return nc
 }
 
 // String returns a compact representation of the table.
 func (t *Table) String() string {
-	if len(t.Rows) == 0 {
+	if t.NumRows == 0 {
 		return "[" + strings.Join(t.Columns, ", ") + "] (0 rows)"
 	}
-
 	var sb strings.Builder
 	sb.WriteString("[ ")
-	for i, r := range t.Rows {
+	for i := 0; i < t.NumRows; i++ {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
 		sb.WriteString("{")
-		for j, v := range r.Values {
+		for j, col := range t.Columns {
 			if j > 0 {
 				sb.WriteString(", ")
 			}
-			sb.WriteString(t.Columns[j])
+			sb.WriteString(col)
 			sb.WriteString(":")
-			sb.WriteString(v.AsString())
+			sb.WriteString(t.cols[j].Get(i).AsString())
 		}
 		sb.WriteString("}")
 	}
 	sb.WriteString(" ]")
 	return sb.String()
 }
-

@@ -221,6 +221,10 @@ dq -o jsonl 'users.csv | select name age' > out.jsonl   # one JSON object per li
 
 CSV (`.csv`), JSON (`.json`), JSONL (`.jsonl`), Avro (`.avro`), Parquet (`.parquet`)
 
+### CSV type inference
+
+CSV cells are parsed as int, float, bool, or string. When a column contains mixed numeric types, it widens automatically: `int` + `float` stays float; adding a string widens the whole column to string (e.g. `1`, `2.5`, `something` all become strings). Once widened to string, use quoted literals in filters (`val == "1"`) rather than numeric comparisons (`val > 1`).
+
 ## License
 
 MIT
