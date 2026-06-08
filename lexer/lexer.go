@@ -49,6 +49,7 @@ const (
 	// Identifiers
 	TokenIdent         // plain identifier (column name, op name)
 	TokenBacktickIdent // `identifier with spaces`
+	TokenStdin         // - (stdin source sentinel)
 
 	// End
 	TokenEOF
@@ -62,7 +63,7 @@ var tokenNames = map[TokenType]string{
 	TokenAnd: "and", TokenOr: "or", TokenNot: "not", TokenIs: "is",
 	TokenTrue: "true", TokenFalse: "false", TokenNull: "null", TokenAs: "as",
 	TokenInt: "INT", TokenFloat: "FLOAT", TokenString: "STRING",
-	TokenIdent: "IDENT", TokenBacktickIdent: "BACKTICK_IDENT", TokenEOF: "EOF",
+	TokenIdent: "IDENT", TokenBacktickIdent: "BACKTICK_IDENT", TokenStdin: "STDIN", TokenEOF: "EOF",
 }
 
 func (t TokenType) String() string {
@@ -95,7 +96,7 @@ var keywords = map[string]TokenType{
 }
 
 // Lexer is a stateful tokenizer that supports both normal tokenization
-// via Next() and greedy filename scanning via ScanFilename().
+// via Next() and greedy source scanning via ScanSource().
 type Lexer struct {
 	runes   []rune
 	pos     int
@@ -260,10 +261,10 @@ func (l *Lexer) Next() (Token, error) {
 	return Token{TokenEOF, "", len(l.runes)}, nil
 }
 
-// ScanFilename reads a filename token greedily. It consumes all characters
-// that are not whitespace and not '|'. Quoted and backtick-quoted filenames
-// are also supported.
-func (l *Lexer) ScanFilename() (Token, error) {
+// ScanSource reads the query source token: a lone '-' (stdin), a filename,
+// or a quoted/backtick-quoted path. Unquoted filenames consume all characters
+// that are not whitespace and not '|'.
+func (l *Lexer) ScanSource() (Token, error) {
 	// Skip whitespace
 	for l.pos < len(l.runes) && unicode.IsSpace(l.runes[l.pos]) {
 		l.pos++
@@ -297,6 +298,18 @@ func (l *Lexer) ScanFilename() (Token, error) {
 		l.prevSet = true
 		l.prev = TokenIdent
 		return Token{TokenIdent, tok.Val, tok.Pos}, nil
+	}
+
+	// Lone '-' means stdin (not a hyphenated filename prefix).
+	if ch == '-' {
+		next := l.pos + 1
+		if next >= len(l.runes) || unicode.IsSpace(l.runes[next]) || l.runes[next] == '|' {
+			pos := l.pos
+			l.pos = next
+			l.prevSet = true
+			l.prev = TokenStdin
+			return Token{TokenStdin, "-", pos}, nil
+		}
 	}
 
 	// Unquoted: consume all non-whitespace, non-pipe characters

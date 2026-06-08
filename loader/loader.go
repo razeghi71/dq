@@ -17,6 +17,30 @@ import (
 	"github.com/razeghi71/dq/table"
 )
 
+// StdinSource is the query source sentinel for reading from stdin.
+const StdinSource = "-"
+
+// IsStdin reports whether filename denotes stdin.
+func IsStdin(filename string) bool {
+	return filename == StdinSource
+}
+
+// LoadInput reads from filename or from stdin when filename is "-".
+// When reading from stdin, format must be set (csv, json, or jsonl).
+// Pass nil for stdin to use os.Stdin.
+func LoadInput(filename, format string, stdin io.Reader) (*table.Table, error) {
+	if IsStdin(filename) {
+		if format == "" {
+			return nil, fmt.Errorf("reading from stdin requires -f format (csv, json, jsonl)")
+		}
+		if stdin == nil {
+			stdin = os.Stdin
+		}
+		return LoadReader(stdin, format)
+	}
+	return Load(filename, format)
+}
+
 // Load reads a file and returns a Table. If format is non-empty it overrides
 // the file extension; otherwise the extension is used. An error is returned if
 // neither provides a recognisable format.

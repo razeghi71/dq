@@ -22,6 +22,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: dq [-f format] [-o output] '<query>'")
 		fmt.Fprintln(os.Stderr, "example: dq 'users.csv | filter { age > 20 } | select name age'")
 		fmt.Fprintln(os.Stderr, "         dq -o csv 'users.json | select name age'")
+		fmt.Fprintln(os.Stderr, "         dq -f csv '- | filter { age > 20 }'")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -39,8 +40,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Load the source file
-	input, err := loader.Load(q.Source.Filename, format)
+	// Load the source file or stdin
+	input, err := loader.LoadInput(q.Source.Filename, format, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "load error: %v\n", err)
 		os.Exit(1)

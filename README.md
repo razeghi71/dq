@@ -40,6 +40,17 @@ dq 'file.csv | operation1 | operation2 | ...'
 
 Wrap queries in single quotes so your shell doesn't interpret `|`, `{`, `}`, or `>`.
 
+### Reading from stdin
+
+Use `-` as the source to read from a pipe. The `-f` flag is required (csv, json, or jsonl):
+
+```bash
+cat users.csv | dq -f csv '- | filter { age > 25 } | select name'
+curl -s https://api.example.com/users | dq -f json '- | head 10'
+```
+
+Avro and Parquet are not supported on stdin (they require seekable files).
+
 ## Operations
 
 ### `head` / `tail` - Get rows from the start or end

@@ -96,14 +96,21 @@ func (p *Parser) parseQuery() (*ast.Query, error) {
 func (p *Parser) parseSource() (*ast.SourceOp, error) {
 	// Clear any buffered tokens
 	p.buf = nil
-	tok, err := p.lexer.ScanFilename()
+	tok, err := p.lexer.ScanSource()
 	if err != nil {
 		return nil, err
 	}
-	if tok.Val == "" {
+	switch tok.Type {
+	case lexer.TokenStdin:
+		return &ast.SourceOp{Filename: "-"}, nil
+	case lexer.TokenIdent:
+		if tok.Val == "" {
+			return nil, fmt.Errorf("expected filename at position %d", tok.Pos)
+		}
+		return &ast.SourceOp{Filename: tok.Val}, nil
+	default:
 		return nil, fmt.Errorf("expected filename at position %d", tok.Pos)
 	}
-	return &ast.SourceOp{Filename: tok.Val}, nil
 }
 
 func (p *Parser) parseOp() (ast.Op, error) {

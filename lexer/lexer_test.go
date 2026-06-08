@@ -123,6 +123,35 @@ func TestLexStringEscape(t *testing.T) {
 	}
 }
 
+func TestScanSourceStdin(t *testing.T) {
+	l := NewLexer("- | head 10")
+	tok, err := l.ScanSource()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Type != TokenStdin || tok.Val != "-" {
+		t.Errorf("expected STDIN '-', got %s %q", tok.Type, tok.Val)
+	}
+	tok, err = l.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Type != TokenPipe {
+		t.Errorf("expected pipe after stdin, got %s", tok.Type)
+	}
+}
+
+func TestScanSourceHyphenatedFilename(t *testing.T) {
+	l := NewLexer("my-file.csv | head")
+	tok, err := l.ScanSource()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Type != TokenIdent || tok.Val != "my-file.csv" {
+		t.Errorf("expected IDENT my-file.csv, got %s %q", tok.Type, tok.Val)
+	}
+}
+
 func TestLexComment(t *testing.T) {
 	tokens, err := Lex("age // this is a comment\n+ 5")
 	if err != nil {

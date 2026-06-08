@@ -322,6 +322,30 @@ func TestParseHeadDefaultTailExplicit(t *testing.T) {
 	}
 }
 
+func TestParseStdinSource(t *testing.T) {
+	q, err := Parse("- | head 10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Source.Filename != "-" {
+		t.Errorf("expected '-', got %q", q.Source.Filename)
+	}
+	head, ok := q.Ops[0].(*ast.HeadOp)
+	if !ok || head.N != 10 {
+		t.Errorf("expected head 10, got %v", q.Ops[0])
+	}
+}
+
+func TestParseStdinNotAlias(t *testing.T) {
+	q, err := Parse("stdin | head 10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Source.Filename != "stdin" {
+		t.Errorf("expected 'stdin' as file path, got %q", q.Source.Filename)
+	}
+}
+
 func TestParseFilenameEmpty(t *testing.T) {
 	_, err := Parse("| head 10")
 	if err == nil {

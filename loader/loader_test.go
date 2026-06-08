@@ -1,6 +1,7 @@
 package loader
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -93,6 +94,66 @@ func TestLoadCSV(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkUsersTable(t, tbl)
+}
+
+func TestLoadInputStdinRequiresFormat(t *testing.T) {
+	_, err := LoadInput("-", "", strings.NewReader("a\n1\n"))
+	if err == nil {
+		t.Fatal("expected error when -f is missing for stdin")
+	}
+	if !strings.Contains(err.Error(), "-f") {
+		t.Errorf("expected -f in error, got %v", err)
+	}
+}
+
+func TestLoadInputStdinUnsupportedFormat(t *testing.T) {
+	_, err := LoadInput("-", "parquet", strings.NewReader("data"))
+	if err == nil {
+		t.Fatal("expected error for parquet on stdin")
+	}
+	if !strings.Contains(err.Error(), "unsupported") {
+		t.Errorf("expected unsupported format error, got %v", err)
+	}
+}
+
+func TestLoadInputStdinCSV(t *testing.T) {
+	data, err := os.ReadFile(testdataDir + "/users.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tbl, err := LoadInput("-", "csv", strings.NewReader(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkUsersTable(t, tbl)
+}
+
+func TestLoadInputStdinJSON(t *testing.T) {
+	data, err := os.ReadFile(testdataDir + "/users.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tbl, err := LoadInput("-", "json", strings.NewReader(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tbl.NumRows != 3 {
+		t.Fatalf("expected 3 rows, got %d", tbl.NumRows)
+	}
+}
+
+func TestLoadInputStdinJSONL(t *testing.T) {
+	data, err := os.ReadFile(testdataDir + "/users.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tbl, err := LoadInput("-", "jsonl", strings.NewReader(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tbl.NumRows != 3 {
+		t.Fatalf("expected 3 rows, got %d", tbl.NumRows)
+	}
 }
 
 func TestCSVColumnTypeWideningIntFloat(t *testing.T) {

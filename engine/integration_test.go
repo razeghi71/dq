@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/razeghi71/dq/loader"
@@ -380,4 +382,34 @@ func TestIntegrationColumnTypeWidening(t *testing.T) {
 			t.Errorf("unexpected val: %q", result.GetAt(0, result.ColIndex("val")).Str)
 		}
 	})
+}
+
+// ============================================================
+// Stdin source (-)
+// ============================================================
+
+func TestIntegrationStdinPipeline(t *testing.T) {
+	data, err := os.ReadFile(testdataDir + "/users.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tbl, err := loader.LoadInput("-", "csv", strings.NewReader(string(data)))
+	if err != nil {
+		t.Fatalf("load stdin: %v", err)
+	}
+
+	q, err := parser.Parse(`- | filter { age > 25 }`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	result, err := Execute(q, tbl)
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+
+	if result.NumRows != 4 {
+		t.Fatalf("expected 4 rows with age > 25, got %d", result.NumRows)
+	}
 }
