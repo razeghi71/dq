@@ -3,7 +3,7 @@
 Query CSV, JSON, Avro, and Parquet files from the command line. Pipe operations together, like `jq` but for tables.
 
 ```bash
-dq 'users.csv | filter { age > 25 } | select name city | sorta name'
+dq 'users.csv | filter { age > 25 } | select name city | sort name'
 dq -o csv 'users.json | filter { age > 25 }' > filtered.csv
 ```
 
@@ -85,12 +85,15 @@ dq 'users.csv | filter { email is not null }'
 dq 'data.json | filter { address.city == "NY" }'    # nested field access
 ```
 
-### `sorta` / `sortd` - Sort rows ascending or descending
+### `sort` - Sort rows
+
+Ascending by default. Prefix a column with `-` to sort it descending. Mix directions across multiple columns in one `sort`.
 
 ```bash
-dq 'users.csv | sorta age'          # youngest first
-dq 'users.csv | sortd age'          # oldest first
-dq 'users.csv | sorta city age'     # sort by city, then age
+dq 'users.csv | sort age'           # youngest first (ascending)
+dq 'users.csv | sort -age'          # oldest first (descending)
+dq 'users.csv | sort city age'      # city ascending, then age ascending
+dq 'users.csv | sort city -age'     # city ascending, then age descending
 ```
 
 ### `count` - Count how many rows
@@ -179,7 +182,7 @@ dq 'orders.parquet | reduce orders total = sum(amount), n = count()'
 dq 'users.csv | group city | reduce avg_age = avg(age) | remove grouped'
 
 # total revenue per category, top 3
-dq 'sales.csv | group category | reduce total = sum(price), n = count() | remove grouped | sortd total | head 3'
+dq 'sales.csv | group category | reduce total = sum(price), n = count() | remove grouped | sort -total | head 3'
 ```
 
 ## Functions

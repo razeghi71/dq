@@ -28,10 +28,8 @@ func execOp(op ast.Op, t *table.Table) (*table.Table, error) {
 		return execHead(o, t), nil
 	case *ast.TailOp:
 		return execTail(o, t), nil
-	case *ast.SortAscOp:
-		return execSort(o.Columns, true, t)
-	case *ast.SortDescOp:
-		return execSort(o.Columns, false, t)
+	case *ast.SortOp:
+		return execSort(o, t)
 	case *ast.SelectOp:
 		return execSelect(o, t)
 	case *ast.FilterOp:
@@ -131,14 +129,18 @@ func execTail(o *ast.TailOp, t *table.Table) *table.Table {
 	return t.SliceRows(t.NumRows-n, t.NumRows)
 }
 
-func execSort(cols [][]string, asc bool, t *table.Table) (*table.Table, error) {
-	colIndices := make([]int, len(cols))
-	for i, path := range cols {
-		idx := t.ColIndex(path[0])
+func execSort(o *ast.SortOp, t *table.Table) (*table.Table, error) {
+	type key struct {
+		idx  int
+		desc bool
+	}
+	keys := make([]key, len(o.Keys))
+	for i, k := range o.Keys {
+		idx := t.ColIndex(k.Path[0])
 		if idx < 0 {
-			return nil, fmt.Errorf("sort: column %q not found", path[0])
+			return nil, fmt.Errorf("sort: column %q not found", k.Path[0])
 		}
-		colIndices[i] = idx
+		keys[i] = key{idx, k.Desc}
 	}
 
 	perm := make([]int, t.NumRows)
@@ -146,15 +148,13 @@ func execSort(cols [][]string, asc bool, t *table.Table) (*table.Table, error) {
 		perm[i] = i
 	}
 	sort.SliceStable(perm, func(a, b int) bool {
-		for _, idx := range colIndices {
-			va := t.Col(idx).Get(perm[a])
-			vb := t.Col(idx).Get(perm[b])
-			cmp := compareValues(va, vb)
+		for _, k := range keys {
+			cmp := compareValues(t.Col(k.idx).Get(perm[a]), t.Col(k.idx).Get(perm[b]))
 			if cmp != 0 {
-				if asc {
-					return cmp < 0
+				if k.desc {
+					return cmp > 0
 				}
-				return cmp > 0
+				return cmp < 0
 			}
 		}
 		return false

@@ -56,7 +56,7 @@ func TestIntegrationCSVOutput(t *testing.T) {
 }
 
 func TestIntegrationJSONOutput(t *testing.T) {
-	out := queryAndWrite(t, testdataDir+"/users.csv", "sorta age | head 2 | select name age", "json")
+	out := queryAndWrite(t, testdataDir+"/users.csv", "sort age | head 2 | select name age", "json")
 
 	var rows []map[string]interface{}
 	if err := json.Unmarshal([]byte(out), &rows); err != nil {
@@ -135,7 +135,7 @@ func TestIntegrationCountCSV(t *testing.T) {
 }
 
 func TestIntegrationGroupReduceJSON(t *testing.T) {
-	out := queryAndWrite(t, testdataDir+"/users.csv", "group city | reduce n = count() | remove grouped | sortd n", "json")
+	out := queryAndWrite(t, testdataDir+"/users.csv", "group city | reduce n = count() | remove grouped | sort -n", "json")
 
 	var rows []map[string]interface{}
 	if err := json.Unmarshal([]byte(out), &rows); err != nil {

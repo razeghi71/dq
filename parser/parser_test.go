@@ -195,8 +195,28 @@ func TestParseDistinct(t *testing.T) {
 	}
 }
 
+func TestParseSortMixedDirections(t *testing.T) {
+	q, err := Parse("users.csv | sort a -b c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := q.Ops[0].(*ast.SortOp)
+	if len(s.Keys) != 3 {
+		t.Fatalf("expected 3 keys, got %d", len(s.Keys))
+	}
+	want := []struct {
+		col  string
+		desc bool
+	}{{"a", false}, {"b", true}, {"c", false}}
+	for i, w := range want {
+		if s.Keys[i].Path[0] != w.col || s.Keys[i].Desc != w.desc {
+			t.Errorf("key %d: expected (%q, desc=%v), got (%q, desc=%v)", i, w.col, w.desc, s.Keys[i].Path[0], s.Keys[i].Desc)
+		}
+	}
+}
+
 func TestParseFullQuery(t *testing.T) {
-	q, err := Parse(`sales.csv | filter { year(date) == 2024 } | transform revenue = coalesce(quantity, 0) * coalesce(price, 0) | group category city | reduce total_revenue = sum(revenue), order_count = count() | remove grouped | filter { total_revenue > 1000 } | sortd total_revenue | head 3 | select category city total_revenue order_count`)
+	q, err := Parse(`sales.csv | filter { year(date) == 2024 } | transform revenue = coalesce(quantity, 0) * coalesce(price, 0) | group category city | reduce total_revenue = sum(revenue), order_count = count() | remove grouped | filter { total_revenue > 1000 } | sort -total_revenue | head 3 | select category city total_revenue order_count`)
 	if err != nil {
 		t.Fatal(err)
 	}

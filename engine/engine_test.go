@@ -53,7 +53,7 @@ func TestTail(t *testing.T) {
 }
 
 func TestSortAsc(t *testing.T) {
-	result := runQuery(t, usersTable(), "sorta age")
+	result := runQuery(t, usersTable(), "sort age")
 	if result.GetAt(0, 1).Int != 22 {
 		t.Errorf("expected first age to be 22, got %d", result.GetAt(0, 1).Int)
 	}
@@ -63,9 +63,31 @@ func TestSortAsc(t *testing.T) {
 }
 
 func TestSortDesc(t *testing.T) {
-	result := runQuery(t, usersTable(), "sortd age")
+	result := runQuery(t, usersTable(), "sort -age")
 	if result.GetAt(0, 1).Int != 40 {
 		t.Errorf("expected first age to be 40, got %d", result.GetAt(0, 1).Int)
+	}
+}
+
+func TestSortMixedDirections(t *testing.T) {
+	// city ascending, age descending within each city.
+	result := runQuery(t, usersTable(), "sort city -age")
+	got := make([][2]any, result.NumRows)
+	for i := 0; i < result.NumRows; i++ {
+		got[i] = [2]any{result.GetAt(i, 2).Str, result.GetAt(i, 1).Int}
+	}
+	want := [][2]any{
+		{"LA", int64(25)}, // Bob
+		{"LA", int64(22)}, // Eve
+		{"NY", int64(40)}, // Frank
+		{"NY", int64(35)}, // Charlie
+		{"NY", int64(30)}, // Alice
+		{"SF", int64(28)}, // Diana
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("row %d: expected %v, got %v", i, want[i], got[i])
+		}
 	}
 }
 

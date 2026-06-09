@@ -91,19 +91,18 @@ type TailOp struct {
 
 func (o *TailOp) opNode() {}
 
-// SortAscOp sorts ascending by columns.
-type SortAscOp struct {
-	Columns [][]string
+// SortKey is one column to sort by, with a direction.
+type SortKey struct {
+	Path []string
+	Desc bool
 }
 
-func (o *SortAscOp) opNode() {}
-
-// SortDescOp sorts descending by columns.
-type SortDescOp struct {
-	Columns [][]string
+// SortOp sorts rows by an ordered list of keys.
+type SortOp struct {
+	Keys []SortKey
 }
 
-func (o *SortDescOp) opNode() {}
+func (o *SortOp) opNode() {}
 
 // SelectOp projects specific columns.
 type SelectOp struct {

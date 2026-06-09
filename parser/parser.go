@@ -124,10 +124,8 @@ func (p *Parser) parseOp() (ast.Op, error) {
 		return p.parseHead()
 	case "tail":
 		return p.parseTail()
-	case "sorta":
-		return p.parseSortAsc()
-	case "sortd":
-		return p.parseSortDesc()
+	case "sort":
+		return p.parseSort()
 	case "select":
 		return p.parseSelect()
 	case "filter":
@@ -177,28 +175,38 @@ func (p *Parser) parseTail() (ast.Op, error) {
 	return &ast.TailOp{N: n}, nil
 }
 
-func (p *Parser) parseSortAsc() (ast.Op, error) {
-	p.advance() // consume "sorta"
-	cols, err := p.parseColumnList()
-	if err != nil {
-		return nil, fmt.Errorf("sorta: %w", err)
+func (p *Parser) parseSort() (ast.Op, error) {
+	p.advance() // consume "sort"
+	var keys []ast.SortKey
+	for {
+		desc := false
+		if p.peek().Type == lexer.TokenMinus {
+			p.advance()
+			desc = true
+		}
+		t := p.peek()
+		if t.Type != lexer.TokenIdent && t.Type != lexer.TokenBacktickIdent {
+			if desc {
+				return nil, fmt.Errorf("sort: expected column name after '-'")
+			}
+			break
+		}
+		tok := p.advance()
+		path := []string{tok.Val}
+		for p.peek().Type == lexer.TokenDot {
+			p.advance()
+			seg := p.advance()
+			if seg.Type != lexer.TokenIdent && seg.Type != lexer.TokenBacktickIdent {
+				return nil, fmt.Errorf("expected field name after '.', got %s (%q)", seg.Type, seg.Val)
+			}
+			path = append(path, seg.Val)
+		}
+		keys = append(keys, ast.SortKey{Path: path, Desc: desc})
 	}
-	if len(cols) == 0 {
-		return nil, fmt.Errorf("sorta: expected at least one column")
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("sort: expected at least one column")
 	}
-	return &ast.SortAscOp{Columns: cols}, nil
-}
-
-func (p *Parser) parseSortDesc() (ast.Op, error) {
-	p.advance() // consume "sortd"
-	cols, err := p.parseColumnList()
-	if err != nil {
-		return nil, fmt.Errorf("sortd: %w", err)
-	}
-	if len(cols) == 0 {
-		return nil, fmt.Errorf("sortd: expected at least one column")
-	}
-	return &ast.SortDescOp{Columns: cols}, nil
+	return &ast.SortOp{Keys: keys}, nil
 }
 
 func (p *Parser) parseSelect() (ast.Op, error) {

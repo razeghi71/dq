@@ -54,7 +54,7 @@ func assertFlatQueries(t *testing.T, file string) {
 	})
 
 	t.Run("sort_select_head", func(t *testing.T) {
-		result := loadAndQuery(t, file, "sorta age | select name age | head 3")
+		result := loadAndQuery(t, file, "sort age | select name age | head 3")
 		if result.NumRows != 3 {
 			t.Fatalf("expected 3 rows, got %d", result.NumRows)
 		}
@@ -73,7 +73,7 @@ func assertFlatQueries(t *testing.T, file string) {
 	})
 
 	t.Run("group_reduce", func(t *testing.T) {
-		result := loadAndQuery(t, file, "group city | reduce n = count(), total = sum(age) | remove grouped | sortd n")
+		result := loadAndQuery(t, file, "group city | reduce n = count(), total = sum(age) | remove grouped | sort -n")
 		// 3 cities: NY(3), LA(2), SF(1)
 		if result.NumRows != 3 {
 			t.Fatalf("expected 3 rows, got %d", result.NumRows)
@@ -148,7 +148,7 @@ func assertFlatQueriesSmall(t *testing.T, file string) {
 	})
 
 	t.Run("sort_head", func(t *testing.T) {
-		result := loadAndQuery(t, file, "sorta age | head 1")
+		result := loadAndQuery(t, file, "sort age | head 1")
 		nameIdx := result.ColIndex("name")
 		if result.GetAt(0, nameIdx).Str != "Bob" {
 			t.Errorf("youngest should be Bob, got %q", result.GetAt(0, nameIdx).Str)
@@ -233,7 +233,7 @@ func assertNestedQueries(t *testing.T, file string) {
 	})
 
 	t.Run("sort_by_nested", func(t *testing.T) {
-		result := loadAndQuery(t, file, "transform city = address.city | sorta city | select name city")
+		result := loadAndQuery(t, file, "transform city = address.city | sort city | select name city")
 		// Chicago < Los Angeles < New York
 		wantOrder := []string{"Charlie", "Bob", "Alice"}
 		nameIdx := result.ColIndex("name")

@@ -3,11 +3,11 @@ package main
 import "testing"
 
 func TestParseArgsStdinQuery(t *testing.T) {
-	format, output, query, err := parseArgs([]string{"-f", "csv", "- | sorta city"})
+	format, output, query, err := parseArgs([]string{"-f", "csv", "- | sort city"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if format != "csv" || output != "" || query != "- | sorta city" {
+	if format != "csv" || output != "" || query != "- | sort city" {
 		t.Fatalf("got format=%q output=%q query=%q", format, output, query)
 	}
 }

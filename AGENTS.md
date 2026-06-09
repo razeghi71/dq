@@ -61,23 +61,16 @@ Return the last `n` rows.
 dq 'users.csv | tail 5'
 ```
 
-### 3. `sorta col1 col2 ...`
+### 3. `sort [-]col1 [-]col2 ...`
 
-Sort ascending by columns (space-separated).
-
-```
-dq 'users.csv | sorta age name'
-```
-
-### 4. `sortd col1 col2 ...`
-
-Sort descending by columns.
+Sort by columns (space-separated). Ascending by default; prefix a column with `-` to sort it descending. Directions can be mixed per column, so `sort a -b c` replaces the old `sorta a c | sortd b`.
 
 ```
-dq 'users.csv | sortd created_at id'
+dq 'users.csv | sort age name'        // both ascending
+dq 'users.csv | sort -created_at id'  // created_at descending, id ascending
 ```
 
-### 5. `select col1 col2 ...`
+### 4. `select col1 col2 ...`
 
 Project specific columns. All columns selected by default.
 
@@ -85,7 +78,7 @@ Project specific columns. All columns selected by default.
 dq 'users.csv | select name age'
 ```
 
-### 6. `filter { expression }`
+### 5. `filter { expression }`
 
 Filter rows by expression. Expression is wrapped in braces `{ }` for clear boundaries.
 
@@ -99,7 +92,7 @@ dq 'users.csv | filter { age is not null }'
 dq 'users.csv | filter { city is null }'
 ```
 
-### 7. `group col1 col2 ... [as nested_name]`
+### 6. `group col1 col2 ... [as nested_name]`
 
 Group rows by columns; nested rows stored under a nested column. The `as nested_name` part is optional -- if omitted, defaults to `grouped`.
 
@@ -138,7 +131,7 @@ NY   | engineering| [ {name:c,age:25} ]
 LA   | sales      | [ {name:d,age:30} ]
 ```
 
-### 8. `transform col = expr, col2 = expr2, ...`
+### 7. `transform col = expr, col2 = expr2, ...`
 
 Row-wise transformation — create or overwrite columns with computed values.
 
@@ -156,7 +149,7 @@ Use `coalesce` for defaults:
 dq 'sales.csv | transform total = coalesce(quantity, 0) * coalesce(price, 0)'
 ```
 
-### 9. `reduce [nested_name] col = expr, col2 = expr2, ...`
+### 8. `reduce [nested_name] col = expr, col2 = expr2, ...`
 
 Apply aggregations over nested table. The nested name is optional -- if omitted, defaults to `grouped`. Nested field is **kept** after reduction.
 
@@ -185,7 +178,7 @@ To drop the nested field, use `remove`:
 dq 'users.csv | group name | reduce max_age = max(age), count = count() | remove grouped'
 ```
 
-### 10. `count`
+### 9. `count`
 
 Return the number of rows as a single-row, single-column table.
 
@@ -194,7 +187,7 @@ dq 'users.csv | count'
 dq 'users.csv | filter { age > 20 } | count'
 ```
 
-### 11. `distinct [col1 col2 ...]`
+### 10. `distinct [col1 col2 ...]`
 
 Return unique rows. If columns are specified, deduplicates by those columns. If no columns are given, deduplicates by the entire row.
 
@@ -204,7 +197,7 @@ dq 'users.csv | distinct city'           // unique cities
 dq 'users.csv | distinct city age'       // unique combinations
 ```
 
-### 12. `rename old_name new_name [old_name2 new_name2 ...]`
+### 11. `rename old_name new_name [old_name2 new_name2 ...]`
 
 Rename one or more columns. Names are paired: old then new.
 
@@ -213,7 +206,7 @@ dq 'users.csv | rename `first name` first_name'
 dq 'users.csv | rename `first name` first_name `last name` last_name'
 ```
 
-### 13. `remove col1 col2 ...`
+### 12. `remove col1 col2 ...`
 
 Remove columns from output.
 
@@ -265,7 +258,7 @@ dq 'sales.csv
   | reduce total_revenue = sum(revenue), order_count = count()
   | remove grouped
   | filter { total_revenue > 1000 }
-  | sortd total_revenue
+  | sort -total_revenue
   | head 3
   | select category city total_revenue order_count'
 ```
