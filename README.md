@@ -32,7 +32,7 @@ go build -ldflags="-s -w" -o dq ./cmd/dq
 
 ## How It Works
 
-Every query starts with a file and pipes it through operations. Each operation takes a table in and returns a table out.
+Every query starts with a file or stdin and pipes it through operations. Each operation takes a table in and returns a table out.
 
 ```
 dq 'file.csv | operation1 | operation2 | ...'
@@ -40,17 +40,13 @@ dq 'file.csv | operation1 | operation2 | ...'
 
 Wrap queries in single quotes so your shell doesn't interpret `|`, `{`, `}`, or `>`.
 
-### Reading from stdin
-
-Use `-` as the source to read from a pipe, or omit the query when stdin is piped. The `-f` flag is required (csv, json, or jsonl):
+Use `-` as the source to read from stdin, The `-f` flag is required in this case (csv, json, or jsonl):
 
 ```bash
 cat users.csv | dq -f csv
 cat users.csv | dq -f csv '- | filter { age > 25 } | select name'
 curl -s https://api.example.com/users | dq -f json '- | head 10'
 ```
-
-Rebuild after pulling: `go build -o dq ./cmd/dq`
 
 Avro and Parquet are not supported on stdin (they require seekable files).
 
@@ -235,9 +231,6 @@ dq -o jsonl 'users.csv | select name age' > out.jsonl   # one JSON object per li
 
 CSV (`.csv`), JSON (`.json`), JSONL (`.jsonl`), Avro (`.avro`), Parquet (`.parquet`)
 
-### CSV type inference
-
-CSV cells are parsed as int, float, bool, or string. When a column contains mixed numeric types, it widens automatically: `int` + `float` stays float; adding a string widens the whole column to string (e.g. `1`, `2.5`, `something` all become strings). Once widened to string, use quoted literals in filters (`val == "1"`) rather than numeric comparisons (`val > 1`).
 
 ## License
 
