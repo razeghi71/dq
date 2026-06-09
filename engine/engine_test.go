@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/razeghi71/dq/ast"
@@ -25,7 +26,7 @@ func runQuery(t *testing.T, input *table.Table, query string) *table.Table {
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
-	result, err := Execute(q, input)
+	result, err := Execute(q, input, nil)
 	if err != nil {
 		t.Fatalf("exec error: %v", err)
 	}
@@ -318,7 +319,7 @@ func runQueryExpectErr(t *testing.T, input *table.Table, query string) error {
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
-	_, err = Execute(q, input)
+	_, err = Execute(q, input, nil)
 	return err
 }
 
@@ -513,5 +514,248 @@ func TestGroupDotPathReduce(t *testing.T) {
 				t.Errorf("expected count 2 for New York, got %d", result.GetAt(i, nIdx).Int)
 			}
 		}
+	}
+}
+
+func ordersTable() *table.Table {
+	t := table.NewTable([]string{"order_id", "user_name", "product", "amount"})
+	t.AddRow([]table.Value{table.IntVal(1), table.StrVal("Alice"), table.StrVal("Widget"), table.IntVal(10)})
+	t.AddRow([]table.Value{table.IntVal(2), table.StrVal("Alice"), table.StrVal("Gadget"), table.IntVal(25)})
+	t.AddRow([]table.Value{table.IntVal(3), table.StrVal("Bob"), table.StrVal("Widget"), table.IntVal(15)})
+	t.AddRow([]table.Value{table.IntVal(4), table.StrVal("Charlie"), table.StrVal("Widget"), table.IntVal(20)})
+	t.AddRow([]table.Value{table.IntVal(5), table.StrVal("Zara"), table.StrVal("Thing"), table.IntVal(99)})
+	return t
+}
+
+func runJoinQuery(t *testing.T, left *table.Table, joinClause string) *table.Table {
+	t.Helper()
+	q, err := parser.Parse("users.csv | join " + joinClause)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	load := func(filename string) (*table.Table, error) {
+		if filename == "orders.csv" {
+			return ordersTable(), nil
+		}
+		return nil, fmt.Errorf("unknown file %q", filename)
+	}
+	result, err := Execute(q, left, load)
+	if err != nil {
+		t.Fatalf("exec error: %v", err)
+	}
+	return result
+}
+
+func TestJoinInner(t *testing.T) {
+	result := runJoinQuery(t, usersTable(), `orders.csv on name == user_name`)
+	if result.NumRows != 4 {
+		t.Fatalf("expected 4 rows, got %d", result.NumRows)
+	}
+	if result.ColIndex("product") < 0 {
+		t.Fatal("expected product column")
+	}
+}
+
+func TestJoinLeft(t *testing.T) {
+	result := runJoinQuery(t, usersTable(), `left orders.csv on name == user_name`)
+	if result.NumRows != 7 {
+		t.Fatalf("expected 7 rows, got %d", result.NumRows)
+	}
+	productIdx := result.ColIndex("product")
+	nullProducts := 0
+	for i := 0; i < result.NumRows; i++ {
+		if result.GetAt(i, productIdx).IsNull() {
+			nullProducts++
+		}
+	}
+	if nullProducts != 3 {
+		t.Errorf("expected 3 rows with null product, got %d", nullProducts)
+	}
+}
+
+func TestJoinRight(t *testing.T) {
+	result := runJoinQuery(t, usersTable(), `right orders.csv on name == user_name`)
+	if result.NumRows != 5 {
+		t.Fatalf("expected 5 rows, got %d", result.NumRows)
+	}
+	ageIdx := result.ColIndex("age")
+	zaraFound := false
+	for i := 0; i < result.NumRows; i++ {
+		if result.GetAt(i, 0).Str == "Zara" {
+			zaraFound = true
+			if !result.GetAt(i, ageIdx).IsNull() {
+				t.Error("expected null age for unmatched right row Zara")
+			}
+		}
+	}
+	if !zaraFound {
+		t.Error("expected row for Zara from right table")
+	}
+}
+
+func TestJoinFull(t *testing.T) {
+	result := runJoinQuery(t, usersTable(), `full orders.csv on name == user_name`)
+	if result.NumRows != 8 {
+		t.Fatalf("expected 8 rows, got %d", result.NumRows)
+	}
+}
+
+func TestJoinBasename(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"data/order-items.csv", "order_items"},
+		{"ORDERS.csv", "orders"},
+		{"MyOrders.csv", "my_orders"},
+		{"v2Data.json", "v2_data"},
+		{"---.csv", "right"},
+	}
+	for _, c := range cases {
+		if got := joinBasename(c.in); got != c.want {
+			t.Errorf("joinBasename(%q): expected %q, got %q", c.in, c.want, got)
+		}
+	}
+}
+
+func TestJoinMultiKey(t *testing.T) {
+	left := table.NewTable([]string{"city", "dept", "lead"})
+	left.AddRow([]table.Value{table.StrVal("NY"), table.StrVal("sales"), table.StrVal("Alice")})
+	left.AddRow([]table.Value{table.StrVal("NY"), table.StrVal("eng"), table.StrVal("Bob")})
+	left.AddRow([]table.Value{table.StrVal("LA"), table.StrVal("sales"), table.StrVal("Carol")})
+
+	right := table.NewTable([]string{"city", "dept", "budget"})
+	right.AddRow([]table.Value{table.StrVal("NY"), table.StrVal("sales"), table.IntVal(100)})
+	right.AddRow([]table.Value{table.StrVal("LA"), table.StrVal("eng"), table.IntVal(50)})
+
+	q, err := parser.Parse("left.csv | join right.csv on city and dept")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	load := func(string) (*table.Table, error) { return right, nil }
+	result, err := Execute(q, left, load)
+	if err != nil {
+		t.Fatalf("exec error: %v", err)
+	}
+	if result.NumRows != 1 {
+		t.Fatalf("expected 1 row (NY/sales), got %d", result.NumRows)
+	}
+	if result.Get(0, "lead").Str != "Alice" || result.Get(0, "budget").Int != 100 {
+		t.Errorf("wrong joined row: %s", result.String())
+	}
+}
+
+// TestJoinKeepsRightColumnCollidingWithLeftKeyName guards against dropping a
+// right column merely because its name matches a left join-key name. Only the
+// actual right join-key column should be dropped; collisions must be renamed.
+func TestJoinKeepsRightColumnCollidingWithLeftKeyName(t *testing.T) {
+	left := table.NewTable([]string{"id", "name"})
+	left.AddRow([]table.Value{table.IntVal(1), table.StrVal("Alice")})
+	left.AddRow([]table.Value{table.IntVal(2), table.StrVal("Bob")})
+
+	right := table.NewTable([]string{"id", "customer_id", "note"})
+	right.AddRow([]table.Value{table.IntVal(99), table.IntVal(1), table.StrVal("hello")})
+	right.AddRow([]table.Value{table.IntVal(98), table.IntVal(2), table.StrVal("world")})
+
+	q, err := parser.Parse("left.csv | join right.csv on id == customer_id")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	load := func(string) (*table.Table, error) { return right, nil }
+	result, err := Execute(q, left, load)
+	if err != nil {
+		t.Fatalf("exec error: %v", err)
+	}
+
+	ridIdx := result.ColIndex("right_id")
+	if ridIdx < 0 {
+		t.Fatalf("expected right_id column (renamed collision), got %v", result.Columns)
+	}
+	if result.GetAt(0, ridIdx).Int != 99 || result.GetAt(1, ridIdx).Int != 98 {
+		t.Errorf("right id values lost: got %v, %v", result.GetAt(0, ridIdx), result.GetAt(1, ridIdx))
+	}
+	if result.ColIndex("customer_id") >= 0 {
+		t.Errorf("right join-key column customer_id should be dropped, got %v", result.Columns)
+	}
+}
+
+// TestJoinSurfacesKeyPathError ensures a structurally invalid dot-path key
+// returns an error instead of silently dropping rows -- for every join kind.
+func TestJoinSurfacesKeyPathError(t *testing.T) {
+	for _, kind := range []string{"", "left ", "right ", "full "} {
+		left := table.NewTable([]string{"name"})
+		left.AddRow([]table.Value{table.StrVal("Alice")})
+
+		right := table.NewTable([]string{"name", "x"})
+		right.AddRow([]table.Value{table.StrVal("Alice"), table.IntVal(1)})
+
+		// name.sub treats a string column as a record -> per-row resolution error.
+		q, err := parser.Parse("left.csv | join " + kind + "right.csv on name.sub == name")
+		if err != nil {
+			t.Fatalf("kind %q: parse error: %v", kind, err)
+		}
+		load := func(string) (*table.Table, error) { return right, nil }
+		if _, err := Execute(q, left, load); err == nil {
+			t.Errorf("kind %q: expected error for invalid dot-path join key, got nil", kind)
+		}
+	}
+}
+
+// TestJoinSurfacesRightKeyPathError covers the same for a bad right-side key.
+func TestJoinSurfacesRightKeyPathError(t *testing.T) {
+	left := table.NewTable([]string{"name"})
+	left.AddRow([]table.Value{table.StrVal("Alice")})
+
+	right := table.NewTable([]string{"name"})
+	right.AddRow([]table.Value{table.StrVal("Alice")})
+
+	q, err := parser.Parse("left.csv | join right.csv on name == name.sub")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	load := func(string) (*table.Table, error) { return right, nil }
+	if _, err := Execute(q, left, load); err == nil {
+		t.Fatal("expected error for invalid right dot-path join key, got nil")
+	}
+}
+
+// TestJoinDotPathKeyDoesNotAliasExistingColumn guards against a dot-path key
+// whose flattened name collides with an unrelated left column: the key must
+// get its own suffixed column, and the original column must stay untouched.
+func TestJoinDotPathKeyDoesNotAliasExistingColumn(t *testing.T) {
+	left := table.NewTable([]string{"address", "address_city"})
+	left.AddRow([]table.Value{
+		table.RecordVal([]table.RecordField{{Name: "city", Value: table.StrVal("NY")}}),
+		table.StrVal("UNRELATED"),
+	})
+
+	right := table.NewTable([]string{"city", "pop"})
+	right.AddRow([]table.Value{table.StrVal("NY"), table.IntVal(8)})
+	right.AddRow([]table.Value{table.StrVal("LA"), table.IntVal(4)})
+
+	q, err := parser.Parse("left.json | join full right.csv on address.city == city")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	load := func(string) (*table.Table, error) { return right, nil }
+	result, err := Execute(q, left, load)
+	if err != nil {
+		t.Fatalf("exec error: %v", err)
+	}
+	if result.NumRows != 2 {
+		t.Fatalf("expected 2 rows (NY matched, LA unmatched), got %d", result.NumRows)
+	}
+	keyIdx := result.ColIndex("address_city_2")
+	if keyIdx < 0 {
+		t.Fatalf("expected suffixed key column address_city_2, got %v", result.Columns)
+	}
+	if got := result.Get(0, "address_city").Str; got != "UNRELATED" {
+		t.Errorf("unrelated column overwritten: got %q", got)
+	}
+	if got := result.GetAt(0, keyIdx).Str; got != "NY" {
+		t.Errorf("expected key value NY, got %q", got)
+	}
+	if !result.Get(1, "address_city").IsNull() {
+		t.Errorf("unmatched right row must not write into unrelated left column")
+	}
+	if got := result.GetAt(1, keyIdx).Str; got != "LA" {
+		t.Errorf("expected right key LA in key column, got %q", got)
 	}
 }

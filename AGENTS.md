@@ -215,6 +215,20 @@ dq 'users.csv | remove password ssn'
 dq 'users.csv | group name | reduce total = sum(amount) | remove grouped'
 ```
 
+### 13. `join [kind] file on key [and key ...]`
+
+Join with another file. Kind is optional: `inner` (default), `left`, `right`, `full`.
+
+```
+dq 'users.csv | join orders.csv on name == user_name'
+dq 'users.csv | join left orders.csv on user_id'
+dq 'users.csv | join full orders.csv on id == customer_id and region == region'
+```
+
+Each key is either a column path (same name on both sides) or `left_path == right_path`. Join key columns appear once under the left-side name; dot-path keys get a flattened column (`address.city` -> `address_city`, suffixed if taken). Colliding right-side columns are prefixed with the join file basename.
+
+The join file's format comes from its extension (`-f` applies only to the primary input). Null keys never match. Keys match by value representation (consistent with `group`/`distinct`), so `1` matches `"1"` across formats.
+
 ---
 
 ## Built-in Functions

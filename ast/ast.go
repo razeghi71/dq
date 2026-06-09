@@ -172,6 +172,21 @@ type RemoveOp struct {
 
 func (o *RemoveOp) opNode() {}
 
+// JoinKey is one join condition: left_path == right_path (Right == Left when omitted).
+type JoinKey struct {
+	Left  []string
+	Right []string
+}
+
+// JoinOp joins the current table with another file.
+type JoinOp struct {
+	Kind     string // inner, left, right, full
+	Filename string
+	Keys     []JoinKey
+}
+
+func (o *JoinOp) opNode() {}
+
 // Query represents a full parsed query: source + pipeline of operations.
 type Query struct {
 	Source *SourceOp

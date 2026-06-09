@@ -185,6 +185,30 @@ dq 'users.csv | group city | reduce avg_age = avg(age) | remove grouped'
 dq 'sales.csv | group category | reduce total = sum(price), n = count() | remove grouped | sort -total | head 3'
 ```
 
+### `join` - Combine two files
+
+Join the current table with another file. Kind is optional: `inner` (default), `left`, `right`, or `full`.
+
+```bash
+dq 'users.csv | join orders.csv on name == user_name'
+dq 'users.csv | join left orders.csv on name == user_name'
+dq 'users.csv | join full orders.csv on id == customer_id and region == region'
+```
+
+When both sides use the same column name, shorthand works:
+
+```bash
+dq 'users.csv | join orders.csv on user_id'
+```
+
+Join keys can use dot paths for nested fields; a dot-path key gets its own flattened output column (`address.city` -> `address_city`, suffixed with `_2` if taken). If both tables share a column name, the right table's column is prefixed with the join file's basename (e.g. `orders_amount` from `orders.csv`).
+
+Notes:
+
+- The join file's format comes from its extension; the `-f` flag only applies to the primary input.
+- Null keys never match (rows with null keys still appear in left/right/full joins, with the other side null).
+- Keys match by value representation, consistent with `group` and `distinct` -- e.g. integer `1` matches string `"1"` across files of different formats.
+
 ## Functions
 
 **For `reduce`** (aggregate across rows):

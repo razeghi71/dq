@@ -23,7 +23,7 @@ func loadAndQuery(t *testing.T, file, query string) *table.Table {
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
-	result, err := Execute(q, tbl)
+	result, err := Execute(q, tbl, nil)
 	if err != nil {
 		t.Fatalf("exec error: %v", err)
 	}
@@ -404,7 +404,7 @@ func TestIntegrationStdinDashOnly(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 
-	result, err := Execute(q, tbl)
+	result, err := Execute(q, tbl, nil)
 	if err != nil {
 		t.Fatalf("exec: %v", err)
 	}
@@ -430,12 +430,38 @@ func TestIntegrationStdinPipeline(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 
-	result, err := Execute(q, tbl)
+	result, err := Execute(q, tbl, nil)
 	if err != nil {
 		t.Fatalf("exec: %v", err)
 	}
 
 	if result.NumRows != 4 {
 		t.Fatalf("expected 4 rows with age > 25, got %d", result.NumRows)
+	}
+}
+
+func TestJoinIntegration(t *testing.T) {
+	usersFile := testdataDir + "/users.csv"
+	ordersFile := testdataDir + "/orders.csv"
+	tbl, err := loader.Load(usersFile, "")
+	if err != nil {
+		t.Fatalf("load users: %v", err)
+	}
+	q, err := parser.Parse(usersFile + ` | join ` + ordersFile + ` on name == user_name | sort name product`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	load := func(filename string) (*table.Table, error) {
+		return loader.Load(filename, "")
+	}
+	result, err := Execute(q, tbl, load)
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if result.NumRows != 4 {
+		t.Fatalf("expected 4 rows, got %d", result.NumRows)
+	}
+	if result.ColIndex("product") < 0 {
+		t.Fatal("expected product column from orders")
 	}
 }

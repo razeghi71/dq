@@ -144,6 +144,8 @@ func (p *Parser) parseOp() (ast.Op, error) {
 		return p.parseRename()
 	case "remove":
 		return p.parseRemove()
+	case "join":
+		return p.parseJoin()
 	default:
 		return nil, fmt.Errorf("unknown operation %q at position %d", tok.Val, tok.Pos)
 	}
@@ -318,6 +320,125 @@ func (p *Parser) parseRename() (ast.Op, error) {
 		return nil, fmt.Errorf("rename: expected at least one old/new pair")
 	}
 	return &ast.RenameOp{Pairs: pairs}, nil
+}
+
+var joinKinds = map[string]bool{
+	"inner": true,
+	"left":  true,
+	"right": true,
+	"full":  true,
+}
+
+func (p *Parser) parseJoin() (ast.Op, error) {
+	p.advance() // consume "join"
+
+	// ScanSource reads directly from the lexer; any buffered lookahead token
+	// has already been consumed from the input and would be silently lost.
+	// Op dispatch leaves the buffer empty here, so a non-empty buffer means a
+	// parser bug -- fail loudly instead of mis-scanning the filename.
+	if len(p.buf) != 0 {
+		return nil, fmt.Errorf("join: internal error: lookahead buffer not empty before filename")
+	}
+
+	kind := "inner"
+	filename, err := p.lexer.ScanSource()
+	if err != nil {
+		return nil, fmt.Errorf("join: %w", err)
+	}
+	seenOn := false
+	switch filename.Type {
+	case lexer.TokenIdent:
+		if joinKinds[filename.Val] {
+			kindWord := filename.Val
+			kind = kindWord
+			fileTok, err := p.lexer.ScanSource()
+			if err != nil {
+				return nil, fmt.Errorf("join: %w", err)
+			}
+			if fileTok.Type == lexer.TokenIdent && fileTok.Val == "on" {
+				filename = lexer.Token{Type: lexer.TokenIdent, Val: kindWord, Pos: filename.Pos}
+				kind = "inner"
+				seenOn = true
+			} else if fileTok.Type == lexer.TokenIdent || fileTok.Type == lexer.TokenStdin {
+				filename = fileTok
+			} else {
+				return nil, fmt.Errorf("join: expected filename after %q", kind)
+			}
+		}
+	case lexer.TokenStdin:
+		// keep as filename "-"
+	default:
+		return nil, fmt.Errorf("join: expected filename at position %d", filename.Pos)
+	}
+
+	if filename.Type == lexer.TokenStdin {
+		return nil, fmt.Errorf("join: stdin is not supported as join source")
+	}
+	if filename.Val == "" {
+		return nil, fmt.Errorf("join: expected filename")
+	}
+
+	if !seenOn {
+		onTok, err := p.expect(lexer.TokenIdent)
+		if err != nil {
+			return nil, fmt.Errorf("join: expected 'on' clause: %w", err)
+		}
+		if onTok.Val != "on" {
+			return nil, fmt.Errorf("join: expected 'on', got %q", onTok.Val)
+		}
+	}
+
+	keys, err := p.parseJoinKeys()
+	if err != nil {
+		return nil, fmt.Errorf("join: %w", err)
+	}
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("join: expected at least one join key")
+	}
+
+	return &ast.JoinOp{Kind: kind, Filename: filename.Val, Keys: keys}, nil
+}
+
+func (p *Parser) parseJoinKeys() ([]ast.JoinKey, error) {
+	var keys []ast.JoinKey
+	for {
+		left, err := p.parseSingleColumnPath()
+		if err != nil {
+			return nil, err
+		}
+		right := append([]string(nil), left...)
+		if p.peek().Type == lexer.TokenEq {
+			p.advance()
+			right, err = p.parseSingleColumnPath()
+			if err != nil {
+				return nil, err
+			}
+		}
+		keys = append(keys, ast.JoinKey{Left: left, Right: right})
+		if p.peek().Type != lexer.TokenAnd {
+			break
+		}
+		p.advance()
+	}
+	return keys, nil
+}
+
+func (p *Parser) parseSingleColumnPath() ([]string, error) {
+	t := p.peek()
+	if t.Type != lexer.TokenIdent && t.Type != lexer.TokenBacktickIdent {
+		return nil, fmt.Errorf("expected column name, got %s (%q)", t.Type, t.Val)
+	}
+	tok := p.advance()
+	path := []string{tok.Val}
+	for p.peek().Type == lexer.TokenDot {
+		p.advance()
+		seg := p.advance()
+		if seg.Type != lexer.TokenIdent && seg.Type != lexer.TokenBacktickIdent {
+			return nil, fmt.Errorf("expected field name after '.', got %s (%q)", seg.Type, seg.Val)
+		}
+		path = append(path, seg.Val)
+	}
+	return path, nil
 }
 
 func (p *Parser) parseRemove() (ast.Op, error) {

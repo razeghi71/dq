@@ -9,6 +9,7 @@ import (
 	"github.com/razeghi71/dq/engine"
 	"github.com/razeghi71/dq/loader"
 	"github.com/razeghi71/dq/parser"
+	"github.com/razeghi71/dq/table"
 	"github.com/razeghi71/dq/writer"
 )
 
@@ -45,7 +46,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	result, err := engine.Execute(q, input)
+	result, err := engine.Execute(q, input, func(filename string) (*table.Table, error) {
+		return loader.Load(filename, "")
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

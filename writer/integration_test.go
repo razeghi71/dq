@@ -25,7 +25,7 @@ func queryAndWrite(t *testing.T, file, query, format string) string {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	result, err := engine.Execute(q, tbl)
+	result, err := engine.Execute(q, tbl, nil)
 	if err != nil {
 		t.Fatalf("exec: %v", err)
 	}

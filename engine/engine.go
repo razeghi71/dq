@@ -10,11 +10,12 @@ import (
 )
 
 // Execute runs a full query pipeline on the given input table.
-func Execute(query *ast.Query, input *table.Table) (*table.Table, error) {
+// load is required when the pipeline contains join; pass nil otherwise.
+func Execute(query *ast.Query, input *table.Table, load LoadFunc) (*table.Table, error) {
 	current := input
 	for _, op := range query.Ops {
 		var err error
-		current, err = execOp(op, current)
+		current, err = execOp(op, current, load)
 		if err != nil {
 			return nil, err
 		}
@@ -22,7 +23,7 @@ func Execute(query *ast.Query, input *table.Table) (*table.Table, error) {
 	return current, nil
 }
 
-func execOp(op ast.Op, t *table.Table) (*table.Table, error) {
+func execOp(op ast.Op, t *table.Table, load LoadFunc) (*table.Table, error) {
 	switch o := op.(type) {
 	case *ast.HeadOp:
 		return execHead(o, t), nil
@@ -48,6 +49,8 @@ func execOp(op ast.Op, t *table.Table) (*table.Table, error) {
 		return execRename(o, t)
 	case *ast.RemoveOp:
 		return execRemove(o, t)
+	case *ast.JoinOp:
+		return execJoin(o, t, load)
 	default:
 		return nil, fmt.Errorf("unknown operation type %T", op)
 	}

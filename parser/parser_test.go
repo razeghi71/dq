@@ -481,3 +481,99 @@ func TestParseRemoveRejectsDotPath(t *testing.T) {
 		t.Fatal("expected error for dot path in remove")
 	}
 }
+
+func TestParseJoinInner(t *testing.T) {
+	q, err := Parse("users.csv | join orders.csv on name == user_name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := q.Ops[0].(*ast.JoinOp)
+	if j.Kind != "inner" {
+		t.Errorf("expected inner, got %q", j.Kind)
+	}
+	if j.Filename != "orders.csv" {
+		t.Errorf("expected orders.csv, got %q", j.Filename)
+	}
+	if len(j.Keys) != 1 || len(j.Keys[0].Left) != 1 || j.Keys[0].Left[0] != "name" {
+		t.Errorf("expected left key name, got %v", j.Keys[0].Left)
+	}
+	if len(j.Keys[0].Right) != 1 || j.Keys[0].Right[0] != "user_name" {
+		t.Errorf("expected right key user_name, got %v", j.Keys[0].Right)
+	}
+}
+
+func TestParseJoinLeft(t *testing.T) {
+	q, err := Parse("users.csv | join left orders.csv on name == user_name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := q.Ops[0].(*ast.JoinOp)
+	if j.Kind != "left" {
+		t.Errorf("expected left, got %q", j.Kind)
+	}
+}
+
+func TestParseJoinShorthandKey(t *testing.T) {
+	q, err := Parse("a.csv | join b.csv on id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := q.Ops[0].(*ast.JoinOp)
+	if len(j.Keys[0].Left) != 1 || j.Keys[0].Left[0] != "id" {
+		t.Errorf("expected left id, got %v", j.Keys[0].Left)
+	}
+	if len(j.Keys[0].Right) != 1 || j.Keys[0].Right[0] != "id" {
+		t.Errorf("expected right id, got %v", j.Keys[0].Right)
+	}
+}
+
+func TestParseJoinMultiKey(t *testing.T) {
+	q, err := Parse("a.csv | join b.csv on id == customer_id and region == region")
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := q.Ops[0].(*ast.JoinOp)
+	if len(j.Keys) != 2 {
+		t.Fatalf("expected 2 keys, got %d", len(j.Keys))
+	}
+}
+
+func TestParseJoinFilenameIsKindWord(t *testing.T) {
+	q, err := Parse("users.csv | join left on id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := q.Ops[0].(*ast.JoinOp)
+	if j.Kind != "inner" {
+		t.Errorf("expected inner, got %q", j.Kind)
+	}
+	if j.Filename != "left" {
+		t.Errorf("expected filename left, got %q", j.Filename)
+	}
+}
+
+func TestParseJoinRejectsStdin(t *testing.T) {
+	_, err := Parse("users.csv | join - on id")
+	if err == nil {
+		t.Fatal("expected error for stdin join source")
+	}
+}
+
+// TestParseJoinAfterOtherOp guards the lexer-buffer handover into ScanSource:
+// join must read the right filename correctly when preceded by another op.
+func TestParseJoinAfterOtherOp(t *testing.T) {
+	q, err := Parse("users.csv | head 5 | join orders.csv on id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(q.Ops) != 2 {
+		t.Fatalf("expected 2 ops, got %d", len(q.Ops))
+	}
+	j, ok := q.Ops[1].(*ast.JoinOp)
+	if !ok {
+		t.Fatalf("expected JoinOp, got %T", q.Ops[1])
+	}
+	if j.Filename != "orders.csv" {
+		t.Errorf("expected orders.csv, got %q", j.Filename)
+	}
+}
