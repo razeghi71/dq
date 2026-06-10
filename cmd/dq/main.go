@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	dq "github.com/razeghi71/dq"
 	"github.com/razeghi71/dq/engine"
 	"github.com/razeghi71/dq/loader"
 	"github.com/razeghi71/dq/parser"
@@ -13,12 +14,19 @@ import (
 	"github.com/razeghi71/dq/writer"
 )
 
-var errHelp = errors.New("help")
+var (
+	errHelp  = errors.New("help")
+	errGuide = errors.New("guide")
+)
 
 func main() {
 	format, output, query, err := parseArgs(os.Args[1:])
 	if err == errHelp {
 		printUsage()
+		os.Exit(0)
+	}
+	if err == errGuide {
+		fmt.Fprint(os.Stdout, dq.AgentGuide)
 		os.Exit(0)
 	}
 	if err != nil {
@@ -69,6 +77,8 @@ func parseArgs(args []string) (format, output, query string, err error) {
 		switch args[i] {
 		case "-h", "-help", "--help":
 			return "", "", "", errHelp
+		case "-agent-guide", "--agent-guide":
+			return "", "", "", errGuide
 		case "-f", "-format":
 			if i+1 >= len(args) {
 				return "", "", "", fmt.Errorf("missing value for %s", args[i])
@@ -101,6 +111,8 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "        input format: csv, json, jsonl, avro, parquet (overrides file extension)")
 	fmt.Fprintln(os.Stderr, "  -o, -output string")
 	fmt.Fprintln(os.Stderr, "        output format: table (default), csv, json, jsonl")
+	fmt.Fprintln(os.Stderr, "  -agent-guide")
+	fmt.Fprintln(os.Stderr, "        print an AI agent friendly guide")
 }
 
 // stdinPiped reports whether stdin is not a terminal (e.g. data piped from cat).

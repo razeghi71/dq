@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"testing"
+
+	dq "github.com/razeghi71/dq"
+)
 
 func TestParseArgsStdinQuery(t *testing.T) {
 	format, output, query, err := parseArgs([]string{"-f", "csv", "- | sort city"})
@@ -29,6 +34,26 @@ func TestParseArgsNoQuery(t *testing.T) {
 	}
 	if format != "csv" || query != "" {
 		t.Fatalf("got format=%q query=%q", format, query)
+	}
+}
+
+func TestParseArgsAgentGuide(t *testing.T) {
+	_, _, query, err := parseArgs([]string{"-agent-guide"})
+	if err != errGuide {
+		t.Fatalf("got err=%v, want errGuide", err)
+	}
+	if query != "" {
+		t.Fatalf("got query=%q", query)
+	}
+}
+
+func TestAgentGuideMatchesREADME(t *testing.T) {
+	readme, err := os.ReadFile("../../README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dq.AgentGuide != string(readme) {
+		t.Fatal("embedded guide is out of sync with README.md")
 	}
 }
 
