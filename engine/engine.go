@@ -444,18 +444,25 @@ func execRename(o *ast.RenameOp, t *table.Table) (*table.Table, error) {
 	newCols := make([]string, len(t.Columns))
 	copy(newCols, t.Columns)
 
+	renamed := make(map[int]bool)
 	for _, pair := range o.Pairs {
-		found := false
-		for i, c := range newCols {
-			if c == pair.Old {
-				newCols[i] = pair.New
-				found = true
-				break
-			}
-		}
-		if !found {
+		idx := t.ColIndex(pair.Old)
+		if idx < 0 {
 			return nil, fmt.Errorf("rename: column %q not found", pair.Old)
 		}
+		if renamed[idx] {
+			return nil, fmt.Errorf("rename: column %q renamed more than once", pair.Old)
+		}
+		renamed[idx] = true
+		newCols[idx] = pair.New
+	}
+
+	seen := make(map[string]bool)
+	for _, c := range newCols {
+		if seen[c] {
+			return nil, fmt.Errorf("rename: duplicate column name %q in result; pick a unique name", c)
+		}
+		seen[c] = true
 	}
 
 	return t.ShallowClone(newCols), nil

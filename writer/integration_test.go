@@ -55,6 +55,31 @@ func TestIntegrationCSVOutput(t *testing.T) {
 	}
 }
 
+func TestIntegrationRenameJSONPreservesAllColumns(t *testing.T) {
+	out := queryAndWrite(t, testdataDir+"/users.csv", "rename name username | head 1", "json")
+
+	var rows []map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	row := rows[0]
+	if len(row) != 3 {
+		t.Fatalf("expected 3 JSON keys, got %d: %v", len(row), row)
+	}
+	if row["username"] != "Alice" {
+		t.Errorf("username: want Alice, got %v", row["username"])
+	}
+	if row["age"].(float64) != 30 {
+		t.Errorf("age: want 30, got %v", row["age"])
+	}
+	if row["city"] != "NY" {
+		t.Errorf("city: want NY, got %v", row["city"])
+	}
+}
+
 func TestIntegrationJSONOutput(t *testing.T) {
 	out := queryAndWrite(t, testdataDir+"/users.csv", "sort age | head 2 | select name age", "json")
 
