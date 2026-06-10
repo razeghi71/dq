@@ -688,6 +688,106 @@ func TestGroupDotPathReduce(t *testing.T) {
 	}
 }
 
+func TestSortDotPath(t *testing.T) {
+	result := runQuery(t, nestedTable(), "sort address.city -name | select name address.city")
+	want := []string{"Bob", "Charlie", "Alice"}
+	nameIdx := result.ColIndex("name")
+	for i, w := range want {
+		if got := result.GetAt(i, nameIdx).Str; got != w {
+			t.Errorf("row %d: expected %q, got %q", i, w, got)
+		}
+	}
+}
+
+func TestSortDotPathSurfacesResolutionError(t *testing.T) {
+	err := runQueryExpectErr(t, nestedTable(), "sort name.first")
+	if err == nil {
+		t.Fatal("expected error for invalid sort dot path")
+	}
+	if !strings.Contains(err.Error(), "sort \"name.first\"") {
+		t.Errorf("expected full path in sort error, got: %v", err)
+	}
+}
+
+func TestDistinctDotPath(t *testing.T) {
+	result := runQuery(t, nestedTable(), "distinct address.city")
+	if result.NumRows != 2 {
+		t.Fatalf("expected 2 distinct cities, got %d: %s", result.NumRows, result.String())
+	}
+}
+
+func TestDistinctDotPathSurfacesResolutionError(t *testing.T) {
+	err := runQueryExpectErr(t, nestedTable(), "distinct name.first")
+	if err == nil {
+		t.Fatal("expected error for invalid distinct dot path")
+	}
+	if !strings.Contains(err.Error(), "distinct \"name.first\"") {
+		t.Errorf("expected full path in distinct error, got: %v", err)
+	}
+}
+
+func nestedStatsTable() *table.Table {
+	t := table.NewTable([]string{"name", "address", "profile"})
+	rows := []struct {
+		name   string
+		city   string
+		score  float64
+		logins int64
+	}{
+		{"Alice", "New York", 9.5, 42},
+		{"Bob", "Los Angeles", 6.2, 7},
+		{"Charlie", "New York", 0, 0},
+	}
+	for _, row := range rows {
+		t.AddRow([]table.Value{
+			table.StrVal(row.name),
+			table.RecordVal([]table.RecordField{
+				{Name: "city", Value: table.StrVal(row.city)},
+			}),
+			table.RecordVal([]table.RecordField{
+				{Name: "stats", Value: table.RecordVal([]table.RecordField{
+					{Name: "score", Value: table.FloatVal(row.score)},
+					{Name: "logins", Value: table.IntVal(row.logins)},
+				})},
+			}),
+		})
+	}
+	return t
+}
+
+func TestReduceAggregateDotPath(t *testing.T) {
+	result := runQuery(t, nestedStatsTable(), "group address.city | reduce avg_score = avg(profile.stats.score), max_logins = max(profile.stats.logins), first_score = first(profile.stats.score) | remove grouped")
+
+	cityIdx := result.ColIndex("address_city")
+	avgIdx := result.ColIndex("avg_score")
+	maxIdx := result.ColIndex("max_logins")
+	firstIdx := result.ColIndex("first_score")
+
+	for i := 0; i < result.NumRows; i++ {
+		switch result.GetAt(i, cityIdx).Str {
+		case "New York":
+			if got := result.GetAt(i, avgIdx).Float; got != 4.75 {
+				t.Errorf("New York avg_score: expected 4.75, got %v", got)
+			}
+			if got := result.GetAt(i, maxIdx).Int; got != 42 {
+				t.Errorf("New York max_logins: expected 42, got %d", got)
+			}
+			if got := result.GetAt(i, firstIdx).Float; got != 9.5 {
+				t.Errorf("New York first_score: expected 9.5, got %v", got)
+			}
+		case "Los Angeles":
+			if got := result.GetAt(i, avgIdx).Float; got != 6.2 {
+				t.Errorf("Los Angeles avg_score: expected 6.2, got %v", got)
+			}
+			if got := result.GetAt(i, maxIdx).Int; got != 7 {
+				t.Errorf("Los Angeles max_logins: expected 7, got %d", got)
+			}
+		default:
+			t.Errorf("unexpected city %q", result.GetAt(i, cityIdx).Str)
+		}
+	}
+}
+
 func ordersTable() *table.Table {
 	t := table.NewTable([]string{"order_id", "user_name", "product", "amount"})
 	t.AddRow([]table.Value{table.IntVal(1), table.StrVal("Alice"), table.StrVal("Widget"), table.IntVal(10)})

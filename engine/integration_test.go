@@ -244,6 +244,18 @@ func assertNestedQueries(t *testing.T, file string) {
 			}
 		}
 	})
+
+	t.Run("sort_by_nested_dot_path", func(t *testing.T) {
+		result := loadAndQuery(t, file, "sort profile.stats.logins | select name profile.stats.logins")
+		wantOrder := []string{"Charlie", "Bob", "Alice"}
+		nameIdx := result.ColIndex("name")
+		for i, want := range wantOrder {
+			got := result.GetAt(i, nameIdx).Str
+			if got != want {
+				t.Errorf("row %d: want %q, got %q", i, want, got)
+			}
+		}
+	})
 }
 
 func TestIntegrationNestedJSON(t *testing.T) {
@@ -321,6 +333,50 @@ func assertNestedDotPathOps(t *testing.T, file string) {
 			t.Fatalf("expected 3 groups, got %d", result.NumRows)
 		}
 	})
+
+	t.Run("distinct_dot_path", func(t *testing.T) {
+		result := loadAndQuery(t, file, "distinct address.city")
+		if result.NumRows != 3 {
+			t.Fatalf("expected 3 distinct cities, got %d", result.NumRows)
+		}
+	})
+
+	t.Run("reduce_aggregate_dot_path", func(t *testing.T) {
+		result := loadAndQuery(t, file, "group address.city | reduce avg_score = avg(profile.stats.score), max_logins = max(profile.stats.logins) | remove grouped")
+		if result.NumRows != 3 {
+			t.Fatalf("expected 3 groups, got %d", result.NumRows)
+		}
+		cityIdx := result.ColIndex("address_city")
+		avgIdx := result.ColIndex("avg_score")
+		maxIdx := result.ColIndex("max_logins")
+		for i := 0; i < result.NumRows; i++ {
+			switch result.GetAt(i, cityIdx).Str {
+			case "New York":
+				if got := result.GetAt(i, avgIdx).Float; got != 9.5 {
+					t.Errorf("New York avg_score: want 9.5, got %v", got)
+				}
+				if got := result.GetAt(i, maxIdx).Int; got != 42 {
+					t.Errorf("New York max_logins: want 42, got %d", got)
+				}
+			case "Los Angeles":
+				if got := result.GetAt(i, avgIdx).Float; got != 6.2 {
+					t.Errorf("Los Angeles avg_score: want 6.2, got %v", got)
+				}
+				if got := result.GetAt(i, maxIdx).Int; got != 7 {
+					t.Errorf("Los Angeles max_logins: want 7, got %d", got)
+				}
+			case "Chicago":
+				if got := result.GetAt(i, avgIdx).Float; got != 0 {
+					t.Errorf("Chicago avg_score: want 0, got %v", got)
+				}
+				if got := result.GetAt(i, maxIdx).Int; got != 0 {
+					t.Errorf("Chicago max_logins: want 0, got %d", got)
+				}
+			default:
+				t.Errorf("unexpected city %q", result.GetAt(i, cityIdx).Str)
+			}
+		}
+	})
 }
 
 func TestIntegrationNestedDotPathJSON(t *testing.T) {
@@ -392,13 +448,13 @@ func TestIntegrationFilterCrossTypeComparison(t *testing.T) {
 		query string
 		want  int
 	}{
-		{`filter { val == 1 }`, 1},          // string "1" matches int literal 1
-		{`filter { val == 2.5 }`, 1},        // string "2.5" matches float literal 2.5
-		{`filter { val == "1" }`, 1},        // string literal still works
-		{`filter { val == "something" }`, 1},// non-numeric string compare
-		{`filter { val != 1 }`, 2},          // 2.5 and "something"
-		{`filter { val > 1 }`, 2},           // numeric 2.5 plus lexical "something" > "1"
-		{`filter { val > 9 }`, 1},           // "something"; numeric 2.5 < 9 (not lexical)
+		{`filter { val == 1 }`, 1},           // string "1" matches int literal 1
+		{`filter { val == 2.5 }`, 1},         // string "2.5" matches float literal 2.5
+		{`filter { val == "1" }`, 1},         // string literal still works
+		{`filter { val == "something" }`, 1}, // non-numeric string compare
+		{`filter { val != 1 }`, 2},           // 2.5 and "something"
+		{`filter { val > 1 }`, 2},            // numeric 2.5 plus lexical "something" > "1"
+		{`filter { val > 9 }`, 1},            // "something"; numeric 2.5 < 9 (not lexical)
 	}
 	for _, c := range cases {
 		t.Run(c.query, func(t *testing.T) {

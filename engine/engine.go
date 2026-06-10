@@ -44,7 +44,7 @@ func execOp(op ast.Op, t *table.Table, load LoadFunc) (*table.Table, error) {
 	case *ast.CountOp:
 		return execCount(t), nil
 	case *ast.DistinctOp:
-		return execDistinct(o, t), nil
+		return execDistinct(o, t)
 	case *ast.RenameOp:
 		return execRename(o, t)
 	case *ast.RemoveOp:
@@ -134,16 +134,24 @@ func execTail(o *ast.TailOp, t *table.Table) *table.Table {
 
 func execSort(o *ast.SortOp, t *table.Table) (*table.Table, error) {
 	type key struct {
-		idx  int
+		path []string
 		desc bool
 	}
 	keys := make([]key, len(o.Keys))
 	for i, k := range o.Keys {
-		idx := t.ColIndex(k.Path[0])
-		if idx < 0 {
-			return nil, fmt.Errorf("sort: column %q not found", k.Path[0])
+		keys[i] = key{k.Path, k.Desc}
+	}
+
+	sortVals := make([][]table.Value, t.NumRows)
+	for row := 0; row < t.NumRows; row++ {
+		sortVals[row] = make([]table.Value, len(keys))
+		for j, k := range keys {
+			v, err := resolveColumnPath(k.path, t, row)
+			if err != nil {
+				return nil, fmt.Errorf("sort %q: %w", strings.Join(k.path, "."), err)
+			}
+			sortVals[row][j] = v
 		}
-		keys[i] = key{idx, k.Desc}
 	}
 
 	perm := make([]int, t.NumRows)
@@ -151,8 +159,8 @@ func execSort(o *ast.SortOp, t *table.Table) (*table.Table, error) {
 		perm[i] = i
 	}
 	sort.SliceStable(perm, func(a, b int) bool {
-		for _, k := range keys {
-			cmp := compareValues(t.Col(k.idx).Get(perm[a]), t.Col(k.idx).Get(perm[b]))
+		for j, k := range keys {
+			cmp := compareValues(sortVals[perm[a]][j], sortVals[perm[b]][j])
 			if cmp != 0 {
 				if k.desc {
 					return cmp > 0
@@ -401,27 +409,19 @@ func execCount(t *table.Table) *table.Table {
 	return result
 }
 
-func execDistinct(o *ast.DistinctOp, t *table.Table) *table.Table {
-	var indices []int
-	if len(o.Columns) > 0 {
-		indices = make([]int, len(o.Columns))
-		for i, path := range o.Columns {
-			idx := t.ColIndex(path[0])
-			if idx < 0 {
-				return table.NewTable(t.Columns)
-			}
-			indices[i] = idx
-		}
-	}
-
+func execDistinct(o *ast.DistinctOp, t *table.Table) (*table.Table, error) {
 	seen := make(map[string]bool)
 	result := table.NewTable(t.Columns)
 	for i := 0; i < t.NumRows; i++ {
 		var key string
-		if len(indices) > 0 {
-			parts := make([]string, len(indices))
-			for j, idx := range indices {
-				parts[j] = t.Col(idx).Get(i).AsString()
+		if len(o.Columns) > 0 {
+			parts := make([]string, len(o.Columns))
+			for j, path := range o.Columns {
+				v, err := resolveColumnPath(path, t, i)
+				if err != nil {
+					return nil, fmt.Errorf("distinct %q: %w", strings.Join(path, "."), err)
+				}
+				parts[j] = v.AsString()
 			}
 			key = strings.Join(parts, "\x00")
 		} else {
@@ -437,7 +437,7 @@ func execDistinct(o *ast.DistinctOp, t *table.Table) *table.Table {
 			result.AddRow(rowVals(t, i))
 		}
 	}
-	return result
+	return result, nil
 }
 
 func execRename(o *ast.RenameOp, t *table.Table) (*table.Table, error) {

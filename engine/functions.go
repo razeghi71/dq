@@ -384,14 +384,13 @@ func getColValues(e *ast.FuncCallExpr, nested *table.Table) ([]table.Value, erro
 	if nested.NumRows == 0 {
 		return nil, nil
 	}
-	idx := nested.ColIndex(colExpr.Path[0])
-	if idx < 0 {
-		return nil, fmt.Errorf("%s(): column %q not found in nested table", e.Name, colExpr.Path[0])
-	}
-	col := nested.Col(idx)
 	vals := make([]table.Value, nested.NumRows)
 	for i := range vals {
-		vals[i] = col.Get(i)
+		v, err := resolveColumnPath(colExpr.Path, nested, i)
+		if err != nil {
+			return nil, fmt.Errorf("%s(%s): %w", e.Name, strings.Join(colExpr.Path, "."), err)
+		}
+		vals[i] = v
 	}
 	return vals, nil
 }
