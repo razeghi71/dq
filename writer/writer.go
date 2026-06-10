@@ -11,7 +11,7 @@ import (
 )
 
 // Write writes the table to w in the specified format.
-// Supported formats: "table" (default), "csv", "json", "jsonl".
+// Supported formats: "table" (default), "csv", "json", "jsonl", "avro", "parquet".
 func Write(w io.Writer, t *table.Table, format string) error {
 	switch format {
 	case "", "table":
@@ -22,8 +22,12 @@ func Write(w io.Writer, t *table.Table, format string) error {
 		return writeJSON(w, t)
 	case "jsonl":
 		return writeJSONL(w, t)
+	case "avro":
+		return writeAvro(w, t)
+	case "parquet":
+		return writeParquet(w, t)
 	default:
-		return fmt.Errorf("unsupported output format %q (supported: table, csv, json, jsonl)", format)
+		return fmt.Errorf("unsupported output format %q (supported: table, csv, json, jsonl, avro, parquet)", format)
 	}
 }
 

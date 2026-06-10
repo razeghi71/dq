@@ -255,6 +255,8 @@ dq 'users.csv | select name age'                        # table (default)
 dq -o csv  'users.csv | select name age' > out.csv      # CSV
 dq -o json 'users.csv | select name age' > out.json     # JSON array of objects
 dq -o jsonl 'users.csv | select name age' > out.jsonl   # one JSON object per line
+dq -o avro 'users.csv | select name age' > out.avro     # Avro object container file
+dq -o parquet 'users.csv | select name age' > out.parquet # Parquet file
 ```
 
 | Format  | Flag          | Notes                                                    |
@@ -263,6 +265,8 @@ dq -o jsonl 'users.csv | select name age' > out.jsonl   # one JSON object per li
 | `csv`   | `-o csv`      | Standard CSV. Nulls render as empty strings.             |
 | `json`  | `-o json`     | JSON array. Preserves types (ints, bools, nulls, nested).|
 | `jsonl` | `-o jsonl`    | One JSON object per line. Same type preservation as JSON. |
+| `avro`  | `-o avro`     | Avro object container file. Field names must match `[A-Za-z_][A-Za-z0-9_]*`. Requires at least one output column. |
+| `parquet` | `-o parquet` | Parquet file. Requires at least one output column. Column order is preserved via file metadata. |
 
 ## Supported Input Formats
 

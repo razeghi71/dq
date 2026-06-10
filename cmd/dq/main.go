@@ -110,7 +110,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  -f, -format string")
 	fmt.Fprintln(os.Stderr, "        input format: csv, json, jsonl, avro, parquet (overrides file extension)")
 	fmt.Fprintln(os.Stderr, "  -o, -output string")
-	fmt.Fprintln(os.Stderr, "        output format: table (default), csv, json, jsonl")
+	fmt.Fprintln(os.Stderr, "        output format: table (default), csv, json, jsonl, avro, parquet")
 	fmt.Fprintln(os.Stderr, "  -agent-guide")
 	fmt.Fprintln(os.Stderr, "        print an AI agent friendly guide")
 }

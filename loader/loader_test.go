@@ -1,9 +1,14 @@
 package loader
 
 import (
+	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	goavro "github.com/linkedin/goavro/v2"
 	"github.com/razeghi71/dq/table"
 )
 
@@ -428,4 +433,83 @@ func TestLoadNestedParquet(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkNestedTable(t, tbl)
+}
+
+func TestAvroSchemaNameNamespacedRecord(t *testing.T) {
+	schema := `{
+	  "type":"record","name":"Row","namespace":"com.example",
+	  "fields":[
+	    {"name":"v","type":["null","string",{"type":"record","name":"Inner","fields":[{"name":"x","type":"long"}]}]}
+	  ]}`
+	var schemaDef struct {
+		Namespace string `json:"namespace"`
+		Fields    []struct {
+			Type any `json:"type"`
+		} `json:"fields"`
+	}
+	if err := json.Unmarshal([]byte(schema), &schemaDef); err != nil {
+		t.Fatal(err)
+	}
+	branches, ok := asSlice(schemaDef.Fields[0].Type)
+	if !ok {
+		t.Fatalf("union type is %T, want slice", schemaDef.Fields[0].Type)
+	}
+	if got := avroSchemaName(branches[2], schemaDef.Namespace); got != "com.example.Inner" {
+		t.Fatalf("record branch name: want com.example.Inner, got %q", got)
+	}
+	v := map[string]any{"com.example.Inner": map[string]any{"x": int64(7)}}
+	got := avroValue(v, schemaDef.Fields[0].Type, schemaDef.Namespace)
+	if got.Type != table.TypeRecord {
+		t.Fatalf("avroValue: want record, got %v (%s)", got.Type, got.AsString())
+	}
+}
+
+func TestLoadAvroNamespacedUnionRecord(t *testing.T) {
+	schema := `{
+	  "type":"record","name":"Row","namespace":"com.example",
+	  "fields":[
+	    {"name":"v","type":["null","string",{"type":"record","name":"Inner","fields":[{"name":"x","type":"long"}]}]}
+	  ]}`
+	writeAvro := func(t *testing.T, rows []map[string]any) string {
+		t.Helper()
+		var buf bytes.Buffer
+		w, err := goavro.NewOCFWriter(goavro.OCFConfig{W: &buf, Schema: schema})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Append(rows); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(t.TempDir(), "namespaced.avro")
+		if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	path := writeAvro(t, []map[string]any{
+		{"v": goavro.Union("com.example.Inner", map[string]any{"x": int64(7)})},
+	})
+	tbl, err := Load(path, "avro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner := tbl.Get(0, "v")
+	if inner.Type != table.TypeRecord {
+		t.Fatalf("record branch: want record, got %v", inner.Type)
+	}
+	if got := fieldVal(t, inner, "x").Int; got != 7 {
+		t.Fatalf("record branch v.x: want 7, got %d", got)
+	}
+
+	path = writeAvro(t, []map[string]any{
+		{"v": goavro.Union("string", "hello")},
+	})
+	tbl, err = Load(path, "avro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := tbl.Get(0, "v").Str; got != "hello" {
+		t.Fatalf("string branch: want hello, got %q", got)
+	}
 }

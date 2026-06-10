@@ -281,6 +281,9 @@ func anyToValue(v interface{}) table.Value {
 		}
 		return table.ListVal(elems)
 	case map[string]interface{}:
+		if elem, ok := val["element"]; ok && len(val) == 1 {
+			return anyToValue(elem)
+		}
 		fields := buildRecordFields(val)
 		return table.RecordVal(fields)
 	default:
@@ -303,21 +306,161 @@ func buildRecordFields(m map[string]interface{}) []table.RecordField {
 	return fields
 }
 
-var avroPrimitives = map[string]bool{
-	"null": true, "boolean": true, "int": true, "long": true,
-	"float": true, "double": true, "bytes": true, "string": true,
+const parquetColumnOrderMetadataKey = "dq.column_order"
+
+func asMap(v any) (map[string]any, bool) {
+	m, ok := v.(map[string]any)
+	return m, ok
 }
 
-func avroValue(v interface{}) table.Value {
-	m, isMap := v.(map[string]interface{})
-	if isMap && len(m) == 1 {
-		for k, inner := range m {
-			if avroPrimitives[k] || (len(k) > 0 && k[0] >= 'A' && k[0] <= 'Z') {
-				return avroValue(inner) // union: unwrap
+func asSlice(v any) ([]any, bool) {
+	s, ok := v.([]any)
+	return s, ok
+}
+
+func avroValue(v any, schema any, namespace string) table.Value {
+	if v == nil {
+		return table.Null()
+	}
+	if s, ok := schema.(string); ok {
+		if m, ok := asMap(v); ok && len(m) == 1 {
+			for k, inner := range m {
+				if k == s {
+					return avroValue(inner, s, namespace)
+				}
 			}
+		}
+		return anyToValue(v)
+	}
+	if branches, ok := asSlice(schema); ok {
+		if m, ok := asMap(v); ok && len(m) == 1 {
+			for k, inner := range m {
+				for _, branch := range branches {
+					if avroSchemaName(branch, namespace) == k {
+						return avroValue(inner, branch, avroTypeNamespace(branch, namespace))
+					}
+				}
+			}
+		}
+		for _, branch := range branches {
+			if avroSchemaName(branch, namespace) != "null" {
+				return avroValue(v, branch, avroTypeNamespace(branch, namespace))
+			}
+		}
+		return table.Null()
+	}
+	if s, ok := asMap(schema); ok {
+		typ := s["type"]
+		switch ts := typ.(type) {
+		case string:
+			switch ts {
+			case "record":
+				return avroRecordValue(v, s, namespace)
+			case "array":
+				return avroArrayValue(v, s["items"], namespace)
+			default:
+				return anyToValue(v)
+			}
+		default:
+			if nested, ok := asSlice(typ); ok {
+				return avroValue(v, nested, namespace)
+			}
+			if nested, ok := asMap(typ); ok {
+				return avroValue(v, nested, namespace)
+			}
+			return anyToValue(v)
 		}
 	}
 	return anyToValue(v)
+}
+
+func avroTypeNamespace(schema any, parentNamespace string) string {
+	schemaMap, ok := asMap(schema)
+	if !ok {
+		return parentNamespace
+	}
+	if ns, ok := schemaMap["namespace"].(string); ok {
+		return ns
+	}
+	return parentNamespace
+}
+
+func avroSchemaName(schema any, namespace string) string {
+	if s, ok := schema.(string); ok {
+		return s
+	}
+	if s, ok := asMap(schema); ok {
+		switch typ := s["type"].(type) {
+		case string:
+			switch typ {
+			case "record", "enum", "fixed":
+				return avroFullName(s, namespace)
+			case "array":
+				return "array"
+			case "map":
+				return "map"
+			default:
+				return typ
+			}
+		}
+	}
+	return ""
+}
+
+func avroFullName(schema map[string]any, parentNamespace string) string {
+	name, _ := schema["name"].(string)
+	if name == "" {
+		return ""
+	}
+	ns := parentNamespace
+	if n, ok := schema["namespace"].(string); ok {
+		ns = n
+	}
+	if ns != "" {
+		return ns + "." + name
+	}
+	return name
+}
+
+func avroRecordValue(v any, schema map[string]any, namespace string) table.Value {
+	rec, ok := asMap(v)
+	if !ok {
+		return anyToValue(v)
+	}
+	fieldsRaw, ok := asSlice(schema["fields"])
+	if !ok {
+		return anyToValue(v)
+	}
+	recordNamespace := avroTypeNamespace(schema, namespace)
+	fields := make([]table.RecordField, 0, len(fieldsRaw))
+	for _, fieldRaw := range fieldsRaw {
+		field, ok := asMap(fieldRaw)
+		if !ok {
+			continue
+		}
+		name, ok := field["name"].(string)
+		if !ok {
+			continue
+		}
+		fields = append(fields, table.RecordField{
+			Name:  name,
+			Value: avroValue(rec[name], field["type"], recordNamespace),
+		})
+	}
+	sort.Slice(fields, func(i, j int) bool { return fields[i].Name < fields[j].Name })
+	return table.RecordVal(fields)
+}
+
+func avroArrayValue(v any, itemSchema any, namespace string) table.Value {
+	items, ok := asSlice(v)
+	if !ok {
+		return anyToValue(v)
+	}
+	values := make([]table.Value, len(items))
+	for i, item := range items {
+		values[i] = avroValue(item, itemSchema, namespace)
+	}
+	return table.ListVal(values)
 }
 
 func loadAvro(filename string) (*table.Table, error) {
@@ -337,8 +480,10 @@ func loadAvro(filename string) (*table.Table, error) {
 	schema := codec.Schema()
 
 	var schemaDef struct {
-		Fields []struct {
+		Namespace string `json:"namespace"`
+		Fields    []struct {
 			Name string `json:"name"`
+			Type any    `json:"type"`
 		} `json:"fields"`
 	}
 	if err := json.Unmarshal([]byte(schema), &schemaDef); err != nil {
@@ -346,8 +491,10 @@ func loadAvro(filename string) (*table.Table, error) {
 	}
 
 	columns := make([]string, len(schemaDef.Fields))
+	fieldSchemas := make(map[string]any, len(schemaDef.Fields))
 	for i, field := range schemaDef.Fields {
 		columns[i] = field.Name
+		fieldSchemas[field.Name] = field.Type
 	}
 
 	t := table.NewTable(columns)
@@ -370,7 +517,8 @@ func loadAvro(filename string) (*table.Table, error) {
 				vals[i] = table.Null()
 				continue
 			}
-			vals[i] = avroValue(v)
+			val := avroValue(v, fieldSchemas[col], schemaDef.Namespace)
+			vals[i] = val
 		}
 		t.AddRow(vals)
 	}
@@ -395,10 +543,7 @@ func loadParquet(filename string) (*table.Table, error) {
 	defer reader.Close()
 
 	schema := reader.Schema()
-	var columns []string
-	for _, field := range schema.Fields() {
-		columns = append(columns, field.Name())
-	}
+	columns := parquetColumns(schema, reader)
 	t := table.NewTable(columns)
 
 	buf := make([]any, 128)
@@ -423,4 +568,38 @@ func loadParquet(filename string) (*table.Table, error) {
 		}
 	}
 	return t, nil
+}
+
+func parquetColumns(schema *parquet.Schema, reader *parquet.GenericReader[any]) []string {
+	schemaNames := make([]string, 0, len(schema.Fields()))
+	schemaSet := make(map[string]bool, len(schema.Fields()))
+	for _, field := range schema.Fields() {
+		name := field.Name()
+		schemaNames = append(schemaNames, name)
+		schemaSet[name] = true
+	}
+
+	if file := reader.File(); file != nil {
+		if order, ok := file.Lookup(parquetColumnOrderMetadataKey); ok && order != "" {
+			columns := make([]string, 0, len(schemaNames))
+			seen := make(map[string]bool, len(schemaNames))
+			for _, name := range strings.Split(order, ",") {
+				if name == "" || !schemaSet[name] || seen[name] {
+					continue
+				}
+				columns = append(columns, name)
+				seen[name] = true
+			}
+			for _, name := range schemaNames {
+				if !seen[name] {
+					columns = append(columns, name)
+				}
+			}
+			if len(columns) > 0 {
+				return columns
+			}
+		}
+	}
+
+	return schemaNames
 }
