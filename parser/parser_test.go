@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/razeghi71/dq/ast"
@@ -171,6 +172,50 @@ func TestParseIsNullNotNegated(t *testing.T) {
 	}
 	if isn.Negated {
 		t.Error("expected not negated (is null)")
+	}
+}
+
+func TestParseNullEqualityRejected(t *testing.T) {
+	cases := []struct {
+		name    string
+		query   string
+		wantMsg string
+	}{
+		{"eq_null", "users.csv | filter { age == null }", `use "age is null" instead of "age == null"`},
+		{"neq_null", "users.csv | filter { age != null }", `use "age is not null" instead of "age != null"`},
+		{"null_eq_column", "users.csv | filter { null == age }", `use "age is null" instead of "age == null"`},
+		{"dot_path", "users.csv | filter { address.city == null }", `use "address.city is null"`},
+		{"inside_or", "users.csv | filter { name == null or age > 20 }", `use "name is null"`},
+		{"null_eq_null", "users.csv | filter { null == null }", `use "is null" / "is not null" for null checks, not ==`},
+		{"in_transform", "users.csv | transform flag = age == null", `use "age is null"`},
+		{"in_if", `users.csv | transform x = if(age == null, 0, age)`, `use "age is null"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse(tc.query)
+			if err == nil {
+				t.Fatalf("expected parse error for %q", tc.query)
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.wantMsg)
+			}
+		})
+	}
+}
+
+func TestParseNullLiteralStillAllowed(t *testing.T) {
+	valid := []string{
+		"users.csv | filter { age is null }",
+		"users.csv | filter { age is not null }",
+		"users.csv | transform x = coalesce(age, null)",
+		`users.csv | transform x = if(age is null, 0, age)`,
+		"users.csv | filter { age > 20 }",
+		`users.csv | filter { city == "NY" }`,
+	}
+	for _, q := range valid {
+		if _, err := Parse(q); err != nil {
+			t.Errorf("expected %q to parse, got error: %v", q, err)
+		}
 	}
 }
 

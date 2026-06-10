@@ -576,6 +576,9 @@ func (p *Parser) parseExprPrec(minPrec int) (ast.Expr, error) {
 		if err != nil {
 			return nil, err
 		}
+		if (op == "==" || op == "!=") && (isNullLiteral(left) || isNullLiteral(right)) {
+			return nil, nullComparisonError(op, left, right)
+		}
 		left = &ast.BinaryExpr{Op: op, Left: left, Right: right}
 	}
 
@@ -599,6 +602,29 @@ func (p *Parser) parseExprPrec(minPrec int) (ast.Expr, error) {
 	}
 
 	return left, nil
+}
+
+func isNullLiteral(e ast.Expr) bool {
+	lit, ok := e.(*ast.LiteralExpr)
+	return ok && lit.Kind == "null"
+}
+
+// nullComparisonError rejects "expr == null" / "expr != null" with a hint
+// pointing to the documented "is null" / "is not null" syntax.
+func nullComparisonError(op string, left, right ast.Expr) error {
+	isForm := "is null"
+	if op == "!=" {
+		isForm = "is not null"
+	}
+	other := left
+	if isNullLiteral(other) {
+		other = right
+	}
+	if col, ok := other.(*ast.ColumnExpr); ok {
+		name := strings.Join(col.Path, ".")
+		return fmt.Errorf("use %q instead of %q for null checks", name+" "+isForm, name+" "+op+" null")
+	}
+	return fmt.Errorf("use \"is null\" / \"is not null\" for null checks, not %s", op)
 }
 
 func (p *Parser) peekBinaryOp() (string, int, bool) {
