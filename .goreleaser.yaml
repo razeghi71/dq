@@ -1,10 +1,5 @@
 version: 2
 
-git:
-  tag_sort: semver
-  ignore_tags:
-    - path
-
 builds:
   - main: ./cmd/dq
     env: [CGO_ENABLED=0]
