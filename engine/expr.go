@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 
 	"github.com/razeghi71/dq/ast"
@@ -147,10 +148,10 @@ func evalComparison(op string, left, right table.Value) (table.Value, error) {
 		}
 	}
 
-	// String comparison
-	if left.Type == table.TypeString && right.Type == table.TypeString {
-		cmp := strings.Compare(left.Str, right.Str)
-		return table.BoolVal(cmpResult(op, cmp)), nil
+	// Lists and records have no meaningful scalar comparison: error clearly
+	// (e.g. string vs record), as before.
+	if !isComparableScalar(left) || !isComparableScalar(right) {
+		return table.Null(), fmt.Errorf("cannot compare %v with %v", left.AsString(), right.AsString())
 	}
 
 	// Bool comparison
@@ -165,21 +166,62 @@ func evalComparison(op string, left, right table.Value) (table.Value, error) {
 		}
 	}
 
-	// Numeric comparison
-	lf, lok := left.AsFloat()
-	rf, rok := right.AsFloat()
-	if lok && rok {
-		diff := lf - rf
-		var cmp int
-		if diff < 0 {
-			cmp = -1
-		} else if diff > 0 {
-			cmp = 1
+	// Numeric comparison: applies when both sides are numeric, including
+	// strings that parse as numbers. This lets widened CSV string columns
+	// (e.g. "1", "2.5") compare against numeric literals, consistent with how
+	// join/group/distinct match int 1 with string "1". Unlike a pure
+	// string-key normalization, parsing to a number keeps ordering (<, >)
+	// correct (e.g. "10" > "9").
+	if lf, lok := cmpFloat(left); lok {
+		if rf, rok := cmpFloat(right); rok {
+			diff := lf - rf
+			var cmp int
+			if diff < 0 {
+				cmp = -1
+			} else if diff > 0 {
+				cmp = 1
+			}
+			return table.BoolVal(cmpResult(op, cmp)), nil
 		}
-		return table.BoolVal(cmpResult(op, cmp)), nil
 	}
 
-	return table.Null(), fmt.Errorf("cannot compare %v with %v", left.AsString(), right.AsString())
+	// Fallback for the remaining scalar combinations (e.g. val == "something",
+	// or numeric vs non-numeric string): compare by value representation, the
+	// same normalization used by join/group/distinct.
+	cmp := strings.Compare(left.AsString(), right.AsString())
+	return table.BoolVal(cmpResult(op, cmp)), nil
+}
+
+// isComparableScalar reports whether a value can take part in a scalar
+// comparison. Lists and records cannot and produce a clear error instead.
+func isComparableScalar(v table.Value) bool {
+	switch v.Type {
+	case table.TypeInt, table.TypeFloat, table.TypeString, table.TypeBool:
+		return true
+	default:
+		return false
+	}
+}
+
+// cmpFloat coerces a value to float64 for comparison. Unlike Value.AsFloat
+// (used for arithmetic), it also parses numeric strings so that widened CSV
+// columns can be compared against numeric literals. It is intentionally local
+// to comparison to avoid changing arithmetic/string-concat semantics.
+func cmpFloat(v table.Value) (float64, bool) {
+	switch v.Type {
+	case table.TypeInt:
+		return float64(v.Int), true
+	case table.TypeFloat:
+		return v.Float, true
+	case table.TypeString:
+		f, err := strconv.ParseFloat(strings.TrimSpace(v.Str), 64)
+		if err != nil {
+			return 0, false
+		}
+		return f, true
+	default:
+		return 0, false
+	}
 }
 
 func cmpResult(op string, cmp int) bool {

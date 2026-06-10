@@ -580,9 +580,10 @@ func TestLogicalErrorOnNonBool(t *testing.T) {
 }
 
 func TestComparisonErrorOnTypeMismatch(t *testing.T) {
-	err := runQueryExpectErr(t, usersTable(), "filter { age > name }")
+	// Records/lists are not comparable to scalars and must error clearly.
+	err := runQueryExpectErr(t, nestedTable(), "filter { name > address }")
 	if err == nil {
-		t.Fatal("expected error for comparing int with string")
+		t.Fatal("expected error for comparing string with record")
 	}
 }
 

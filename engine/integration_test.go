@@ -384,6 +384,32 @@ func TestIntegrationColumnTypeWidening(t *testing.T) {
 	})
 }
 
+// TestIntegrationFilterCrossTypeComparison covers ticket 001: comparisons in
+// filter match by value, so widened string columns compare against numeric
+// literals consistently with join/group/distinct.
+func TestIntegrationFilterCrossTypeComparison(t *testing.T) {
+	cases := []struct {
+		query string
+		want  int
+	}{
+		{`filter { val == 1 }`, 1},          // string "1" matches int literal 1
+		{`filter { val == 2.5 }`, 1},        // string "2.5" matches float literal 2.5
+		{`filter { val == "1" }`, 1},        // string literal still works
+		{`filter { val == "something" }`, 1},// non-numeric string compare
+		{`filter { val != 1 }`, 2},          // 2.5 and "something"
+		{`filter { val > 1 }`, 2},           // numeric 2.5 plus lexical "something" > "1"
+		{`filter { val > 9 }`, 1},           // "something"; numeric 2.5 < 9 (not lexical)
+	}
+	for _, c := range cases {
+		t.Run(c.query, func(t *testing.T) {
+			result := loadAndQuery(t, testdataDir+"/mixed_types.csv", c.query)
+			if result.NumRows != c.want {
+				t.Fatalf("%s: expected %d rows, got %d", c.query, c.want, result.NumRows)
+			}
+		})
+	}
+}
+
 // ============================================================
 // Stdin source (-)
 // ============================================================
