@@ -440,6 +440,38 @@ func TestIntegrationStdinPipeline(t *testing.T) {
 	}
 }
 
+func TestIntegrationStringPredicates(t *testing.T) {
+	file := testdataDir + "/users.csv"
+
+	t.Run("contains_filter", func(t *testing.T) {
+		result := loadAndQuery(t, file, `filter { contains(city, "NY") } | select name | sort name`)
+		want := []string{"Alice", "Charlie", "Frank"}
+		if result.NumRows != len(want) {
+			t.Fatalf("expected %d rows, got %d", len(want), result.NumRows)
+		}
+		nameIdx := result.ColIndex("name")
+		for i, w := range want {
+			if got := result.GetAt(i, nameIdx).Str; got != w {
+				t.Errorf("row %d: expected %q, got %q", i, w, got)
+			}
+		}
+	})
+
+	t.Run("matches_filter", func(t *testing.T) {
+		result := loadAndQuery(t, file, `filter { matches(name, "^[AB]") } | select name | sort name`)
+		want := []string{"Alice", "Bob"}
+		if result.NumRows != len(want) {
+			t.Fatalf("expected %d rows, got %d", len(want), result.NumRows)
+		}
+		nameIdx := result.ColIndex("name")
+		for i, w := range want {
+			if got := result.GetAt(i, nameIdx).Str; got != w {
+				t.Errorf("row %d: expected %q, got %q", i, w, got)
+			}
+		}
+	})
+}
+
 func TestJoinIntegration(t *testing.T) {
 	usersFile := testdataDir + "/users.csv"
 	ordersFile := testdataDir + "/orders.csv"

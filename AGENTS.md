@@ -251,6 +251,26 @@ These are available in `transform` and `reduce` expressions:
 * `if(cond, then, else)` — conditional
 * `year(date)`, `month(date)`, `day(date)` — date extraction
 
+**String predicates (return booleans; usable in `filter` and `transform`):**
+* `contains(s, sub)` — true if `s` contains substring `sub`
+* `starts_with(s, prefix)` — true if `s` starts with `prefix`
+* `ends_with(s, suffix)` — true if `s` ends with `suffix`
+* `matches(s, regex)` — true if `s` contains a match for the (RE2) regular expression `regex` (unanchored; use `^...$` for full-string match)
+
+Matching is **case-sensitive** (`"ERROR"` does not match `"error"`). Use `upper(s)` / `lower(s)` for case-insensitive checks.
+
+Non-string values are converted with `AsString()` before matching (same as `upper` / `len`).
+
+Null arguments produce null. In `filter`, a null predicate is treated as false and the row is dropped.
+
+Invalid regex in `matches()` fails the query when that row is evaluated (including patterns taken from a column).
+
+```
+dq 'logs.csv | filter { contains(upper(message), "ERROR") }'
+dq 'logs.csv | filter { starts_with(level, "WARN") }'
+dq 'access.log.csv | filter { matches(message, "timeout|refused") }'
+```
+
 **Operators work in both:**
 * Arithmetic: `+`, `-`, `*`, `/`
 * Comparison: `==`, `!=`, `<`, `>`, `<=`, `>=`

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/razeghi71/dq/ast"
@@ -310,6 +311,175 @@ func TestUpperLower(t *testing.T) {
 	}
 	if result.GetAt(0, 1).Str != "alice" {
 		t.Errorf("expected 'alice', got %q", result.GetAt(0, 1).Str)
+	}
+}
+
+func sortedNames(t *testing.T, result *table.Table) []string {
+	t.Helper()
+	idx := result.ColIndex("name")
+	if idx < 0 {
+		t.Fatal("name column not found")
+	}
+	names := make([]string, result.NumRows)
+	for i := range names {
+		names[i] = result.GetAt(i, idx).Str
+	}
+	return names
+}
+
+func assertSortedNames(t *testing.T, result *table.Table, want []string) {
+	t.Helper()
+	got := sortedNames(t, result)
+	if len(got) != len(want) {
+		t.Fatalf("expected %d rows, got %d: %v", len(want), len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("row %d: expected %q, got %q", i, want[i], got[i])
+		}
+	}
+}
+
+func TestStringPredicatesFilter(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+		want  []string
+	}{
+		{"contains", `filter { contains(name, "a") }`, []string{"Charlie", "Diana", "Frank"}},
+		{"starts_with", `filter { starts_with(name, "C") }`, []string{"Charlie"}},
+		{"ends_with", `filter { ends_with(name, "e") }`, []string{"Alice", "Charlie", "Eve"}},
+		{"matches", `filter { matches(name, "^[AB]") }`, []string{"Alice", "Bob"}},
+		{"matches_unanchored", `filter { matches(name, "li") }`, []string{"Alice", "Charlie"}},
+		{"matches_anchored_full", `filter { matches(name, "^Alice$") }`, []string{"Alice"}},
+		{"negative", `filter { contains(name, "zzz") }`, nil},
+		{"not_contains", `filter { not contains(name, "a") }`, []string{"Alice", "Bob", "Eve"}},
+		{"combined", `filter { contains(name, "a") and city == "NY" }`, []string{"Charlie", "Frank"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := runQuery(t, usersTable(), tc.query+" | select name | sort name")
+			assertSortedNames(t, result, tc.want)
+		})
+	}
+}
+
+func TestStringPredicatesTransform(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+		want  bool
+	}{
+		{"contains", `transform hit = contains(city, "Y")`, true},
+		{"starts_with", `transform hit = starts_with(name, "Al")`, true},
+		{"ends_with", `transform hit = ends_with(name, "ce")`, true},
+		{"matches", `transform hit = matches(name, "^Al")`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := runQuery(t, usersTable(), tc.query+" | select hit | head 1")
+			idx := result.ColIndex("hit")
+			b, ok := result.GetAt(0, idx).AsBool()
+			if !ok || b != tc.want {
+				t.Errorf("expected %v, got ok=%v val=%v", tc.want, ok, b)
+			}
+		})
+	}
+}
+
+func TestStringPredicatesCoercion(t *testing.T) {
+	result := runQuery(t, usersTable(), `transform hit = contains(age, "3") | select name hit`)
+	hitIdx := result.ColIndex("hit")
+	nameIdx := result.ColIndex("name")
+	for i := 0; i < result.NumRows; i++ {
+		name := result.GetAt(i, nameIdx).Str
+		hit, ok := result.GetAt(i, hitIdx).AsBool()
+		want := name == "Alice" || name == "Charlie" // ages 30, 35 stringify to "30", "35"
+		if !ok || hit != want {
+			t.Errorf("%s: expected hit=%v, got ok=%v val=%v", name, want, ok, hit)
+		}
+	}
+}
+
+func TestStringPredicatesNullPropagation(t *testing.T) {
+	tbl := table.NewTable([]string{"s", "needle"})
+	tbl.AddRow([]table.Value{table.Null(), table.StrVal("a")})
+	tbl.AddRow([]table.Value{table.StrVal("abc"), table.Null()})
+	for _, fn := range []string{"contains", "starts_with", "ends_with", "matches"} {
+		t.Run(fn+"_null_haystack", func(t *testing.T) {
+			result := runQuery(t, tbl, "transform x = "+fn+`(s, "a") | head 1`)
+			idx := result.ColIndex("x")
+			if !result.GetAt(0, idx).IsNull() {
+				t.Errorf("%s(null, ...) should be null, got %v", fn, result.GetAt(0, idx).AsString())
+			}
+		})
+		t.Run(fn+"_null_needle", func(t *testing.T) {
+			result := runQuery(t, tbl, "transform x = "+fn+`(s, needle) | tail 1`)
+			idx := result.ColIndex("x")
+			if !result.GetAt(0, idx).IsNull() {
+				t.Errorf("%s(..., null) should be null, got %v", fn, result.GetAt(0, idx).AsString())
+			}
+		})
+	}
+}
+
+func TestStringPredicatesFilterNullDropsRow(t *testing.T) {
+	tbl := table.NewTable([]string{"name", "message"})
+	tbl.AddRow([]table.Value{table.StrVal("Alice"), table.StrVal("ERROR: timeout")})
+	tbl.AddRow([]table.Value{table.StrVal("Bob"), table.Null()})
+	result := runQuery(t, tbl, `filter { contains(message, "ERROR") } | select name`)
+	if result.NumRows != 1 {
+		t.Fatalf("expected 1 row, got %d", result.NumRows)
+	}
+	if got := result.GetAt(0, 0).Str; got != "Alice" {
+		t.Errorf("expected Alice, got %q", got)
+	}
+}
+
+func TestMatchesInvalidRegex(t *testing.T) {
+	err := runQueryExpectErr(t, usersTable(), `filter { matches(name, "[") }`)
+	if err == nil {
+		t.Fatal("expected error for invalid regex")
+	}
+	if !strings.Contains(err.Error(), "invalid regex") {
+		t.Errorf("expected invalid regex error, got: %v", err)
+	}
+}
+
+func TestMatchesInvalidRegexFromColumn(t *testing.T) {
+	tbl := table.NewTable([]string{"s", "pattern"})
+	tbl.AddRow([]table.Value{table.StrVal("hello"), table.StrVal("ell")})
+	tbl.AddRow([]table.Value{table.StrVal("world"), table.StrVal("[invalid")})
+	err := runQueryExpectErr(t, tbl, `filter { matches(s, pattern) }`)
+	if err == nil {
+		t.Fatal("expected error for invalid regex from column")
+	}
+	if !strings.Contains(err.Error(), "invalid regex") {
+		t.Errorf("expected invalid regex error, got: %v", err)
+	}
+}
+
+func TestStringPredicatesArity(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{"contains_1_arg", `filter { contains(name) }`},
+		{"contains_3_args", `filter { contains(name, "a", "b") }`},
+		{"starts_with_1_arg", `filter { starts_with(name) }`},
+		{"starts_with_3_args", `filter { starts_with(name, "A", "B") }`},
+		{"ends_with_1_arg", `filter { ends_with(name) }`},
+		{"ends_with_3_args", `filter { ends_with(name, "e", "x") }`},
+		{"matches_1_arg", `filter { matches(name) }`},
+		{"matches_3_args", `filter { matches(name, "A", "B") }`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runQueryExpectErr(t, usersTable(), tc.query)
+			if err == nil {
+				t.Fatal("expected arity error")
+			}
+		})
 	}
 }
 

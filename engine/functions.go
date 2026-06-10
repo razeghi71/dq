@@ -3,7 +3,9 @@ package engine
 import (
 	"fmt"
 	"math"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/razeghi71/dq/ast"
@@ -24,6 +26,14 @@ func evalFunc(e *ast.FuncCallExpr, ctx *EvalContext) (table.Value, error) {
 		return callSubstr(e.Args, ctx)
 	case "trim":
 		return callTrim(e.Args, ctx)
+	case "contains":
+		return callContains(e.Args, ctx)
+	case "starts_with":
+		return callStartsWith(e.Args, ctx)
+	case "ends_with":
+		return callEndsWith(e.Args, ctx)
+	case "matches":
+		return callMatches(e.Args, ctx)
 	case "coalesce":
 		return callCoalesce(e.Args, ctx)
 	case "if":
@@ -144,6 +154,97 @@ func callTrim(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
 		return table.Null(), nil
 	}
 	return table.StrVal(strings.TrimSpace(v.AsString())), nil
+}
+
+// strPredicateArgs evaluates the two arguments of a binary string predicate,
+// returning the haystack and needle as strings. If either argument is null,
+// ok is false so the caller can propagate null.
+func strPredicateArgs(name, secondArgLabel string, args []ast.Expr, ctx *EvalContext) (s, sub string, ok bool, err error) {
+	if len(args) != 2 {
+		return "", "", false, fmt.Errorf("%s() takes 2 arguments (string, %s), got %d", name, secondArgLabel, len(args))
+	}
+	sv, err := Eval(args[0], ctx)
+	if err != nil {
+		return "", "", false, err
+	}
+	subv, err := Eval(args[1], ctx)
+	if err != nil {
+		return "", "", false, err
+	}
+	if sv.IsNull() || subv.IsNull() {
+		return "", "", false, nil
+	}
+	return sv.AsString(), subv.AsString(), true, nil
+}
+
+func callContains(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
+	s, sub, ok, err := strPredicateArgs("contains", "substring", args, ctx)
+	if err != nil {
+		return table.Null(), err
+	}
+	if !ok {
+		return table.Null(), nil
+	}
+	return table.BoolVal(strings.Contains(s, sub)), nil
+}
+
+func callStartsWith(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
+	s, sub, ok, err := strPredicateArgs("starts_with", "prefix", args, ctx)
+	if err != nil {
+		return table.Null(), err
+	}
+	if !ok {
+		return table.Null(), nil
+	}
+	return table.BoolVal(strings.HasPrefix(s, sub)), nil
+}
+
+func callEndsWith(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
+	s, sub, ok, err := strPredicateArgs("ends_with", "suffix", args, ctx)
+	if err != nil {
+		return table.Null(), err
+	}
+	if !ok {
+		return table.Null(), nil
+	}
+	return table.BoolVal(strings.HasSuffix(s, sub)), nil
+}
+
+var (
+	regexCacheMu sync.Mutex
+	// regexCache is unbounded; fine for one-shot CLI queries with literal patterns,
+	// but patterns from column values are cached for the process lifetime.
+	regexCache = map[string]*regexp.Regexp{}
+)
+
+// compileRegex compiles and caches a regular expression pattern.
+func compileRegex(pattern string) (*regexp.Regexp, error) {
+	regexCacheMu.Lock()
+	defer regexCacheMu.Unlock()
+	if re, ok := regexCache[pattern]; ok {
+		return re, nil
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+	regexCache[pattern] = re
+	return re, nil
+}
+
+func callMatches(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
+	s, pattern, ok, err := strPredicateArgs("matches", "regex", args, ctx)
+	if err != nil {
+		return table.Null(), err
+	}
+	if !ok {
+		return table.Null(), nil
+	}
+	re, err := compileRegex(pattern)
+	if err != nil {
+		return table.Null(), fmt.Errorf("matches(): invalid regex %q: %v", pattern, err)
+	}
+	return table.BoolVal(re.MatchString(s)), nil
 }
 
 func callCoalesce(args []ast.Expr, ctx *EvalContext) (table.Value, error) {

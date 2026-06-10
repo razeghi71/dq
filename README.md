@@ -217,6 +217,16 @@ Notes:
 **For `transform`** (compute per row):
 `upper(s)`, `lower(s)`, `len(s)`, `trim(s)`, `substr(s, start, len)`, `coalesce(a, b, ...)`, `if(cond, then, else)`, `year(d)`, `month(d)`, `day(d)`
 
+**String predicates** (return booleans; handy in `filter` and `transform`):
+`contains(s, sub)`, `starts_with(s, prefix)`, `ends_with(s, suffix)`, `matches(s, regex)` (unanchored RE2 regex; use `^...$` to match the whole string). Matching is case-sensitive; use `upper(s)` / `lower(s)` for case-insensitive checks. Non-string values are converted with `AsString()` before matching. Null arguments produce null; in `filter`, a null predicate is treated as false and the row is dropped. Invalid regex in `matches()` fails the query when that row is evaluated.
+
+```bash
+dq 'logs.csv | filter { contains(upper(message), "ERROR") }'
+dq 'logs.csv | filter { starts_with(level, "WARN") }'
+dq 'access.csv | filter { ends_with(path, ".json") }'
+dq 'logs.csv | filter { matches(message, "timeout|refused") }'
+```
+
 **Operators** (work everywhere):
 `+`, `-`, `*`, `/`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `and`, `or`, `not`
 
