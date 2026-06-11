@@ -152,12 +152,19 @@ func loadCSV(filename string, columns []string) (*table.Table, error) {
 	return loadCSVReader(f, columns)
 }
 
+const utf8BOM = "\ufeff"
+
+func stripUTF8BOM(s string) string {
+	return strings.TrimPrefix(s, utf8BOM)
+}
+
 func isRepeatedHeader(row, columns []string) bool {
-	if len(row) != len(columns) {
+	norm := trimmedCSVFields(row)
+	if len(norm) != len(columns) {
 		return false
 	}
 	for i := range columns {
-		if strings.TrimSpace(row[i]) != columns[i] {
+		if norm[i] != columns[i] {
 			return false
 		}
 	}
@@ -175,7 +182,11 @@ const (
 func trimmedCSVFields(row []string) []string {
 	out := make([]string, len(row))
 	for i, f := range row {
-		out[i] = strings.TrimSpace(f)
+		f = strings.TrimSpace(f)
+		if i == 0 {
+			f = stripUTF8BOM(f)
+		}
+		out[i] = f
 	}
 	return out
 }

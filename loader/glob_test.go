@@ -89,6 +89,76 @@ func TestLoadGlobCSVRepeatedHeaderSkipped(t *testing.T) {
 	}
 }
 
+func TestLoadGlobCSVUTF8BOMFirstShard(t *testing.T) {
+	dir := t.TempDir()
+	writeGlobTestFiles(t, dir, map[string]string{
+		"a.csv": "\ufeffid,name\n1,Alice\n",
+		"b.csv": "id,name\n2,Bob\n",
+	})
+
+	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tbl.ColIndex("id") < 0 || tbl.ColIndex("name") < 0 {
+		t.Fatalf("expected id and name columns, got %v", tbl.Columns)
+	}
+	if tbl.ColIndex("\ufeffid") >= 0 {
+		t.Fatalf("BOM must not appear in column names; got %v", tbl.Columns)
+	}
+	if len(tbl.Columns) != 2 {
+		t.Fatalf("expected 2 columns, got %v", tbl.Columns)
+	}
+	if tbl.NumRows != 2 {
+		t.Fatalf("expected 2 rows, got %d", tbl.NumRows)
+	}
+	if tbl.Get(0, "id").Int != 1 {
+		t.Errorf("row 0 id: want 1, got %v", tbl.Get(0, "id"))
+	}
+	if tbl.Get(0, "name").Str != "Alice" {
+		t.Errorf("row 0 name: want Alice, got %q", tbl.Get(0, "name").Str)
+	}
+	if tbl.Get(1, "id").Int != 2 {
+		t.Errorf("row 1 id: want 2, got %v", tbl.Get(1, "id"))
+	}
+	if tbl.Get(1, "name").Str != "Bob" {
+		t.Errorf("row 1 name: want Bob, got %q", tbl.Get(1, "name").Str)
+	}
+}
+
+func TestLoadGlobCSVUTF8BOMRepeatedHeaderOnLaterShard(t *testing.T) {
+	dir := t.TempDir()
+	writeGlobTestFiles(t, dir, map[string]string{
+		"a.csv": "id,name\n1,Alice\n",
+		"b.csv": "\ufeffid,name\n2,Bob\n",
+	})
+
+	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tbl.ColIndex("id") < 0 || tbl.ColIndex("name") < 0 {
+		t.Fatalf("expected id and name columns, got %v", tbl.Columns)
+	}
+	if tbl.ColIndex("\ufeffid") >= 0 {
+		t.Fatalf("BOM must not appear in column names; got %v", tbl.Columns)
+	}
+	if tbl.NumRows != 2 {
+		t.Fatalf("expected 2 rows, got %d", tbl.NumRows)
+	}
+	for i := 0; i < tbl.NumRows; i++ {
+		if tbl.Get(i, "id").Int == 0 && tbl.Get(i, "name").Str == "name" {
+			t.Fatalf("header row leaked into data at row %d", i)
+		}
+	}
+	if tbl.Get(1, "id").Int != 2 {
+		t.Errorf("row 1 id: want 2, got %v", tbl.Get(1, "id"))
+	}
+	if tbl.Get(1, "name").Str != "Bob" {
+		t.Errorf("row 1 name: want Bob, got %q", tbl.Get(1, "name").Str)
+	}
+}
+
 func TestLoadGlobCSVHeaderlessShard(t *testing.T) {
 	dir := t.TempDir()
 	writeGlobTestFiles(t, dir, map[string]string{

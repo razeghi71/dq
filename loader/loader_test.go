@@ -100,6 +100,32 @@ func TestLoadCSV(t *testing.T) {
 	checkUsersTable(t, tbl)
 }
 
+func csvWithUTF8BOM(content string) string {
+	return "\ufeff" + content
+}
+
+func TestLoadCSVUTF8BOMStripsFirstHeaderField(t *testing.T) {
+	tbl, err := LoadReader(strings.NewReader(csvWithUTF8BOM("name,age\nAlice,30\n")), "csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tbl.ColIndex("name") < 0 {
+		t.Fatalf("expected column name, got %v", tbl.Columns)
+	}
+	if tbl.ColIndex("\ufeffname") >= 0 {
+		t.Fatalf("BOM must not appear in column names; got %v", tbl.Columns)
+	}
+	if tbl.NumRows != 1 {
+		t.Fatalf("expected 1 row, got %d", tbl.NumRows)
+	}
+	if tbl.Get(0, "name").Str != "Alice" {
+		t.Errorf("name: want Alice, got %q", tbl.Get(0, "name").Str)
+	}
+	if tbl.Get(0, "age").Int != 30 {
+		t.Errorf("age: want 30, got %d", tbl.Get(0, "age").Int)
+	}
+}
+
 func TestCSVColumnTypeWideningIntFloat(t *testing.T) {
 	csv := "val\n1\n2.5\n3\n"
 	tbl, err := LoadReader(strings.NewReader(csv), "csv")
