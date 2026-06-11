@@ -40,26 +40,6 @@ dq 'file.csv | operation1 | operation2 | ...'
 
 Wrap queries in single quotes so your shell doesn't interpret `|`, `{`, `}`, or `>`.
 
-### Query syntax
-
-Operations use one of three argument styles:
-
-- **Lists** — comma-separated columns or keys: `select name, age`, `sort city, -age`, `group city, department`
-- **Bindings** — comma-separated `=` assignments: `transform x = expr`, `rename old=new`
-- **Comparisons** — `==` inside `{ ... }` and join keys: `filter { city == "NY" }`, `join ... on id == customer_id and region == region`
-
-Single-item lists need no comma (`select name`, `sort age`). Dot paths count as one item (`address.city`).
-
-Use `-` as the source to read from stdin. Specify format in the query with `with format=...` (csv, json, or jsonl):
-
-```bash
-cat users.csv | dq '- with format=csv | count'
-cat users.csv | dq '- with format=csv | filter { age > 25 } | select name'
-curl -s https://api.example.com/users | jq -c .[] | dq '- with format=jsonl | head 10'
-```
-
-Avro and Parquet are not supported on stdin (they require seekable files).
-
 ## Load options (`with`)
 
 Optional `with key=value, ...` clauses on the primary source or join file control how data is loaded. Same binding style as `transform` / `rename` (comma-separated `=` pairs).
