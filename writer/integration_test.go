@@ -122,7 +122,7 @@ func collectAvroRecordNames(schema any, names *[]string) {
 }
 
 func TestIntegrationCSVOutput(t *testing.T) {
-	out := queryAndWrite(t, testdataDir+"/users.csv", "filter { age > 30 } | select name age", "csv")
+	out := queryAndWrite(t, testdataDir+"/users.csv", "filter { age > 30 } | select name, age", "csv")
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 
 	// Header + 2 rows (Charlie 35, Frank 40)
@@ -141,7 +141,7 @@ func TestIntegrationCSVOutput(t *testing.T) {
 }
 
 func TestIntegrationRenameJSONPreservesAllColumns(t *testing.T) {
-	out := queryAndWrite(t, testdataDir+"/users.csv", "rename name username | head 1", "json")
+	out := queryAndWrite(t, testdataDir+"/users.csv", "rename name=username | head 1", "json")
 
 	var rows []map[string]interface{}
 	if err := json.Unmarshal([]byte(out), &rows); err != nil {
@@ -166,7 +166,7 @@ func TestIntegrationRenameJSONPreservesAllColumns(t *testing.T) {
 }
 
 func TestIntegrationJSONOutput(t *testing.T) {
-	out := queryAndWrite(t, testdataDir+"/users.csv", "sort age | head 2 | select name age", "json")
+	out := queryAndWrite(t, testdataDir+"/users.csv", "sort age | head 2 | select name, age", "json")
 
 	var rows []map[string]interface{}
 	if err := json.Unmarshal([]byte(out), &rows); err != nil {
@@ -213,7 +213,7 @@ func TestIntegrationTableOutput(t *testing.T) {
 }
 
 func TestIntegrationNestedJSONOutput(t *testing.T) {
-	out := queryAndWrite(t, testdataDir+"/nested.json", "select name address", "json")
+	out := queryAndWrite(t, testdataDir+"/nested.json", "select name, address", "json")
 
 	var rows []map[string]interface{}
 	if err := json.Unmarshal([]byte(out), &rows); err != nil {
@@ -262,7 +262,7 @@ func TestIntegrationGroupReduceJSON(t *testing.T) {
 
 // TestIntegrationCSVRoundTrip verifies CSV output can be reloaded.
 func TestIntegrationCSVRoundTrip(t *testing.T) {
-	out := queryAndWrite(t, testdataDir+"/users.csv", "select name age", "csv")
+	out := queryAndWrite(t, testdataDir+"/users.csv", "select name, age", "csv")
 
 	reader := strings.NewReader(out)
 	tbl, err := loader.LoadReader(reader, "csv")
@@ -279,7 +279,7 @@ func TestIntegrationCSVRoundTrip(t *testing.T) {
 
 // TestIntegrationJSONRoundTrip verifies JSON output can be reloaded.
 func TestIntegrationJSONRoundTrip(t *testing.T) {
-	out := queryAndWrite(t, testdataDir+"/users.csv", "select name age", "json")
+	out := queryAndWrite(t, testdataDir+"/users.csv", "select name, age", "json")
 
 	reader := strings.NewReader(out)
 	tbl, err := loader.LoadReader(reader, "json")
@@ -301,7 +301,7 @@ func TestIntegrationJSONRoundTrip(t *testing.T) {
 
 // TestIntegrationJSONLRoundTrip verifies JSONL output can be reloaded.
 func TestIntegrationJSONLRoundTrip(t *testing.T) {
-	out := queryAndWrite(t, testdataDir+"/users.csv", "select name age", "jsonl")
+	out := queryAndWrite(t, testdataDir+"/users.csv", "select name, age", "jsonl")
 
 	reader := strings.NewReader(out)
 	tbl, err := loader.LoadReader(reader, "jsonl")
@@ -314,7 +314,7 @@ func TestIntegrationJSONLRoundTrip(t *testing.T) {
 }
 
 func TestIntegrationAvroRoundTrip(t *testing.T) {
-	out := queryAndWriteBytes(t, testdataDir+"/users.csv", "select name age city", "avro")
+	out := queryAndWriteBytes(t, testdataDir+"/users.csv", "select name, age, city", "avro")
 	path := writeTempOutput(t, out, "users.avro")
 
 	tbl, err := loader.Load(path, "avro")
@@ -336,7 +336,7 @@ func TestIntegrationAvroRoundTrip(t *testing.T) {
 }
 
 func TestIntegrationParquetRoundTrip(t *testing.T) {
-	out := queryAndWriteBytes(t, testdataDir+"/users.csv", "select name age city", "parquet")
+	out := queryAndWriteBytes(t, testdataDir+"/users.csv", "select name, age, city", "parquet")
 	path := writeTempOutput(t, out, "users.parquet")
 
 	tbl, err := loader.Load(path, "parquet")
@@ -360,7 +360,7 @@ func TestIntegrationParquetRoundTrip(t *testing.T) {
 func TestIntegrationNestedBinaryRoundTrip(t *testing.T) {
 	for _, format := range []string{"avro", "parquet"} {
 		t.Run(format, func(t *testing.T) {
-			out := queryAndWriteBytes(t, testdataDir+"/nested.json", "select name address tags orders", format)
+			out := queryAndWriteBytes(t, testdataDir+"/nested.json", "select name, address, tags, orders", format)
 			path := writeTempOutput(t, out, "nested."+format)
 
 			tbl, err := loader.Load(path, format)
@@ -399,7 +399,7 @@ func TestIntegrationNestedBinaryRoundTrip(t *testing.T) {
 }
 
 func TestIntegrationAvroEmptyResultRoundTrip(t *testing.T) {
-	out := queryAndWriteBytes(t, testdataDir+"/users.csv", "filter { age > 100 } | select name age", "avro")
+	out := queryAndWriteBytes(t, testdataDir+"/users.csv", "filter { age > 100 } | select name, age", "avro")
 	path := writeTempOutput(t, out, "empty.avro")
 
 	tbl, err := loader.Load(path, "avro")
@@ -558,7 +558,7 @@ func TestIntegrationAvroRejectsZeroColumns(t *testing.T) {
 }
 
 func TestIntegrationParquetColumnOrderRoundTrip(t *testing.T) {
-	out := queryAndWriteBytes(t, testdataDir+"/users.csv", "select name age city", "parquet")
+	out := queryAndWriteBytes(t, testdataDir+"/users.csv", "select name, age, city", "parquet")
 	path := writeTempOutput(t, out, "ordered.parquet")
 
 	tbl, err := loader.Load(path, "parquet")
@@ -571,7 +571,7 @@ func TestIntegrationParquetColumnOrderRoundTrip(t *testing.T) {
 }
 
 func TestIntegrationParquetEmptyResultRoundTrip(t *testing.T) {
-	out := queryAndWriteBytes(t, testdataDir+"/users.csv", "filter { age > 100 } | select name age", "parquet")
+	out := queryAndWriteBytes(t, testdataDir+"/users.csv", "filter { age > 100 } | select name, age", "parquet")
 	path := writeTempOutput(t, out, "empty.parquet")
 
 	tbl, err := loader.Load(path, "parquet")

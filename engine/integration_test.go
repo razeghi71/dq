@@ -55,7 +55,7 @@ func assertFlatQueries(t *testing.T, file string) {
 	})
 
 	t.Run("sort_select_head", func(t *testing.T) {
-		result := loadAndQuery(t, file, "sort age | select name age | head 3")
+		result := loadAndQuery(t, file, "sort age | select name, age | head 3")
 		if result.NumRows != 3 {
 			t.Fatalf("expected 3 rows, got %d", result.NumRows)
 		}
@@ -197,7 +197,7 @@ func assertNestedQueries(t *testing.T, file string) {
 	})
 
 	t.Run("transform_extract_city", func(t *testing.T) {
-		result := loadAndQuery(t, file, "transform city = address.city | select name city")
+		result := loadAndQuery(t, file, "transform city = address.city | select name, city")
 		if len(result.Columns) != 2 {
 			t.Fatalf("expected 2 columns, got %v", result.Columns)
 		}
@@ -212,7 +212,7 @@ func assertNestedQueries(t *testing.T, file string) {
 	})
 
 	t.Run("transform_deep_score", func(t *testing.T) {
-		result := loadAndQuery(t, file, "transform score = profile.stats.score | select name score")
+		result := loadAndQuery(t, file, "transform score = profile.stats.score | select name, score")
 		wantScores := []float64{9.5, 6.2, 0}
 		scoreIdx := result.ColIndex("score")
 		for i, want := range wantScores {
@@ -224,7 +224,7 @@ func assertNestedQueries(t *testing.T, file string) {
 	})
 
 	t.Run("missing_subfield_null", func(t *testing.T) {
-		result := loadAndQuery(t, file, "transform x = address.nonexistent | select name x")
+		result := loadAndQuery(t, file, "transform x = address.nonexistent | select name, x")
 		xIdx := result.ColIndex("x")
 		for i := 0; i < result.NumRows; i++ {
 			if !result.GetAt(i, xIdx).IsNull() {
@@ -234,7 +234,7 @@ func assertNestedQueries(t *testing.T, file string) {
 	})
 
 	t.Run("sort_by_nested", func(t *testing.T) {
-		result := loadAndQuery(t, file, "transform city = address.city | sort city | select name city")
+		result := loadAndQuery(t, file, "transform city = address.city | sort city | select name, city")
 		// Chicago < Los Angeles < New York
 		wantOrder := []string{"Charlie", "Bob", "Alice"}
 		nameIdx := result.ColIndex("name")
@@ -247,7 +247,7 @@ func assertNestedQueries(t *testing.T, file string) {
 	})
 
 	t.Run("sort_by_nested_dot_path", func(t *testing.T) {
-		result := loadAndQuery(t, file, "sort profile.stats.logins | select name profile.stats.logins")
+		result := loadAndQuery(t, file, "sort profile.stats.logins | select name, profile.stats.logins")
 		wantOrder := []string{"Charlie", "Bob", "Alice"}
 		nameIdx := result.ColIndex("name")
 		for i, want := range wantOrder {
@@ -264,7 +264,7 @@ func TestIntegrationNestedMissingJSON(t *testing.T) {
 	file := testdataDir + "/nested_missing.json"
 
 	t.Run("select_null_parent", func(t *testing.T) {
-		result := loadAndQuery(t, file, "select name addr.city")
+		result := loadAndQuery(t, file, "select name, addr.city")
 		if result.NumRows != 2 {
 			t.Fatalf("expected 2 rows, got %d", result.NumRows)
 		}
@@ -319,7 +319,7 @@ func assertNestedDotPathOps(t *testing.T, file string) {
 	t.Helper()
 
 	t.Run("select_dot_path", func(t *testing.T) {
-		result := loadAndQuery(t, file, "select name address.city")
+		result := loadAndQuery(t, file, "select name, address.city")
 		if len(result.Columns) != 2 {
 			t.Fatalf("expected 2 columns, got %v", result.Columns)
 		}
@@ -336,14 +336,14 @@ func assertNestedDotPathOps(t *testing.T, file string) {
 	})
 
 	t.Run("select_deep_dot_path", func(t *testing.T) {
-		result := loadAndQuery(t, file, "select name profile.stats.score")
+		result := loadAndQuery(t, file, "select name, profile.stats.score")
 		if result.Columns[1] != "profile_stats_score" {
 			t.Errorf("expected column name 'profile_stats_score', got %q", result.Columns[1])
 		}
 	})
 
 	t.Run("select_dot_path_dedup", func(t *testing.T) {
-		result := loadAndQuery(t, file, `transform address_city = "test" | select address_city address.city`)
+		result := loadAndQuery(t, file, `transform address_city = "test" | select address_city, address.city`)
 		if len(result.Columns) != 2 {
 			t.Fatalf("expected 2 columns, got %v", result.Columns)
 		}
@@ -443,7 +443,7 @@ func TestIntegrationColumnTypeWidening(t *testing.T) {
 	// val column: 1 (int) → 2.5 (float) → "something" (string)
 	// After loading, the whole column must be TypeString and all three
 	// values must survive the round-trip through filter + select.
-	result := loadAndQuery(t, testdataDir+"/mixed_types.csv", "select id val")
+	result := loadAndQuery(t, testdataDir+"/mixed_types.csv", "select id, val")
 
 	if result.NumRows != 3 {
 		t.Fatalf("expected 3 rows, got %d", result.NumRows)
@@ -601,7 +601,7 @@ func TestJoinIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load users: %v", err)
 	}
-	q, err := parser.Parse(usersFile + ` | join ` + ordersFile + ` on name == user_name | sort name product`)
+	q, err := parser.Parse(usersFile + ` | join ` + ordersFile + ` on name == user_name | sort name, product`)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}

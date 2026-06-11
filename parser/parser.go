@@ -193,17 +193,26 @@ func (p *Parser) parseSort() (ast.Op, error) {
 			}
 			break
 		}
-		tok := p.advance()
-		path := []string{tok.Val}
-		for p.peek().Type == lexer.TokenDot {
-			p.advance()
-			seg := p.advance()
-			if seg.Type != lexer.TokenIdent && seg.Type != lexer.TokenBacktickIdent {
-				return nil, fmt.Errorf("expected field name after '.', got %s (%q)", seg.Type, seg.Val)
-			}
-			path = append(path, seg.Val)
+		path, err := p.parseOneColumnPath()
+		if err != nil {
+			return nil, fmt.Errorf("sort: %w", err)
 		}
 		keys = append(keys, ast.SortKey{Path: path, Desc: desc})
+
+		if p.peek().Type == lexer.TokenComma {
+			p.advance()
+			if p.peek().Type != lexer.TokenIdent && p.peek().Type != lexer.TokenBacktickIdent && p.peek().Type != lexer.TokenMinus {
+				return nil, fmt.Errorf("sort: expected column name after ',', got %s (%q)", p.peek().Type, p.peek().Val)
+			}
+			continue
+		}
+		if p.peek().Type == lexer.TokenMinus {
+			return nil, fmt.Errorf("sort: expected ',' between sort keys, got '-'")
+		}
+		if p.peek().Type == lexer.TokenIdent || p.peek().Type == lexer.TokenBacktickIdent {
+			return nil, fmt.Errorf("sort: expected ',' between sort keys, got %q", p.peek().Val)
+		}
+		break
 	}
 	if len(keys) == 0 {
 		return nil, fmt.Errorf("sort: expected at least one column")
@@ -310,14 +319,24 @@ func (p *Parser) parseRename() (ast.Op, error) {
 	var pairs []ast.RenamePair
 	for p.peek().Type == lexer.TokenIdent || p.peek().Type == lexer.TokenBacktickIdent {
 		oldTok := p.advance()
+		if _, err := p.expect(lexer.TokenEquals); err != nil {
+			return nil, fmt.Errorf("rename: expected '=' after column %q: %w", oldTok.Val, err)
+		}
 		newTok := p.advance()
 		if newTok.Type != lexer.TokenIdent && newTok.Type != lexer.TokenBacktickIdent {
 			return nil, fmt.Errorf("rename: expected new column name, got %s (%q)", newTok.Type, newTok.Val)
 		}
 		pairs = append(pairs, ast.RenamePair{Old: oldTok.Val, New: newTok.Val})
+		if p.peek().Type != lexer.TokenComma {
+			break
+		}
+		p.advance()
+		if p.peek().Type != lexer.TokenIdent && p.peek().Type != lexer.TokenBacktickIdent {
+			return nil, fmt.Errorf("rename: expected column name after ',', got %s (%q)", p.peek().Type, p.peek().Val)
+		}
 	}
 	if len(pairs) == 0 {
-		return nil, fmt.Errorf("rename: expected at least one old/new pair")
+		return nil, fmt.Errorf("rename: expected at least one old=new pair")
 	}
 	return &ast.RenameOp{Pairs: pairs}, nil
 }
@@ -402,14 +421,14 @@ func (p *Parser) parseJoin() (ast.Op, error) {
 func (p *Parser) parseJoinKeys() ([]ast.JoinKey, error) {
 	var keys []ast.JoinKey
 	for {
-		left, err := p.parseSingleColumnPath()
+		left, err := p.parseOneColumnPath()
 		if err != nil {
 			return nil, err
 		}
 		right := append([]string(nil), left...)
 		if p.peek().Type == lexer.TokenEq {
 			p.advance()
-			right, err = p.parseSingleColumnPath()
+			right, err = p.parseOneColumnPath()
 			if err != nil {
 				return nil, err
 			}
@@ -423,7 +442,7 @@ func (p *Parser) parseJoinKeys() ([]ast.JoinKey, error) {
 	return keys, nil
 }
 
-func (p *Parser) parseSingleColumnPath() ([]string, error) {
+func (p *Parser) parseOneColumnPath() ([]string, error) {
 	t := p.peek()
 	if t.Type != lexer.TokenIdent && t.Type != lexer.TokenBacktickIdent {
 		return nil, fmt.Errorf("expected column name, got %s (%q)", t.Type, t.Val)
@@ -439,6 +458,54 @@ func (p *Parser) parseSingleColumnPath() ([]string, error) {
 		path = append(path, seg.Val)
 	}
 	return path, nil
+}
+
+// parseColumnListOpts reads comma-separated dot-path column names.
+// When stopAtAs is true, parsing stops before an "as" keyword (for group).
+func (p *Parser) parseColumnListOpts(stopAtAs bool) ([][]string, error) {
+	var cols [][]string
+	for {
+		if stopAtAs && p.peek().Type == lexer.TokenAs {
+			break
+		}
+		if p.peek().Type != lexer.TokenIdent && p.peek().Type != lexer.TokenBacktickIdent {
+			break
+		}
+		path, err := p.parseOneColumnPath()
+		if err != nil {
+			return nil, err
+		}
+		cols = append(cols, path)
+
+		if stopAtAs && p.peek().Type == lexer.TokenAs {
+			break
+		}
+		if p.peek().Type == lexer.TokenComma {
+			p.advance()
+			if stopAtAs && p.peek().Type == lexer.TokenAs {
+				return nil, fmt.Errorf("expected column name after ',', got %s (%q)", p.peek().Type, p.peek().Val)
+			}
+			if p.peek().Type != lexer.TokenIdent && p.peek().Type != lexer.TokenBacktickIdent {
+				return nil, fmt.Errorf("expected column name after ',', got %s (%q)", p.peek().Type, p.peek().Val)
+			}
+			continue
+		}
+		if p.peek().Type == lexer.TokenIdent || p.peek().Type == lexer.TokenBacktickIdent {
+			return nil, fmt.Errorf("expected ',' between columns, got %q", p.peek().Val)
+		}
+		break
+	}
+	return cols, nil
+}
+
+// parseColumnList reads comma-separated dot-path column names.
+func (p *Parser) parseColumnList() ([][]string, error) {
+	return p.parseColumnListOpts(false)
+}
+
+// parseColumnListUntilAs reads comma-separated columns but stops at "as".
+func (p *Parser) parseColumnListUntilAs() ([][]string, error) {
+	return p.parseColumnListOpts(true)
 }
 
 func (p *Parser) parseRemove() (ast.Op, error) {
@@ -470,47 +537,6 @@ func (p *Parser) parseInt() (int, error) {
 		return 0, fmt.Errorf("invalid integer %q: %w", tok.Val, err)
 	}
 	return n, nil
-}
-
-// parseColumnList reads dot-separated identifier paths until we hit something that isn't a column name.
-func (p *Parser) parseColumnList() ([][]string, error) {
-	var cols [][]string
-	for p.peek().Type == lexer.TokenIdent || p.peek().Type == lexer.TokenBacktickIdent {
-		tok := p.advance()
-		path := []string{tok.Val}
-		for p.peek().Type == lexer.TokenDot {
-			p.advance() // consume .
-			seg := p.advance()
-			if seg.Type != lexer.TokenIdent && seg.Type != lexer.TokenBacktickIdent {
-				return nil, fmt.Errorf("expected field name after '.', got %s (%q)", seg.Type, seg.Val)
-			}
-			path = append(path, seg.Val)
-		}
-		cols = append(cols, path)
-	}
-	return cols, nil
-}
-
-// parseColumnListUntilAs reads dot-separated identifier paths but stops at "as" keyword.
-func (p *Parser) parseColumnListUntilAs() ([][]string, error) {
-	var cols [][]string
-	for p.peek().Type == lexer.TokenIdent || p.peek().Type == lexer.TokenBacktickIdent {
-		if p.peek().Type == lexer.TokenAs {
-			break
-		}
-		tok := p.advance()
-		path := []string{tok.Val}
-		for p.peek().Type == lexer.TokenDot {
-			p.advance() // consume .
-			seg := p.advance()
-			if seg.Type != lexer.TokenIdent && seg.Type != lexer.TokenBacktickIdent {
-				return nil, fmt.Errorf("expected field name after '.', got %s (%q)", seg.Type, seg.Val)
-			}
-			path = append(path, seg.Val)
-		}
-		cols = append(cols, path)
-	}
-	return cols, nil
 }
 
 // parseAssignments parses comma-separated "col = expr" assignments.

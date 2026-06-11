@@ -73,7 +73,7 @@ func TestSortDesc(t *testing.T) {
 
 func TestSortMixedDirections(t *testing.T) {
 	// city ascending, age descending within each city.
-	result := runQuery(t, usersTable(), "sort city -age")
+	result := runQuery(t, usersTable(), "sort city, -age")
 	got := make([][2]any, result.NumRows)
 	for i := 0; i < result.NumRows; i++ {
 		got[i] = [2]any{result.GetAt(i, 2).Str, result.GetAt(i, 1).Int}
@@ -94,7 +94,7 @@ func TestSortMixedDirections(t *testing.T) {
 }
 
 func TestSelect(t *testing.T) {
-	result := runQuery(t, usersTable(), "select name city")
+	result := runQuery(t, usersTable(), "select name, city")
 	if len(result.Columns) != 2 {
 		t.Fatalf("expected 2 columns, got %d", len(result.Columns))
 	}
@@ -131,6 +131,13 @@ func TestDistinct(t *testing.T) {
 	result := runQuery(t, usersTable(), "distinct city")
 	if result.NumRows != 3 {
 		t.Errorf("expected 3 distinct cities, got %d", result.NumRows)
+	}
+}
+
+func TestDistinctCommaColumnList(t *testing.T) {
+	result := runQuery(t, usersTable(), "distinct city, age")
+	if result.NumRows != 6 {
+		t.Errorf("expected 6 distinct city+age pairs, got %d", result.NumRows)
 	}
 }
 
@@ -171,6 +178,14 @@ func TestGroupReduce(t *testing.T) {
 	if result.GetAt(nyIdx, nIdx).Int != 3 {
 		t.Errorf("expected NY count=3, got %d", result.GetAt(nyIdx, nIdx).Int)
 	}
+}
+
+func TestGroupCommaColumnList(t *testing.T) {
+	result := runQuery(t, usersTable(), "group city, name")
+	if result.NumRows != 6 {
+		t.Errorf("expected 6 groups, got %d", result.NumRows)
+	}
+	assertColumns(t, result, []string{"city", "name", "grouped"})
 }
 
 func TestGroupKeepsKeyInNestedRows(t *testing.T) {
@@ -215,12 +230,12 @@ func TestGroupKeepsKeyInNestedRowsReduceStillWorks(t *testing.T) {
 }
 
 func TestRename(t *testing.T) {
-	result := runQuery(t, usersTable(), "rename name first_name")
+	result := runQuery(t, usersTable(), "rename name=first_name")
 	assertColumns(t, result, []string{"first_name", "age", "city"})
 }
 
 func TestRenameMultiplePairsAreSimultaneous(t *testing.T) {
-	result := runQuery(t, usersTable(), "rename name age age name")
+	result := runQuery(t, usersTable(), "rename name=age, age=name")
 	assertColumns(t, result, []string{"age", "name", "city"})
 
 	if got := result.GetAt(0, 0).Str; got != "Alice" {
@@ -232,22 +247,22 @@ func TestRenameMultiplePairsAreSimultaneous(t *testing.T) {
 }
 
 func TestRenameNoOpToSameName(t *testing.T) {
-	result := runQuery(t, usersTable(), "rename name name")
+	result := runQuery(t, usersTable(), "rename name=name")
 	assertColumns(t, result, []string{"name", "age", "city"})
 }
 
 func TestRenameChained(t *testing.T) {
-	result := runQuery(t, usersTable(), "rename name username | rename city location")
+	result := runQuery(t, usersTable(), "rename name=username | rename city=location")
 	assertColumns(t, result, []string{"username", "age", "location"})
 }
 
 func TestRenameMultipleValidPairsInOneOp(t *testing.T) {
-	result := runQuery(t, usersTable(), "rename name first_name city location")
+	result := runQuery(t, usersTable(), "rename name=first_name, city=location")
 	assertColumns(t, result, []string{"first_name", "age", "location"})
 }
 
 func TestRenameColumnNotFound(t *testing.T) {
-	err := runQueryExpectErr(t, usersTable(), "rename missing foo")
+	err := runQueryExpectErr(t, usersTable(), "rename missing=foo")
 	if err == nil {
 		t.Fatal("expected column not found error")
 	}
@@ -262,9 +277,9 @@ func TestRenameRejectsDuplicateResultColumns(t *testing.T) {
 		query     string
 		collision string
 	}{
-		{"target_exists", "rename name age", `duplicate column name "age"`},
-		{"target_exists_other_column", "rename city name", `duplicate column name "name"`},
-		{"pairs_share_target", "rename name x city x", `duplicate column name "x"`},
+		{"target_exists", "rename name=age", `duplicate column name "age"`},
+		{"target_exists_other_column", "rename city=name", `duplicate column name "name"`},
+		{"pairs_share_target", "rename name=x, city=x", `duplicate column name "x"`},
 	}
 
 	for _, tc := range cases {
@@ -281,7 +296,7 @@ func TestRenameRejectsDuplicateResultColumns(t *testing.T) {
 }
 
 func TestRenameRejectsRepeatedSourceColumn(t *testing.T) {
-	err := runQueryExpectErr(t, usersTable(), "rename name first_name name full_name")
+	err := runQueryExpectErr(t, usersTable(), "rename name=first_name, name=full_name")
 	if err == nil {
 		t.Fatal("expected repeated source column error")
 	}
@@ -311,6 +326,14 @@ func TestRemove(t *testing.T) {
 		if c == "city" {
 			t.Error("city should have been removed")
 		}
+	}
+}
+
+func TestRemoveCommaColumnList(t *testing.T) {
+	result := runQuery(t, usersTable(), "remove age, city")
+	assertColumns(t, result, []string{"name"})
+	if result.NumRows != 6 {
+		t.Errorf("expected 6 rows, got %d", result.NumRows)
 	}
 }
 
@@ -421,7 +444,7 @@ func TestNotAgeIsNull(t *testing.T) {
 }
 
 func TestIfFunction(t *testing.T) {
-	result := runQuery(t, usersTable(), `transform label = if(age > 30, "old", "young") | select name label`)
+	result := runQuery(t, usersTable(), `transform label = if(age > 30, "old", "young") | select name, label`)
 	// Alice(30) -> young, Charlie(35) -> old
 	if result.GetAt(0, 1).Str != "young" {
 		t.Errorf("expected 'young' for Alice, got %q", result.GetAt(0, 1).Str)
@@ -432,7 +455,7 @@ func TestIfFunction(t *testing.T) {
 }
 
 func TestUpperLower(t *testing.T) {
-	result := runQuery(t, usersTable(), `transform up = upper(city), lo = lower(name) | select up lo | head 1`)
+	result := runQuery(t, usersTable(), `transform up = upper(city), lo = lower(name) | select up, lo | head 1`)
 	if result.GetAt(0, 0).Str != "NY" {
 		t.Errorf("expected 'NY', got %q", result.GetAt(0, 0).Str)
 	}
@@ -515,7 +538,7 @@ func TestStringPredicatesTransform(t *testing.T) {
 }
 
 func TestStringPredicatesCoercion(t *testing.T) {
-	result := runQuery(t, usersTable(), `transform hit = contains(age, "3") | select name hit`)
+	result := runQuery(t, usersTable(), `transform hit = contains(age, "3") | select name, hit`)
 	hitIdx := result.ColIndex("hit")
 	nameIdx := result.ColIndex("name")
 	for i := 0; i < result.NumRows; i++ {
@@ -715,7 +738,7 @@ func TestComparisonErrorOnTypeMismatch(t *testing.T) {
 }
 
 func TestGroupWithCustomName(t *testing.T) {
-	result := runQuery(t, usersTable(), "group city as entries | reduce entries total = sum(age) | remove entries | select city total")
+	result := runQuery(t, usersTable(), "group city as entries | reduce entries total = sum(age) | remove entries | select city, total")
 	if result.NumRows != 3 {
 		t.Errorf("expected 3 rows, got %d", result.NumRows)
 	}
@@ -766,7 +789,7 @@ func optionalNestedTable() *table.Table {
 }
 
 func TestSelectNullParentDotPath(t *testing.T) {
-	result := runQuery(t, optionalNestedTable(), "select name addr.city")
+	result := runQuery(t, optionalNestedTable(), "select name, addr.city")
 	if result.NumRows != 2 {
 		t.Fatalf("expected 2 rows, got %d", result.NumRows)
 	}
@@ -800,7 +823,7 @@ func TestFilterNullParentDotPathIsNull(t *testing.T) {
 }
 
 func TestTransformNullParentDotPath(t *testing.T) {
-	result := runQuery(t, optionalNestedTable(), "transform city = addr.city | select name city")
+	result := runQuery(t, optionalNestedTable(), "transform city = addr.city | select name, city")
 	cityIdx := result.ColIndex("city")
 	if !result.GetAt(0, cityIdx).IsNull() {
 		t.Errorf("row 0 city: expected null, got %v", result.GetAt(0, cityIdx))
@@ -829,7 +852,7 @@ func TestGroupNullParentDotPath(t *testing.T) {
 }
 
 func TestSortNullParentDotPath(t *testing.T) {
-	result := runQuery(t, optionalNestedTable(), "sort addr.city | select name addr.city")
+	result := runQuery(t, optionalNestedTable(), "sort addr.city | select name, addr.city")
 	if result.NumRows != 2 {
 		t.Fatalf("expected 2 rows, got %d", result.NumRows)
 	}
@@ -862,7 +885,7 @@ func TestNullParentDotPathPreservesTypeMismatchError(t *testing.T) {
 }
 
 func TestSelectDotPath(t *testing.T) {
-	result := runQuery(t, nestedTable(), "select name address.city")
+	result := runQuery(t, nestedTable(), "select name, address.city")
 	if len(result.Columns) != 2 {
 		t.Fatalf("expected 2 columns, got %d", len(result.Columns))
 	}
@@ -886,7 +909,7 @@ func TestSelectDotPathDedup(t *testing.T) {
 			{Name: "city", Value: table.StrVal("New York")},
 		}),
 	})
-	result := runQuery(t, tbl, "select address_city address.city")
+	result := runQuery(t, tbl, "select address_city, address.city")
 	if result.Columns[0] != "address_city" {
 		t.Errorf("col 0: expected 'address_city', got %q", result.Columns[0])
 	}
@@ -929,7 +952,7 @@ func TestGroupDotPathReduce(t *testing.T) {
 }
 
 func TestSortDotPath(t *testing.T) {
-	result := runQuery(t, nestedTable(), "sort address.city -name | select name address.city")
+	result := runQuery(t, nestedTable(), "sort address.city, -name | select name, address.city")
 	want := []string{"Bob", "Charlie", "Alice"}
 	nameIdx := result.ColIndex("name")
 	for i, w := range want {

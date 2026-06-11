@@ -3,7 +3,7 @@
 Query CSV, JSON, Avro, and Parquet files from the command line. Pipe operations together, like `jq` but for tables.
 
 ```bash
-dq 'users.csv | filter { age > 25 } | select name city | sort name'
+dq 'users.csv | filter { age > 25 } | select name, city | sort name'
 dq -o csv 'users.json | filter { age > 25 }' > filtered.csv
 ```
 
@@ -40,7 +40,17 @@ dq 'file.csv | operation1 | operation2 | ...'
 
 Wrap queries in single quotes so your shell doesn't interpret `|`, `{`, `}`, or `>`.
 
-Use `-` as the source to read from stdin, The `-f` flag is required in this case (csv, json, or jsonl):
+### Query syntax
+
+Operations use one of three argument styles:
+
+- **Lists** — comma-separated columns or keys: `select name, age`, `sort city, -age`, `group city, department`
+- **Bindings** — comma-separated `=` assignments: `transform x = expr`, `rename old=new`
+- **Comparisons** — `==` inside `{ ... }` and join keys: `filter { city == "NY" }`, `join ... on id == customer_id and region == region`
+
+Single-item lists need no comma (`select name`, `sort age`). Dot paths count as one item (`address.city`).
+
+Use `-` as the source to read from stdin. The `-f` flag is required in this case (csv, json, or jsonl):
 
 ```bash
 cat users.csv | dq -f csv
@@ -64,14 +74,14 @@ dq 'users.csv | tail 5'        # last 5 rows
 ### `select` - Keep only the columns you want
 
 ```bash
-dq 'users.csv | select name age city'
-dq 'data.json | select name address.city'        # nested field -> column "address_city"
+dq 'users.csv | select name, age, city'
+dq 'data.json | select name, address.city'        # nested field -> column "address_city"
 ```
 
 ### `remove` - Drop columns you don't need
 
 ```bash
-dq 'users.csv | remove password ssn'
+dq 'users.csv | remove password, ssn'
 ```
 
 ### `filter` - Keep rows that match a condition
@@ -90,10 +100,10 @@ dq 'data.json | filter { address.city == "NY" }'    # nested field access
 Ascending by default. Prefix a column with `-` to sort it descending. Mix directions across multiple columns in one `sort`.
 
 ```bash
-dq 'users.csv | sort age'           # youngest first (ascending)
-dq 'users.csv | sort -age'          # oldest first (descending)
-dq 'users.csv | sort city age'      # city ascending, then age ascending
-dq 'users.csv | sort city -age'     # city ascending, then age descending
+dq 'users.csv | sort age'              # youngest first (ascending)
+dq 'users.csv | sort -age'             # oldest first (descending)
+dq 'users.csv | sort city, age'        # city ascending, then age ascending
+dq 'users.csv | sort city, -age'       # city ascending, then age descending
 ```
 
 ### `count` - Count how many rows
@@ -108,16 +118,17 @@ dq 'users.csv | filter { age > 30 } | count'
 ```bash
 dq 'users.csv | distinct'             # unique rows
 dq 'users.csv | distinct city'        # unique cities (keeps first occurrence)
-dq 'users.csv | distinct city age'    # unique city+age combinations
+dq 'users.csv | distinct city, age'    # unique city+age combinations
 ```
 
 ### `rename` - Rename columns
 
-Names are paired: old then new. Use backticks for column names with spaces.
+Use `old=new` bindings, comma-separated. Whitespace around `=` is optional. Backticks for column names with spaces.
 
 ```bash
-dq 'users.csv | rename name username'
-dq 'users.csv | rename `first name` first_name `last name` last_name'
+dq 'users.csv | rename name=username'
+dq 'users.csv | rename name = username'
+dq 'users.csv | rename `first name`=first_name, `last name`=last_name'
 ```
 
 ### `transform` - Create or overwrite columns with computed values
@@ -149,7 +160,7 @@ All original columns (including group keys) are preserved in the nested records.
 
 ```bash
 dq 'users.csv | group city as people'       # custom nested column name
-dq 'users.csv | group city department'       # group by multiple columns
+dq 'users.csv | group city, department'       # group by multiple columns
 dq 'data.json | group address.city'          # group by nested field -> key column "address_city"
 ```
 
@@ -236,9 +247,9 @@ JSON, Avro, and Parquet files can contain nested records. Use dot notation to ac
 
 ```bash
 dq 'data.json | filter { address.city == "Chicago" }'
-dq 'data.json | transform city = address.city | select name city'
+dq 'data.json | transform city = address.city | select name, city'
 dq 'data.json | filter { profile.stats.logins > 10 }'
-dq 'data.json | select name address.city'                          # -> columns: name, address_city
+dq 'data.json | select name, address.city'                          # -> columns: name, address_city
 dq 'data.json | group address.city | reduce n = count() | remove grouped'
 ```
 
@@ -251,12 +262,12 @@ Missing sub-fields return null.
 By default `dq` prints a pretty ASCII table. Use `-o` to change the output format:
 
 ```bash
-dq 'users.csv | select name age'                        # table (default)
-dq -o csv  'users.csv | select name age' > out.csv      # CSV
-dq -o json 'users.csv | select name age' > out.json     # JSON array of objects
-dq -o jsonl 'users.csv | select name age' > out.jsonl   # one JSON object per line
-dq -o avro 'users.csv | select name age' > out.avro     # Avro object container file
-dq -o parquet 'users.csv | select name age' > out.parquet # Parquet file
+dq 'users.csv | select name, age'                        # table (default)
+dq -o csv  'users.csv | select name, age' > out.csv      # CSV
+dq -o json 'users.csv | select name, age' > out.json     # JSON array of objects
+dq -o jsonl 'users.csv | select name, age' > out.jsonl   # one JSON object per line
+dq -o avro 'users.csv | select name, age' > out.avro     # Avro object container file
+dq -o parquet 'users.csv | select name, age' > out.parquet # Parquet file
 ```
 
 | Format  | Flag          | Notes                                                    |

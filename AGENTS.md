@@ -9,9 +9,6 @@ dq 'filename | op [args] | op2 [args] ...'
 * The entire query is passed as a **single-quoted string** to avoid shell interpretation of `|`, `{`, `}`, `>`, `<`, and backticks.
 * Takes a file (csv, avro, json, etc.) as input. Globs are supported (`logs/**/*.csv`, `orders/part-*.csv`) — matched files are concatenated. All matched files are loaded into memory before the pipeline runs. A zero-byte CSV (or BOM-/whitespace-only with no data rows) loads as an empty table (0 columns, 0 rows). Empty glob shards are skipped when establishing the column schema; the first non-empty shard defines the anchor columns. CSV glob shards without a detectable header row are read positionally under the first file's columns; extra cells per row are dropped. Extended headers require shared column names plus new lowercase identifiers (`email`, not `Email`); renamed columns with no anchor overlap are positional.
 * Everything is **pipe-based** — each op takes a table and returns a table.
-* Arguments are **space-separated**, strings use double quotes.
-* Column lists use spaces, not commas (avoids escaping issues).
-* `transform` and `reduce` use commas to separate assignments (because expressions contain spaces).
 * Default state: all columns are selected unless explicitly changed.
 
 **Why single quotes?** Characters like `|`, `{`, `}`, `>`, `` ` `` are special in most shells. Wrapping the query in single quotes passes it through to `dq` untouched, similar to how `jq` works.
@@ -21,6 +18,59 @@ dq 'filename | op [args] | op2 [args] ...'
 ```
 dq "users.csv | filter { name == \"O'Brien\" }"
 ```
+
+---
+
+## Syntax rules
+
+Every operation uses one of three argument styles. The style is fixed per op — do not mix them.
+
+### Lists (comma-separated)
+
+Separate columns or sort keys with **commas**. A single item needs no comma.
+
+| Op | Example |
+|----|---------|
+| `select` | `select name, age, address.city` |
+| `sort` | `sort -created_at, id` |
+| `group` | `group city, department as entries` |
+| `distinct` | `distinct city, age` |
+| `remove` | `remove password, ssn` |
+
+Rules:
+* Dot paths are one item: `address.city` is a single column, not two.
+* Backticks for names with spaces: `` select `first name`, age ``
+* `sort`: prefix `-` on a key for descending (`sort city, -age`).
+* `group`: optional `as nested_name` comes after the column list.
+* `distinct` with no columns deduplicates the full row.
+
+### Bindings (comma-separated, single `=`)
+
+Separate assignments with **commas**. Use a single **`=`** (not `==`).
+
+| Op | Example |
+|----|---------|
+| `transform` | `transform age2 = age * 2, city = upper(city)` |
+| `reduce` | `reduce total = sum(amount), n = count()` |
+| `rename` | `` rename `first name`=first_name, city=location `` |
+
+Rules:
+* `rename` pairs use `old=new` bindings (same `=` style as `transform`; whitespace around `=` is ignored).
+* `reduce` takes an optional nested column name **before** the assignments (space-separated, not comma): `reduce entries max_age = max(age), count = count()`.
+
+### Comparisons (double `==`, not comma lists)
+
+Inside `{ ... }` filters and join `on` clauses, equality is **`==`**. Single `=` is not comparison syntax.
+
+```
+filter { age > 20 and city == "NY" }
+join orders.csv on id == customer_id and region == region
+```
+
+Rules:
+* Join keys are separated by **`and`**, not commas.
+* Shorthand when names match: `join orders.csv on user_id` (same as `user_id == user_id`).
+* String literals must be double-quoted: `"NY"`.
 
 ---
 
@@ -61,21 +111,21 @@ Return the last `n` rows.
 dq 'users.csv | tail 5'
 ```
 
-### 3. `sort [-]col1 [-]col2 ...`
+### 3. `sort [-]col1, [-]col2, ...`
 
-Sort by columns (space-separated). Ascending by default; prefix a column with `-` to sort it descending. Directions can be mixed per column, so `sort a -b c` replaces the old `sorta a c | sortd b`.
+Sort by columns (comma-separated). Ascending by default; prefix a column with `-` to sort it descending. Directions can be mixed per column.
 
 ```
-dq 'users.csv | sort age name'        // both ascending
-dq 'users.csv | sort -created_at id'  // created_at descending, id ascending
+dq 'users.csv | sort age, name'         // both ascending
+dq 'users.csv | sort -created_at, id'   // created_at descending, id ascending
 ```
 
-### 4. `select col1 col2 ...`
+### 4. `select col1, col2, ...`
 
 Project specific columns. All columns selected by default.
 
 ```
-dq 'users.csv | select name age'
+dq 'users.csv | select name, age'
 ```
 
 ### 5. `filter { expression }`
@@ -92,7 +142,7 @@ dq 'users.csv | filter { age is not null }'
 dq 'users.csv | filter { city is null }'
 ```
 
-### 6. `group col1 col2 ... [as nested_name]`
+### 6. `group col1, col2, ... [as nested_name]`
 
 Group rows by columns; nested rows stored under a nested column. The `as nested_name` part is optional -- if omitted, defaults to `grouped`.
 
@@ -118,7 +168,7 @@ dq 'users.csv | group name as entries'
 **Multi-column grouping:**
 
 ```
-dq 'users.csv | group city department'
+dq 'users.csv | group city, department'
 ```
 
 Output:
@@ -187,31 +237,31 @@ dq 'users.csv | count'
 dq 'users.csv | filter { age > 20 } | count'
 ```
 
-### 10. `distinct [col1 col2 ...]`
+### 10. `distinct [col1, col2, ...]`
 
 Return unique rows. If columns are specified, deduplicates by those columns. If no columns are given, deduplicates by the entire row.
 
 ```
 dq 'users.csv | distinct'                // unique rows
 dq 'users.csv | distinct city'           // unique cities
-dq 'users.csv | distinct city age'       // unique combinations
+dq 'users.csv | distinct city, age'      // unique combinations
 ```
 
-### 11. `rename old_name new_name [old_name2 new_name2 ...]`
+### 11. `rename old=new [, old2=new2 ...]`
 
-Rename one or more columns. Names are paired: old then new.
+Rename one or more columns. Comma-separated `old=new` bindings.
 
 ```
-dq 'users.csv | rename `first name` first_name'
-dq 'users.csv | rename `first name` first_name `last name` last_name'
+dq 'users.csv | rename name=first_name'
+dq 'users.csv | rename `first name`=first_name, `last name`=last_name'
 ```
 
-### 12. `remove col1 col2 ...`
+### 12. `remove col1, col2, ...`
 
 Remove columns from output.
 
 ```
-dq 'users.csv | remove password ssn'
+dq 'users.csv | remove password, ssn'
 dq 'users.csv | group name | reduce total = sum(amount) | remove grouped'
 ```
 
@@ -288,13 +338,13 @@ Find the top 3 categories by revenue in 2024, showing only cities with total rev
 dq 'sales.csv
   | filter { year(date) == 2024 }
   | transform revenue = coalesce(quantity, 0) * coalesce(price, 0)
-  | group category city
+  | group category, city
   | reduce total_revenue = sum(revenue), order_count = count()
   | remove grouped
   | filter { total_revenue > 1000 }
   | sort -total_revenue
   | head 3
-  | select category city total_revenue order_count'
+  | select category, city, total_revenue, order_count'
 ```
 
 ---

@@ -28,7 +28,7 @@ func TestParseSimple(t *testing.T) {
 }
 
 func TestParsePipeline(t *testing.T) {
-	q, err := Parse("users.csv | filter { age > 20 } | select name age | head 5")
+	q, err := Parse("users.csv | filter { age > 20 } | select name, age | head 5")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestParseFilter(t *testing.T) {
 }
 
 func TestParseGroup(t *testing.T) {
-	q, err := Parse("users.csv | group city department as entries")
+	q, err := Parse("users.csv | group city, department as entries")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestParseReduceWithNestedName(t *testing.T) {
 }
 
 func TestParseRename(t *testing.T) {
-	q, err := Parse("users.csv | rename `first name` first_name `last name` last_name")
+	q, err := Parse("users.csv | rename `first name`=first_name, `last name`=last_name")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,7 +341,7 @@ func TestParsePathFilename(t *testing.T) {
 }
 
 func TestParseDistinct(t *testing.T) {
-	q, err := Parse("users.csv | distinct city age")
+	q, err := Parse("users.csv | distinct city, age")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +352,7 @@ func TestParseDistinct(t *testing.T) {
 }
 
 func TestParseSortMixedDirections(t *testing.T) {
-	q, err := Parse("users.csv | sort a -b c")
+	q, err := Parse("users.csv | sort a, -b, c")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,7 +372,7 @@ func TestParseSortMixedDirections(t *testing.T) {
 }
 
 func TestParseFullQuery(t *testing.T) {
-	q, err := Parse(`sales.csv | filter { year(date) == 2024 } | transform revenue = coalesce(quantity, 0) * coalesce(price, 0) | group category city | reduce total_revenue = sum(revenue), order_count = count() | remove grouped | filter { total_revenue > 1000 } | sort -total_revenue | head 3 | select category city total_revenue order_count`)
+	q, err := Parse(`sales.csv | filter { year(date) == 2024 } | transform revenue = coalesce(quantity, 0) * coalesce(price, 0) | group category, city | reduce total_revenue = sum(revenue), order_count = count() | remove grouped | filter { total_revenue > 1000 } | sort -total_revenue | head 3 | select category, city, total_revenue, order_count`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -578,7 +578,7 @@ func TestParseDotPathDeep(t *testing.T) {
 }
 
 func TestParseDotPathInSelect(t *testing.T) {
-	q, err := Parse("users.csv | select name address.city profile.stats.logins")
+	q, err := Parse("users.csv | select name, address.city, profile.stats.logins")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -750,5 +750,353 @@ func TestParseGlobSourceFilename(t *testing.T) {
 	j := q.Ops[0].(*ast.JoinOp)
 	if j.Filename != "orders/*.csv" {
 		t.Errorf("expected orders/*.csv, got %q", j.Filename)
+	}
+}
+
+// --- Comma column lists and = rename bindings ---
+
+func TestParseCommaColumnLists(t *testing.T) {
+	t.Run("select_comma_list", func(t *testing.T) {
+		q, err := Parse("users.csv | select name, age")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := q.Ops[0].(*ast.SelectOp)
+		if len(s.Columns) != 2 || s.Columns[0][0] != "name" || s.Columns[1][0] != "age" {
+			t.Errorf("expected [[name], [age]], got %v", s.Columns)
+		}
+	})
+
+	t.Run("select_dot_paths", func(t *testing.T) {
+		q, err := Parse("users.csv | select name, address.city, profile.stats.logins")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := q.Ops[0].(*ast.SelectOp)
+		if len(s.Columns) != 3 {
+			t.Fatalf("expected 3 columns, got %d", len(s.Columns))
+		}
+		if len(s.Columns[1]) != 2 || s.Columns[1][0] != "address" || s.Columns[1][1] != "city" {
+			t.Errorf("col[1]: expected [address city], got %v", s.Columns[1])
+		}
+		if len(s.Columns[2]) != 3 {
+			t.Errorf("col[2]: expected 3 segments, got %v", s.Columns[2])
+		}
+	})
+
+	t.Run("select_single_column", func(t *testing.T) {
+		q, err := Parse("users.csv | select name")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := q.Ops[0].(*ast.SelectOp)
+		if len(s.Columns) != 1 || s.Columns[0][0] != "name" {
+			t.Errorf("expected [[name]], got %v", s.Columns)
+		}
+	})
+
+	t.Run("sort_comma_list", func(t *testing.T) {
+		q, err := Parse("users.csv | sort age, name")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := q.Ops[0].(*ast.SortOp)
+		if len(s.Keys) != 2 || s.Keys[0].Path[0] != "age" || s.Keys[1].Path[0] != "name" {
+			t.Errorf("expected keys age, name, got %v", s.Keys)
+		}
+	})
+
+	t.Run("sort_mixed_directions", func(t *testing.T) {
+		q, err := Parse("users.csv | sort a, -b, c")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := q.Ops[0].(*ast.SortOp)
+		if len(s.Keys) != 3 {
+			t.Fatalf("expected 3 keys, got %d", len(s.Keys))
+		}
+		want := []struct {
+			col  string
+			desc bool
+		}{{"a", false}, {"b", true}, {"c", false}}
+		for i, w := range want {
+			if s.Keys[i].Path[0] != w.col || s.Keys[i].Desc != w.desc {
+				t.Errorf("key %d: expected (%q, desc=%v), got (%q, desc=%v)", i, w.col, w.desc, s.Keys[i].Path[0], s.Keys[i].Desc)
+			}
+		}
+	})
+
+	t.Run("sort_both_descending", func(t *testing.T) {
+		q, err := Parse("users.csv | sort -age, -name")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := q.Ops[0].(*ast.SortOp)
+		if len(s.Keys) != 2 || !s.Keys[0].Desc || !s.Keys[1].Desc {
+			t.Errorf("expected both descending, got %v", s.Keys)
+		}
+	})
+
+	t.Run("sort_dot_path_comma_list", func(t *testing.T) {
+		q, err := Parse("users.csv | sort address.city, -name")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := q.Ops[0].(*ast.SortOp)
+		if len(s.Keys) != 2 {
+			t.Fatalf("expected 2 keys, got %d", len(s.Keys))
+		}
+		if len(s.Keys[0].Path) != 2 || s.Keys[0].Path[0] != "address" || s.Keys[0].Path[1] != "city" {
+			t.Errorf("key[0]: expected [address city], got %v", s.Keys[0].Path)
+		}
+		if s.Keys[0].Desc {
+			t.Errorf("key[0]: expected ascending, got descending")
+		}
+		if s.Keys[1].Path[0] != "name" || !s.Keys[1].Desc {
+			t.Errorf("key[1]: expected [name] desc, got %v desc=%v", s.Keys[1].Path, s.Keys[1].Desc)
+		}
+	})
+
+	t.Run("group_comma_list", func(t *testing.T) {
+		q, err := Parse("users.csv | group city, department as entries")
+		if err != nil {
+			t.Fatal(err)
+		}
+		g := q.Ops[0].(*ast.GroupOp)
+		if len(g.Columns) != 2 || g.Columns[0][0] != "city" || g.Columns[1][0] != "department" {
+			t.Errorf("expected [[city], [department]], got %v", g.Columns)
+		}
+		if g.NestedName != "entries" {
+			t.Errorf("expected nested name 'entries', got %q", g.NestedName)
+		}
+	})
+
+	t.Run("group_single_with_as", func(t *testing.T) {
+		q, err := Parse("users.csv | group city as entries")
+		if err != nil {
+			t.Fatal(err)
+		}
+		g := q.Ops[0].(*ast.GroupOp)
+		if len(g.Columns) != 1 || g.Columns[0][0] != "city" {
+			t.Errorf("expected [[city]], got %v", g.Columns)
+		}
+	})
+
+	t.Run("distinct_comma_list", func(t *testing.T) {
+		q, err := Parse("users.csv | distinct city, age")
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := q.Ops[0].(*ast.DistinctOp)
+		if len(d.Columns) != 2 || d.Columns[0][0] != "city" || d.Columns[1][0] != "age" {
+			t.Errorf("expected [[city], [age]], got %v", d.Columns)
+		}
+	})
+
+	t.Run("distinct_no_columns", func(t *testing.T) {
+		q, err := Parse("users.csv | distinct")
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := q.Ops[0].(*ast.DistinctOp)
+		if len(d.Columns) != 0 {
+			t.Errorf("expected no columns, got %v", d.Columns)
+		}
+	})
+
+	t.Run("remove_comma_list", func(t *testing.T) {
+		q, err := Parse("users.csv | remove password, ssn")
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := q.Ops[0].(*ast.RemoveOp)
+		if len(r.Columns) != 2 || r.Columns[0][0] != "password" || r.Columns[1][0] != "ssn" {
+			t.Errorf("expected [[password], [ssn]], got %v", r.Columns)
+		}
+	})
+
+	t.Run("rename_equals_bindings", func(t *testing.T) {
+		q, err := Parse("users.csv | rename name=first_name, city=location")
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := q.Ops[0].(*ast.RenameOp)
+		if len(r.Pairs) != 2 {
+			t.Fatalf("expected 2 pairs, got %d", len(r.Pairs))
+		}
+		if r.Pairs[0].Old != "name" || r.Pairs[0].New != "first_name" {
+			t.Errorf("pair[0]: got %v -> %v", r.Pairs[0].Old, r.Pairs[0].New)
+		}
+		if r.Pairs[1].Old != "city" || r.Pairs[1].New != "location" {
+			t.Errorf("pair[1]: got %v -> %v", r.Pairs[1].Old, r.Pairs[1].New)
+		}
+	})
+
+	t.Run("rename_backtick_bindings", func(t *testing.T) {
+		q, err := Parse("users.csv | rename `first name`=first_name, `last name`=last_name")
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := q.Ops[0].(*ast.RenameOp)
+		if len(r.Pairs) != 2 {
+			t.Fatalf("expected 2 pairs, got %d", len(r.Pairs))
+		}
+		if r.Pairs[0].Old != "first name" || r.Pairs[0].New != "first_name" {
+			t.Errorf("pair[0]: got %v -> %v", r.Pairs[0].Old, r.Pairs[0].New)
+		}
+	})
+
+	t.Run("rename_single_pair", func(t *testing.T) {
+		q, err := Parse("users.csv | rename name=first_name")
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := q.Ops[0].(*ast.RenameOp)
+		if len(r.Pairs) != 1 || r.Pairs[0].Old != "name" || r.Pairs[0].New != "first_name" {
+			t.Errorf("expected name -> first_name, got %v", r.Pairs)
+		}
+	})
+
+	t.Run("rename_spaces_around_equals", func(t *testing.T) {
+		q, err := Parse("users.csv | rename name = first_name, city = location")
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := q.Ops[0].(*ast.RenameOp)
+		if len(r.Pairs) != 2 {
+			t.Fatalf("expected 2 pairs, got %d", len(r.Pairs))
+		}
+		if r.Pairs[0].Old != "name" || r.Pairs[0].New != "first_name" {
+			t.Errorf("pair[0]: got %v -> %v", r.Pairs[0].Old, r.Pairs[0].New)
+		}
+		if r.Pairs[1].Old != "city" || r.Pairs[1].New != "location" {
+			t.Errorf("pair[1]: got %v -> %v", r.Pairs[1].Old, r.Pairs[1].New)
+		}
+	})
+
+	t.Run("rename_swap_idiom", func(t *testing.T) {
+		q, err := Parse("users.csv | rename name=age, age=name")
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := q.Ops[0].(*ast.RenameOp)
+		if len(r.Pairs) != 2 {
+			t.Fatalf("expected 2 pairs, got %d", len(r.Pairs))
+		}
+	})
+
+	t.Run("full_query_new_syntax", func(t *testing.T) {
+		q, err := Parse(`sales.csv | filter { year(date) == 2024 } | transform revenue = coalesce(quantity, 0) * coalesce(price, 0) | group category, city | reduce total_revenue = sum(revenue), order_count = count() | remove grouped | filter { total_revenue > 1000 } | sort -total_revenue | head 3 | select category, city, total_revenue, order_count`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(q.Ops) != 9 {
+			t.Errorf("expected 9 ops, got %d", len(q.Ops))
+		}
+	})
+
+	t.Run("join_keys_unchanged", func(t *testing.T) {
+		q, err := Parse("a.csv | join b.csv on id == customer_id and region == region | sort name, product")
+		if err != nil {
+			t.Fatal(err)
+		}
+		j := q.Ops[0].(*ast.JoinOp)
+		if len(j.Keys) != 2 {
+			t.Fatalf("expected 2 join keys, got %d", len(j.Keys))
+		}
+		s := q.Ops[1].(*ast.SortOp)
+		if len(s.Keys) != 2 || s.Keys[0].Path[0] != "name" || s.Keys[1].Path[0] != "product" {
+			t.Errorf("expected sort keys name, product, got %v", s.Keys)
+		}
+	})
+
+	t.Run("reduce_nested_name_unchanged", func(t *testing.T) {
+		q, err := Parse("users.csv | group name as entries | reduce entries max_age = max(age), count = count()")
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := q.Ops[1].(*ast.ReduceOp)
+		if r.NestedName != "entries" {
+			t.Errorf("expected nested name 'entries', got %q", r.NestedName)
+		}
+		if len(r.Assignments) != 2 {
+			t.Fatalf("expected 2 assignments, got %d", len(r.Assignments))
+		}
+	})
+}
+
+func TestParseSpaceSeparatedColumnListsRejected(t *testing.T) {
+	cases := []struct {
+		name    string
+		query   string
+		wantMsg string
+	}{
+		{"select_space_list", "users.csv | select name age", "expected ',' between columns"},
+		{"sort_space_list", "users.csv | sort age name", "expected ',' between"},
+		{"group_space_list", "users.csv | group city department", "expected ',' between columns"},
+		{"distinct_space_list", "users.csv | distinct city age", "expected ',' between columns"},
+		{"remove_space_list", "users.csv | remove password ssn", "expected ',' between columns"},
+		{"rename_space_pairs", "users.csv | rename name first_name", "expected '='"},
+		{"rename_multi_space_pairs", "users.csv | rename name first_name city location", "expected '='"},
+		{"sort_missing_comma_before_desc", "users.csv | sort age -name", "expected ',' between sort keys"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse(tc.query)
+			if err == nil {
+				t.Fatalf("expected parse error for %q", tc.query)
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.wantMsg)
+			}
+		})
+	}
+}
+
+func TestParseInvalidCommaSyntaxRejected(t *testing.T) {
+	cases := []struct {
+		name    string
+		query   string
+		wantMsg string
+	}{
+		{"rename_double_equals", "users.csv | rename name==first_name", "expected '='"},
+		{"select_double_comma", "users.csv | select name,, age", "expected column name after ','"},
+		{"group_trailing_comma_before_as", "users.csv | group city, as entries", "expected column name after ','"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse(tc.query)
+			if err == nil {
+				t.Fatalf("expected parse error for %q", tc.query)
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.wantMsg)
+			}
+		})
+	}
+}
+
+func TestParseTrailingCommaInColumnListsRejected(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{"select", "users.csv | select name,"},
+		{"sort", "users.csv | sort age,"},
+		{"group", "users.csv | group city,"},
+		{"distinct", "users.csv | distinct city,"},
+		{"remove", "users.csv | remove password,"},
+		{"rename", "users.csv | rename name=first_name,"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse(tc.query)
+			if err == nil {
+				t.Fatalf("expected parse error for trailing comma in %q", tc.query)
+			}
+		})
 	}
 }
