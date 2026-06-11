@@ -772,7 +772,7 @@ func nestedTable() *table.Table {
 }
 
 // optionalNestedTable has one row with a null parent record and one with a nested value.
-// Mirrors testdata/nested_missing.json for unit-level TDD on ticket 001.
+// Mirrors testdata/nested_missing.json for unit-level nested missing-field coverage.
 func optionalNestedTable() *table.Table {
 	t := table.NewTable([]string{"name", "addr"})
 	t.AddRow([]table.Value{
@@ -874,7 +874,7 @@ func TestDistinctNullParentDotPath(t *testing.T) {
 }
 
 func TestNullParentDotPathPreservesTypeMismatchError(t *testing.T) {
-	// String parent is not null — must still error after ticket 001 fix.
+	// String parent is not null — must still error when traversing into a scalar.
 	err := runQueryExpectErr(t, optionalNestedTable(), "sort name.first")
 	if err == nil {
 		t.Fatal("expected error for dot path through string column")
@@ -1067,7 +1067,7 @@ func runJoinQuery(t *testing.T, left *table.Table, joinClause string) *table.Tab
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
-	load := func(filename string) (*table.Table, error) {
+	load := func(filename string, _ ast.LoadOptions) (*table.Table, error) {
 		if filename == "orders.csv" {
 			return ordersTable(), nil
 		}
@@ -1168,7 +1168,7 @@ func TestJoinMultiKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
-	load := func(string) (*table.Table, error) { return right, nil }
+	load := func(string, ast.LoadOptions) (*table.Table, error) { return right, nil }
 	result, err := Execute(q, left, load)
 	if err != nil {
 		t.Fatalf("exec error: %v", err)
@@ -1197,7 +1197,7 @@ func TestJoinKeepsRightColumnCollidingWithLeftKeyName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
-	load := func(string) (*table.Table, error) { return right, nil }
+	load := func(string, ast.LoadOptions) (*table.Table, error) { return right, nil }
 	result, err := Execute(q, left, load)
 	if err != nil {
 		t.Fatalf("exec error: %v", err)
@@ -1230,7 +1230,7 @@ func TestJoinSurfacesKeyPathError(t *testing.T) {
 		if err != nil {
 			t.Fatalf("kind %q: parse error: %v", kind, err)
 		}
-		load := func(string) (*table.Table, error) { return right, nil }
+		load := func(string, ast.LoadOptions) (*table.Table, error) { return right, nil }
 		if _, err := Execute(q, left, load); err == nil {
 			t.Errorf("kind %q: expected error for invalid dot-path join key, got nil", kind)
 		}
@@ -1249,7 +1249,7 @@ func TestJoinSurfacesRightKeyPathError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
-	load := func(string) (*table.Table, error) { return right, nil }
+	load := func(string, ast.LoadOptions) (*table.Table, error) { return right, nil }
 	if _, err := Execute(q, left, load); err == nil {
 		t.Fatal("expected error for invalid right dot-path join key, got nil")
 	}
@@ -1273,7 +1273,7 @@ func TestJoinDotPathKeyDoesNotAliasExistingColumn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
-	load := func(string) (*table.Table, error) { return right, nil }
+	load := func(string, ast.LoadOptions) (*table.Table, error) { return right, nil }
 	result, err := Execute(q, left, load)
 	if err != nil {
 		t.Fatalf("exec error: %v", err)

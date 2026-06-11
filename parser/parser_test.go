@@ -1100,3 +1100,174 @@ func TestParseTrailingCommaInColumnListsRejected(t *testing.T) {
 		})
 	}
 }
+
+func TestParseSourceWithLoadOptions(t *testing.T) {
+	t.Run("format_only", func(t *testing.T) {
+		q, err := Parse("data.dat with format=CSV | head 5")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if q.Source.Filename != "data.dat" {
+			t.Errorf("filename: got %q", q.Source.Filename)
+		}
+		if q.Source.Load.Format != "csv" {
+			t.Errorf("format: got %q", q.Source.Load.Format)
+		}
+		if q.Source.Load.Header != nil {
+			t.Errorf("header: expected nil default, got %v", *q.Source.Load.Header)
+		}
+	})
+
+	t.Run("csv_options", func(t *testing.T) {
+		q, err := Parse(`data.csv with format=csv, header=false, delim=";" | count`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if q.Source.Load.Format != "csv" {
+			t.Errorf("format: got %q", q.Source.Load.Format)
+		}
+		if q.Source.Load.Header == nil || *q.Source.Load.Header != false {
+			t.Errorf("header: want false, got %v", q.Source.Load.Header)
+		}
+		if q.Source.Load.Delim != ";" {
+			t.Errorf("delim: got %q", q.Source.Load.Delim)
+		}
+	})
+
+	t.Run("glob_with_format", func(t *testing.T) {
+		q, err := Parse("logs/part-* with format=csv | count")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if q.Source.Filename != "logs/part-*" {
+			t.Errorf("filename: got %q", q.Source.Filename)
+		}
+		if q.Source.Load.Format != "csv" {
+			t.Errorf("format: got %q", q.Source.Load.Format)
+		}
+	})
+
+	t.Run("stdin_with_format", func(t *testing.T) {
+		q, err := Parse("- with format=csv | filter { age > 25 }")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if q.Source.Filename != "-" {
+			t.Errorf("filename: got %q", q.Source.Filename)
+		}
+		if q.Source.Load.Format != "csv" {
+			t.Errorf("format: got %q", q.Source.Load.Format)
+		}
+	})
+
+	t.Run("explicit_header_true", func(t *testing.T) {
+		q, err := Parse("data.csv with header=true | head")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if q.Source.Load.Header == nil || *q.Source.Load.Header != true {
+			t.Errorf("header: want true, got %v", q.Source.Load.Header)
+		}
+	})
+
+	t.Run("delim_without_format", func(t *testing.T) {
+		q, err := Parse(`data.csv with delim=";" | count`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if q.Source.Load.Delim != ";" {
+			t.Errorf("delim: got %q", q.Source.Load.Delim)
+		}
+		if q.Source.Load.Format != "" {
+			t.Errorf("format: expected empty, got %q", q.Source.Load.Format)
+		}
+	})
+}
+
+func TestParseJoinWithLoadOptions(t *testing.T) {
+	t.Run("inner", func(t *testing.T) {
+		q, err := Parse(`users.csv | join orders.dat with format=csv on name == user_name`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		j := q.Ops[0].(*ast.JoinOp)
+		if j.Filename != "orders.dat" {
+			t.Errorf("filename: got %q", j.Filename)
+		}
+		if j.Load.Format != "csv" {
+			t.Errorf("format: got %q", j.Load.Format)
+		}
+	})
+
+	t.Run("left_with_delim", func(t *testing.T) {
+		q, err := Parse(`users.csv | join left orders/part-*.dat with format=csv, delim=";" on user_id == customer_id`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		j := q.Ops[0].(*ast.JoinOp)
+		if j.Kind != "left" {
+			t.Errorf("kind: got %q", j.Kind)
+		}
+		if j.Filename != "orders/part-*.dat" {
+			t.Errorf("filename: got %q", j.Filename)
+		}
+		if j.Load.Format != "csv" || j.Load.Delim != ";" {
+			t.Errorf("load: got format=%q delim=%q", j.Load.Format, j.Load.Delim)
+		}
+	})
+
+	t.Run("format_case_insensitive", func(t *testing.T) {
+		q, err := Parse(`users.csv | join orders.dat with format=CSV on name == user_name`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		j := q.Ops[0].(*ast.JoinOp)
+		if j.Load.Format != "csv" {
+			t.Errorf("format: got %q", j.Load.Format)
+		}
+	})
+
+	t.Run("after_other_op", func(t *testing.T) {
+		q, err := Parse(`users.csv | filter { age > 20 } | join orders.dat with format=csv on id`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		j := q.Ops[1].(*ast.JoinOp)
+		if j.Load.Format != "csv" {
+			t.Errorf("format: got %q", j.Load.Format)
+		}
+	})
+}
+
+func TestParseWithLoadOptionsRejected(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+		msg   string
+	}{
+		{"unknown_key", "data.csv with foo=bar | head", "unknown"},
+		{"duplicate_format", "data.csv with format=csv, format=json | head", "duplicate"},
+		{"unsupported_format", "data.csv with format=csvv | head", "unsupported"},
+		{"with_after_on", "users.csv | join orders.csv on id with format=csv", "with"},
+		{"csv_header_on_json", "data.json with format=json, header=false | head", "header"},
+		{"csv_delim_on_json", "data.json with format=json, delim=\";\" | head", "delim"},
+		{"inferred_json_header", "data.json with header=false | head", "header"},
+		{"inferred_json_delim", "data.json with delim=\";\" | head", "delim"},
+		{"join_inferred_json_header", "users.csv | join data.json with header=false on id", "header"},
+		{"unknown_ext_header", "data.dat with header=false | head", "with format"},
+		{"unknown_ext_delim", "data.dat with delim=\";\" | head", "with format"},
+		{"glob_csv_opts_without_format", "part-*.dat with header=false | head", "with format"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse(tc.query)
+			if err == nil {
+				t.Fatalf("expected parse error for %q", tc.query)
+			}
+			if !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tc.msg)) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.msg)
+			}
+		})
+	}
+}

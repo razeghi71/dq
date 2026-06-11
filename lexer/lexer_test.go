@@ -4,6 +4,43 @@ import (
 	"testing"
 )
 
+func TestLexWithKeyword(t *testing.T) {
+	tokens, err := Lex("data with format=csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []TokenType{TokenIdent, TokenWith, TokenIdent, TokenEquals, TokenIdent, TokenEOF}
+	if len(tokens) != len(want) {
+		t.Fatalf("expected %d tokens, got %d", len(want), len(tokens))
+	}
+	for i, tt := range want {
+		if tokens[i].Type != tt {
+			t.Errorf("token %d: expected %s, got %s (%q)", i, tt, tokens[i].Type, tokens[i].Val)
+		}
+	}
+}
+
+func TestLexJoinWithLoadOptions(t *testing.T) {
+	tokens, err := Lex(`users.csv | join orders.dat with format=csv, delim=";" on id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []TokenType{
+		TokenIdent, TokenDot, TokenIdent, TokenPipe, TokenIdent,
+		TokenIdent, TokenDot, TokenIdent, TokenWith,
+		TokenIdent, TokenEquals, TokenIdent, TokenComma,
+		TokenIdent, TokenEquals, TokenString, TokenIdent, TokenIdent, TokenEOF,
+	}
+	if len(tokens) != len(want) {
+		t.Fatalf("expected %d tokens, got %d", len(want), len(tokens))
+	}
+	for i, tt := range want {
+		if tokens[i].Type != tt {
+			t.Errorf("token %d: expected %s, got %s (%q)", i, tt, tokens[i].Type, tokens[i].Val)
+		}
+	}
+}
+
 func TestLexBasic(t *testing.T) {
 	tokens, err := Lex(`users.csv | head 10`)
 	if err != nil {

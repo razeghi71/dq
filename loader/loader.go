@@ -15,6 +15,7 @@ import (
 
 	goavro "github.com/linkedin/goavro/v2"
 	parquet "github.com/parquet-go/parquet-go"
+	"github.com/razeghi71/dq/ast"
 	"github.com/razeghi71/dq/table"
 )
 
@@ -27,42 +28,50 @@ func IsStdin(filename string) bool {
 }
 
 // LoadInput reads from filename or from stdin when filename is "-".
-// When reading from stdin, format must be set (csv, json, or jsonl).
+// When reading from stdin, opts.Format must be set (csv, json, or jsonl).
 // Pass nil for stdin to use os.Stdin.
-func LoadInput(filename, format string, stdin io.Reader) (*table.Table, error) {
+func LoadInput(filename string, opts Options, stdin io.Reader) (*table.Table, error) {
+	opts = normalizeOptions(opts)
 	if IsStdin(filename) {
-		if format == "" {
-			return nil, fmt.Errorf("reading from stdin requires -f format (csv, json, jsonl)")
+		if opts.Format == "" {
+			return nil, fmt.Errorf("reading from stdin requires with format=... in query (csv, json, jsonl)")
+		}
+		if err := validateOptionsForFormat(opts, opts.Format); err != nil {
+			return nil, err
 		}
 		if stdin == nil {
 			stdin = os.Stdin
 		}
-		return LoadReader(stdin, format)
+		return LoadReader(stdin, opts)
 	}
-	return Load(filename, format)
+	return Load(filename, opts)
 }
 
-// Load reads a file and returns a Table. If format is non-empty it overrides
-// the file extension; otherwise the extension is used. An error is returned if
-// neither provides a recognisable format. Patterns containing *, ?, or { expand
-// to all matching files and are concatenated.
-func Load(filename, format string) (*table.Table, error) {
+// Load reads a file and returns a Table. opts.Format overrides the file extension
+// when non-empty; otherwise the extension is used. Patterns containing *, ?, or {
+// expand to all matching files and are concatenated.
+func Load(filename string, opts Options) (*table.Table, error) {
+	opts = normalizeOptions(opts)
 	if IsStdin(filename) {
-		return LoadInput(filename, format, nil)
+		return LoadInput(filename, opts, nil)
 	}
 	if HasGlobMeta(filename) {
-		return loadGlob(filename, format)
+		return loadGlob(filename, opts)
 	}
-	return loadFile(filename, format, nil)
+	return loadFile(filename, opts, nil)
 }
 
-func loadFile(filename, format string, csvColumns []string) (*table.Table, error) {
+func loadFile(filename string, opts Options, csvColumns []string) (*table.Table, error) {
+	format := opts.Format
 	if format == "" {
 		format = strings.TrimPrefix(strings.ToLower(filepath.Ext(filename)), ".")
 	}
+	if err := validateOptionsForFormat(opts, format); err != nil {
+		return nil, err
+	}
 	switch format {
 	case "csv":
-		return loadCSV(filename, csvColumns)
+		return loadCSV(filename, csvConfigFromOptions(opts, csvColumns))
 	case "json":
 		return loadJSON(filename)
 	case "jsonl":
@@ -73,29 +82,34 @@ func loadFile(filename, format string, csvColumns []string) (*table.Table, error
 		return loadParquet(filename)
 	default:
 		if format == "" {
-			return nil, fmt.Errorf("cannot determine file format for %q: use -f to specify (csv, json, jsonl, avro, parquet)", filename)
+			return nil, fmt.Errorf("cannot determine file format for %q: use with format=... in query (%s)", filename, ast.SupportedLoadFormatsList)
 		}
-		return nil, fmt.Errorf("unsupported format %q (supported: csv, json, jsonl, avro, parquet)", format)
+		return nil, fmt.Errorf("unsupported format %q (supported: %s)", format, ast.SupportedLoadFormatsList)
 	}
 }
 
-func loadGlob(pattern, format string) (*table.Table, error) {
+func loadGlob(pattern string, opts Options) (*table.Table, error) {
 	matches, err := expandGlob(pattern)
 	if err != nil {
 		return nil, err
 	}
-	resolved, err := validateUniformFormat(matches, format)
+	resolved, err := validateUniformFormat(matches, opts.Format)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateOptionsForFormat(opts, resolved); err != nil {
 		return nil, err
 	}
 
 	if resolved == "csv" {
-		return loadGlobCSV(pattern, matches)
+		return loadGlobCSV(pattern, matches, opts)
 	}
 
 	var parts []*table.Table
+	partOpts := opts
+	partOpts.Format = resolved
 	for _, path := range matches {
-		tbl, err := loadFile(path, resolved, nil)
+		tbl, err := loadFile(path, partOpts, nil)
 		if err != nil {
 			return nil, fmt.Errorf("loading glob %q: loading %q: %w", pattern, path, err)
 		}
@@ -104,7 +118,12 @@ func loadGlob(pattern, format string) (*table.Table, error) {
 	return table.Concat(parts)
 }
 
-func loadGlobCSV(pattern string, matches []string) (*table.Table, error) {
+func loadGlobCSV(pattern string, matches []string, opts Options) (*table.Table, error) {
+	cfg := csvConfigFromOptions(opts, nil)
+	if !cfg.header {
+		return loadGlobCSVHeaderless(pattern, matches, cfg)
+	}
+
 	var parts []*table.Table
 	var anchor []string
 	for _, path := range matches {
@@ -113,9 +132,9 @@ func loadGlobCSV(pattern string, matches []string) (*table.Table, error) {
 			err error
 		)
 		if len(anchor) == 0 {
-			tbl, err = loadCSV(path, nil)
+			tbl, err = loadCSV(path, cfg)
 		} else {
-			tbl, err = loadCSVGlobShard(path, anchor)
+			tbl, err = loadCSVGlobShard(path, anchor, cfg.delim)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("loading glob %q: loading %q: %w", pattern, path, err)
@@ -128,28 +147,103 @@ func loadGlobCSV(pattern string, matches []string) (*table.Table, error) {
 	return table.Concat(parts)
 }
 
-// LoadReader reads a table from r in the given format.
-// Supported formats: csv, json, jsonl.
-func LoadReader(r io.Reader, format string) (*table.Table, error) {
-	switch format {
+func loadGlobCSVHeaderless(pattern string, matches []string, cfg csvLoadConfig) (*table.Table, error) {
+	var parts []*table.Table
+	var anchor []string
+	for _, path := range matches {
+		var (
+			tbl *table.Table
+			err error
+		)
+		if len(anchor) == 0 {
+			tbl, err = loadCSV(path, cfg)
+			if err != nil {
+				return nil, fmt.Errorf("loading glob %q: loading %q: %w", pattern, path, err)
+			}
+			if hasNonEmptyColumnName(tbl.Columns) {
+				anchor = append([]string(nil), tbl.Columns...)
+			}
+		} else {
+			tbl, err = loadCSVPositional(path, anchor, cfg.delim)
+			if err != nil {
+				return nil, fmt.Errorf("loading glob %q: loading %q: %w", pattern, path, err)
+			}
+		}
+		parts = append(parts, tbl)
+	}
+	return table.Concat(parts)
+}
+
+// LoadReader reads a table from r. opts.Format must be csv, json, or jsonl.
+func LoadReader(r io.Reader, opts Options) (*table.Table, error) {
+	if err := validateOptionsForFormat(opts, opts.Format); err != nil {
+		return nil, err
+	}
+	switch opts.Format {
 	case "csv":
-		return loadCSVReader(r, nil)
+		return loadCSVReader(r, csvConfigFromOptions(opts, nil))
 	case "json":
 		return loadJSONReader(r)
 	case "jsonl":
 		return loadJSONLReader(r)
 	default:
-		return nil, fmt.Errorf("LoadReader: unsupported format %q (supported: csv, json, jsonl)", format)
+		return nil, fmt.Errorf("LoadReader: unsupported format %q (supported: csv, json, jsonl)", opts.Format)
 	}
 }
 
-func loadCSV(filename string, columns []string) (*table.Table, error) {
+type csvLoadConfig struct {
+	columns []string
+	header  bool
+	delim   rune
+}
+
+func csvConfigFromOptions(opts Options, columns []string) csvLoadConfig {
+	cfg := csvLoadConfig{
+		columns: columns,
+		header:  true,
+		delim:   ',',
+	}
+	if opts.Header != nil {
+		cfg.header = *opts.Header
+	}
+	if opts.Delim != "" {
+		cfg.delim = []rune(opts.Delim)[0]
+	}
+	return cfg
+}
+
+func synthesizeColumns(n int) []string {
+	cols := make([]string, n)
+	for i := range cols {
+		cols[i] = fmt.Sprintf("col%d", i+1)
+	}
+	return cols
+}
+
+func validateOptionsForFormat(opts Options, format string) error {
+	return ast.ValidateCSVOnlyOptionsForFormat(opts.Header, opts.Delim, format, "")
+}
+
+func loadCSV(filename string, cfg csvLoadConfig) (*table.Table, error) {
 	f, err := os.Open(filename)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open %s: %w", filename, err)
 	}
 	defer f.Close()
-	return loadCSVReader(f, columns)
+	return loadCSVReader(f, cfg)
+}
+
+func loadCSVPositional(path string, columns []string, delim rune) (*table.Table, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("cannot open %s: %w", path, err)
+	}
+	defer f.Close()
+
+	reader := csv.NewReader(f)
+	reader.TrimLeadingSpace = true
+	reader.Comma = delim
+	return readCSVRows(reader, columns)
 }
 
 const utf8BOM = "\ufeff"
@@ -291,7 +385,7 @@ func classifyCSVGlobFirstRow(peek, anchor []string) csvGlobShardKind {
 	return csvGlobShardData
 }
 
-func loadCSVGlobShard(path string, anchor []string) (*table.Table, error) {
+func loadCSVGlobShard(path string, anchor []string, delim rune) (*table.Table, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open %s: %w", path, err)
@@ -300,6 +394,7 @@ func loadCSVGlobShard(path string, anchor []string) (*table.Table, error) {
 
 	reader := csv.NewReader(f)
 	reader.TrimLeadingSpace = true
+	reader.Comma = delim
 
 	peek, err := reader.Read()
 	if err == io.EOF {
@@ -357,11 +452,37 @@ func hasNonEmptyColumnName(columns []string) bool {
 	return false
 }
 
-func loadCSVReader(r io.Reader, columns []string) (*table.Table, error) {
+func loadCSVReader(r io.Reader, cfg csvLoadConfig) (*table.Table, error) {
 	reader := csv.NewReader(r)
 	reader.TrimLeadingSpace = true
+	reader.Comma = cfg.delim
 
-	if len(columns) == 0 {
+	if len(cfg.columns) == 0 && !cfg.header {
+		first, err := reader.Read()
+		if err == io.EOF {
+			return table.NewTable(nil), nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("error reading CSV row: %w", err)
+		}
+		cfg.columns = synthesizeColumns(len(first))
+		t := table.NewTable(cfg.columns)
+		t.AddRow(csvRowValues(first, cfg.columns))
+		rest, err := readCSVRows(reader, cfg.columns)
+		if err != nil {
+			return nil, err
+		}
+		for row := 0; row < rest.NumRows; row++ {
+			vals := make([]table.Value, len(cfg.columns))
+			for i, col := range cfg.columns {
+				vals[i] = rest.Get(row, col)
+			}
+			t.AddRow(vals)
+		}
+		return t, nil
+	}
+
+	if len(cfg.columns) == 0 && cfg.header {
 		header, err := reader.Read()
 		if err == io.EOF {
 			return table.NewTable(nil), nil
@@ -369,10 +490,10 @@ func loadCSVReader(r io.Reader, columns []string) (*table.Table, error) {
 		if err != nil {
 			return nil, fmt.Errorf("cannot read CSV header: %w", err)
 		}
-		columns = trimmedCSVFields(header)
+		cfg.columns = trimmedCSVFields(header)
 		// BOM-only or whitespace-only first lines parse as a single empty column
 		// name; treat as an empty file when no data rows follow.
-		if len(columns) == 1 && columns[0] == "" {
+		if len(cfg.columns) == 1 && cfg.columns[0] == "" {
 			record, err := reader.Read()
 			if err == io.EOF {
 				return table.NewTable(nil), nil
@@ -380,15 +501,15 @@ func loadCSVReader(r io.Reader, columns []string) (*table.Table, error) {
 			if err != nil {
 				return nil, fmt.Errorf("error reading CSV row: %w", err)
 			}
-			t := table.NewTable(columns)
-			t.AddRow(csvRowValues(record, columns))
-			rest, err := readCSVRows(reader, columns)
+			t := table.NewTable(cfg.columns)
+			t.AddRow(csvRowValues(record, cfg.columns))
+			rest, err := readCSVRows(reader, cfg.columns)
 			if err != nil {
 				return nil, err
 			}
 			for row := 0; row < rest.NumRows; row++ {
-				vals := make([]table.Value, len(columns))
-				for i, col := range columns {
+				vals := make([]table.Value, len(cfg.columns))
+				for i, col := range cfg.columns {
 					vals[i] = rest.Get(row, col)
 				}
 				t.AddRow(vals)
@@ -397,7 +518,7 @@ func loadCSVReader(r io.Reader, columns []string) (*table.Table, error) {
 		}
 	}
 
-	return readCSVRows(reader, columns)
+	return readCSVRows(reader, cfg.columns)
 }
 
 func csvRowValues(record, columns []string) []table.Value {

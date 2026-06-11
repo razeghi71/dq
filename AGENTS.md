@@ -8,6 +8,7 @@ dq 'filename | op [args] | op2 [args] ...'
 
 * The entire query is passed as a **single-quoted string** to avoid shell interpretation of `|`, `{`, `}`, `>`, `<`, and backticks.
 * Takes a file (csv, avro, json, etc.) as input. Globs are supported (`logs/**/*.csv`, `orders/part-*.csv`) — matched files are concatenated. All matched files are loaded into memory before the pipeline runs. A zero-byte CSV (or BOM-/whitespace-only with no data rows) loads as an empty table (0 columns, 0 rows). Empty glob shards are skipped when establishing the column schema; the first non-empty shard defines the anchor columns. CSV glob shards without a detectable header row are read positionally under the first file's columns; extra cells per row are dropped. Extended headers require shared column names plus new lowercase identifiers (`email`, not `Email`); renamed columns with no anchor overlap are positional.
+* Optional **`with key=value, ...`** on the primary source or join file sets load format and CSV options (see Load options below).
 * Everything is **pipe-based** — each op takes a table and returns a table.
 * Default state: all columns are selected unless explicitly changed.
 
@@ -18,6 +19,36 @@ dq 'filename | op [args] | op2 [args] ...'
 ```
 dq "users.csv | filter { name == \"O'Brien\" }"
 ```
+
+---
+
+## Load options (`with`)
+
+Optional on any source or join file, before `|` or `on`:
+
+```
+source    ::= filename [ with load_opts ]
+join      ::= "join" [ kind ] filename [ with load_opts ] "on" join_keys
+load_opts ::= "with" load_opt ( "," load_opt )*
+load_opt  ::= ident "=" value
+```
+
+Examples:
+
+```
+data.dat with format=csv | head 5
+logs/part-* with format=csv | count
+- with format=csv | filter { age > 25 }
+users.csv | join left orders/part-*.dat with format=csv, delim=";" on user_id == customer_id
+```
+
+| Key | Applies to | Values | Notes |
+|-----|------------|--------|-------|
+| `format` | all | `csv`, `json`, `jsonl`, `avro`, `parquet` | Overrides extension; required when extension missing |
+| `header` | csv | `true`, `false` | Default `true`; `false` uses `col1`, `col2`, … from first row width |
+| `delim` | csv | string, e.g. `delim=";"` | Default `,`; only the first character is used as the separator |
+
+Format resolution: explicit `format=` → file extension → error (`use with format=...`). Stdin (`-`) requires `with format=...`. Use `with format=...` when a glob matches mixed or missing extensions.
 
 ---
 
@@ -277,7 +308,7 @@ dq 'users.csv | join full orders.csv on id == customer_id and region == region'
 
 Each key is either a column path (same name on both sides) or `left_path == right_path`. Join key columns appear once under the left-side name; dot-path keys get a flattened column (`address.city` -> `address_city`, suffixed if taken). Colliding right-side columns are prefixed with the join file basename (for globs, derived from the pattern — e.g. `orders/*.csv` with colliding column `note` -> `orders_note`).
 
-The join file's format comes from its extension. `-f` applies to the primary input; for join globs (not literal join paths), `-f` also sets the format when extensions are missing or mixed. Join sources support globs (`orders/part-*.csv`); matched files are concatenated before the join. Null keys never match. Keys match by value representation (consistent with `group`/`distinct`), so `1` matches `"1"` across formats.
+The join file's format comes from its extension unless overridden with `with format=...` on the join path. Join sources support globs (`orders/part-*.csv`); matched files are concatenated before the join. Null keys never match. Keys match by value representation (consistent with `group`/`distinct`), so `1` matches `"1"` across formats.
 
 ---
 

@@ -100,17 +100,104 @@ func (p *Parser) parseSource() (*ast.SourceOp, error) {
 	if err != nil {
 		return nil, err
 	}
+	var filename string
 	switch tok.Type {
 	case lexer.TokenStdin:
-		return &ast.SourceOp{Filename: "-"}, nil
+		filename = "-"
 	case lexer.TokenIdent:
 		if tok.Val == "" {
 			return nil, fmt.Errorf("expected filename at position %d", tok.Pos)
 		}
-		return &ast.SourceOp{Filename: tok.Val}, nil
+		filename = tok.Val
 	default:
 		return nil, fmt.Errorf("expected filename at position %d", tok.Pos)
 	}
+
+	load, err := p.parseOptionalWithClause()
+	if err != nil {
+		return nil, err
+	}
+	if err := ast.ValidateLoadOptionsForFilename(filename, load); err != nil {
+		return nil, err
+	}
+	return &ast.SourceOp{Filename: filename, Load: load}, nil
+}
+
+var loadOptionKeys = map[string]bool{
+	"format": true,
+	"header": true,
+	"delim":  true,
+}
+
+func (p *Parser) parseOptionalWithClause() (ast.LoadOptions, error) {
+	if p.peek().Type != lexer.TokenWith {
+		return ast.LoadOptions{}, nil
+	}
+	return p.parseWithClause()
+}
+
+func (p *Parser) parseWithClause() (ast.LoadOptions, error) {
+	if _, err := p.expect(lexer.TokenWith); err != nil {
+		return ast.LoadOptions{}, err
+	}
+
+	var opts ast.LoadOptions
+	seen := make(map[string]bool)
+	for {
+		keyTok, err := p.expect(lexer.TokenIdent)
+		if err != nil {
+			return ast.LoadOptions{}, fmt.Errorf("with: expected option name: %w", err)
+		}
+		if !loadOptionKeys[keyTok.Val] {
+			return ast.LoadOptions{}, fmt.Errorf("with: unknown load option %q", keyTok.Val)
+		}
+		if seen[keyTok.Val] {
+			return ast.LoadOptions{}, fmt.Errorf("with: duplicate load option %q", keyTok.Val)
+		}
+		seen[keyTok.Val] = true
+
+		if _, err := p.expect(lexer.TokenEquals); err != nil {
+			return ast.LoadOptions{}, fmt.Errorf("with: expected '=' after %q: %w", keyTok.Val, err)
+		}
+
+		valTok := p.advance()
+		switch keyTok.Val {
+		case "format":
+			if valTok.Type != lexer.TokenIdent {
+				return ast.LoadOptions{}, fmt.Errorf("with: format value must be an identifier, got %s", valTok.Type)
+			}
+			opts.Format = strings.ToLower(valTok.Val)
+		case "header":
+			switch valTok.Type {
+			case lexer.TokenTrue:
+				v := true
+				opts.Header = &v
+			case lexer.TokenFalse:
+				v := false
+				opts.Header = &v
+			default:
+				return ast.LoadOptions{}, fmt.Errorf("with: header value must be true or false, got %s", valTok.Type)
+			}
+		case "delim":
+			if valTok.Type != lexer.TokenString {
+				return ast.LoadOptions{}, fmt.Errorf("with: delim value must be a string, got %s", valTok.Type)
+			}
+			if valTok.Val == "" {
+				return ast.LoadOptions{}, fmt.Errorf("with: delim cannot be empty")
+			}
+			opts.Delim = valTok.Val
+		}
+
+		if p.peek().Type != lexer.TokenComma {
+			break
+		}
+		p.advance()
+	}
+
+	if err := ast.ValidateLoadOptions(opts); err != nil {
+		return ast.LoadOptions{}, err
+	}
+	return opts, nil
 }
 
 func (p *Parser) parseOp() (ast.Op, error) {
@@ -397,12 +484,20 @@ func (p *Parser) parseJoin() (ast.Op, error) {
 		return nil, fmt.Errorf("join: expected filename")
 	}
 
+	load, err := p.parseOptionalWithClause()
+	if err != nil {
+		return nil, fmt.Errorf("join: %w", err)
+	}
+	if err := ast.ValidateLoadOptionsForFilename(filename.Val, load); err != nil {
+		return nil, fmt.Errorf("join: %w", err)
+	}
+
 	if !seenOn {
-		onTok, err := p.expect(lexer.TokenIdent)
-		if err != nil {
-			return nil, fmt.Errorf("join: expected 'on' clause: %w", err)
-		}
-		if onTok.Val != "on" {
+		onTok := p.advance()
+		if onTok.Type != lexer.TokenIdent || onTok.Val != "on" {
+			if onTok.Type == lexer.TokenWith {
+				return nil, fmt.Errorf("join: with clause must appear before on")
+			}
 			return nil, fmt.Errorf("join: expected 'on', got %q", onTok.Val)
 		}
 	}
@@ -415,7 +510,7 @@ func (p *Parser) parseJoin() (ast.Op, error) {
 		return nil, fmt.Errorf("join: expected at least one join key")
 	}
 
-	return &ast.JoinOp{Kind: kind, Filename: filename.Val, Keys: keys}, nil
+	return &ast.JoinOp{Kind: kind, Filename: filename.Val, Keys: keys, Load: load}, nil
 }
 
 func (p *Parser) parseJoinKeys() ([]ast.JoinKey, error) {

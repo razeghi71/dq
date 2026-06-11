@@ -63,6 +63,14 @@ type Assignment struct {
 	Expr   Expr
 }
 
+// LoadOptions configures how a source file is loaded.
+// Zero value keeps extension-based inference and CSV defaults (header row, comma delim).
+type LoadOptions struct {
+	Format string // optional override: csv, json, jsonl, avro, parquet
+	Header *bool  // csv only; nil = default (true)
+	Delim  string // csv only; "" = comma
+}
+
 // --- Operations (pipeline stages) ---
 
 // Op represents a single operation in the pipeline.
@@ -73,6 +81,7 @@ type Op interface {
 // SourceOp represents the input file reference.
 type SourceOp struct {
 	Filename string
+	Load     LoadOptions
 }
 
 func (o *SourceOp) opNode() {}
@@ -183,6 +192,7 @@ type JoinOp struct {
 	Kind     string // inner, left, right, full
 	Filename string
 	Keys     []JoinKey
+	Load     LoadOptions
 }
 
 func (o *JoinOp) opNode() {}

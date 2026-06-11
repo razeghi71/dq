@@ -7,21 +7,13 @@ import (
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
+	"github.com/razeghi71/dq/ast"
 )
 
 // HasGlobMeta reports whether pattern should be expanded as a glob.
 // Literal paths with brackets (e.g. data[1].csv) are not globs unless *, ?, or { appear.
 func HasGlobMeta(pattern string) bool {
 	return strings.ContainsAny(pattern, "*?{")
-}
-
-// JoinLoadFormat returns the format to pass to Load for a join source.
-// -f applies to join sources only when the join path is a glob pattern.
-func JoinLoadFormat(filename, cliFormat string) string {
-	if cliFormat != "" && HasGlobMeta(filename) {
-		return cliFormat
-	}
-	return ""
 }
 
 func expandGlob(pattern string) ([]string, error) {
@@ -49,7 +41,7 @@ func validateUniformFormat(paths []string, format string) (string, error) {
 	for i, path := range paths {
 		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
 		if ext == "" {
-			return "", fmt.Errorf("cannot determine file format for %q: use -f to specify (csv, json, jsonl, avro, parquet)", path)
+			return "", fmt.Errorf("cannot determine file format for %q: use with format=... in query (%s)", path, ast.SupportedLoadFormatsList)
 		}
 		resolved[i] = ext
 		seen[ext] = true
@@ -60,7 +52,7 @@ func validateUniformFormat(paths []string, format string) (string, error) {
 			exts = append(exts, ext)
 		}
 		sort.Strings(exts)
-		return "", fmt.Errorf("glob matched mixed formats (%s); use -f to specify", strings.Join(exts, ", "))
+		return "", fmt.Errorf("glob matched mixed formats (%s); use with format=... in query", strings.Join(exts, ", "))
 	}
 	return resolved[0], nil
 }

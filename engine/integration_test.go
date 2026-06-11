@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/razeghi71/dq/ast"
 	"github.com/razeghi71/dq/loader"
 	"github.com/razeghi71/dq/parser"
 	"github.com/razeghi71/dq/table"
@@ -13,16 +14,16 @@ import (
 
 const testdataDir = "../testdata"
 
-// loadAndQuery loads a file from disk, parses the query, and executes it.
-func loadAndQuery(t *testing.T, file, query string) *table.Table {
+// loadAndQuery parses source | query, loads the source with any with-clause options, and executes.
+func loadAndQuery(t *testing.T, source, query string) *table.Table {
 	t.Helper()
-	tbl, err := loader.Load(file, "")
-	if err != nil {
-		t.Fatalf("load %s: %v", file, err)
-	}
-	q, err := parser.Parse(file + " | " + query)
+	q, err := parser.Parse(source + " | " + query)
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
+	}
+	tbl, err := loader.Load(q.Source.Filename, loader.FromAST(q.Source.Load))
+	if err != nil {
+		t.Fatalf("load %s: %v", q.Source.Filename, err)
 	}
 	result, err := Execute(q, tbl, nil)
 	if err != nil {
@@ -480,7 +481,7 @@ func TestIntegrationColumnTypeWidening(t *testing.T) {
 	})
 }
 
-// TestIntegrationFilterCrossTypeComparison covers ticket 001: comparisons in
+// TestIntegrationFilterCrossTypeComparison covers cross-type comparisons in
 // filter match by value, so widened string columns compare against numeric
 // literals consistently with join/group/distinct.
 func TestIntegrationFilterCrossTypeComparison(t *testing.T) {
@@ -516,7 +517,7 @@ func TestIntegrationStdinDashOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tbl, err := loader.LoadInput("-", "csv", strings.NewReader(string(data)))
+	tbl, err := loader.LoadInput("-", loader.Options{Format: "csv"}, strings.NewReader(string(data)))
 	if err != nil {
 		t.Fatalf("load stdin: %v", err)
 	}
@@ -542,7 +543,7 @@ func TestIntegrationStdinPipeline(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tbl, err := loader.LoadInput("-", "csv", strings.NewReader(string(data)))
+	tbl, err := loader.LoadInput("-", loader.Options{Format: "csv"}, strings.NewReader(string(data)))
 	if err != nil {
 		t.Fatalf("load stdin: %v", err)
 	}
@@ -597,7 +598,7 @@ func TestIntegrationStringPredicates(t *testing.T) {
 func TestJoinIntegration(t *testing.T) {
 	usersFile := testdataDir + "/users.csv"
 	ordersFile := testdataDir + "/orders.csv"
-	tbl, err := loader.Load(usersFile, "")
+	tbl, err := loader.Load(usersFile, loader.Options{})
 	if err != nil {
 		t.Fatalf("load users: %v", err)
 	}
@@ -605,8 +606,8 @@ func TestJoinIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	load := func(filename string) (*table.Table, error) {
-		return loader.Load(filename, "")
+	load := func(filename string, opts ast.LoadOptions) (*table.Table, error) {
+		return loader.Load(filename, loader.FromAST(opts))
 	}
 	result, err := Execute(q, tbl, load)
 	if err != nil {
@@ -631,7 +632,7 @@ func TestIntegrationGlobJoin(t *testing.T) {
 	usersFile := testdataDir + "/users.csv"
 	ordersGlob := testdataDir + "/glob/orders-*.csv"
 
-	tbl, err := loader.Load(usersFile, "")
+	tbl, err := loader.Load(usersFile, loader.Options{})
 	if err != nil {
 		t.Fatalf("load users: %v", err)
 	}
@@ -639,8 +640,8 @@ func TestIntegrationGlobJoin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	load := func(filename string) (*table.Table, error) {
-		return loader.Load(filename, "")
+	load := func(filename string, opts ast.LoadOptions) (*table.Table, error) {
+		return loader.Load(filename, loader.FromAST(opts))
 	}
 	result, err := Execute(q, tbl, load)
 	if err != nil {
@@ -666,8 +667,8 @@ func TestIntegrationGlobJoinCollisionPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	load := func(filename string) (*table.Table, error) {
-		return loader.Load(filename, "")
+	load := func(filename string, opts ast.LoadOptions) (*table.Table, error) {
+		return loader.Load(filename, loader.FromAST(opts))
 	}
 	result, err := Execute(q, left, load)
 	if err != nil {
@@ -691,46 +692,104 @@ func TestIntegrationGlobRecursivePrimary(t *testing.T) {
 	}
 }
 
-func joinLoad(format string) func(string) (*table.Table, error) {
-	return func(filename string) (*table.Table, error) {
-		return loader.Load(filename, loader.JoinLoadFormat(filename, format))
-	}
+func TestIntegrationPrimarySourceWithLoadOptions(t *testing.T) {
+	t.Run("format_override_extensionless", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "data.dat")
+		if err := os.WriteFile(path, []byte("name\nAlice\nBob\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		result := loadAndQuery(t, path+` with format=csv`, "count")
+		if result.NumRows != 1 || result.Get(0, "count").Int != 2 {
+			t.Fatalf("got %s", result.String())
+		}
+	})
+
+	t.Run("glob_format_override", func(t *testing.T) {
+		dir := t.TempDir()
+		glob := filepath.Join(dir, "part-*.dat")
+		if err := os.WriteFile(filepath.Join(dir, "part-001.dat"), []byte("id\n1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "part-002.dat"), []byte("id\n2\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		result := loadAndQuery(t, glob+` with format=csv`, "count")
+		if result.NumRows != 1 || result.Get(0, "count").Int != 2 {
+			t.Fatalf("got %s", result.String())
+		}
+	})
+
+	t.Run("header_false", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "rows.dat")
+		if err := os.WriteFile(path, []byte("1,2\n3,4\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		result := loadAndQuery(t, path+` with format=csv, header=false`, "count")
+		if result.NumRows != 1 || result.Get(0, "count").Int != 2 {
+			t.Fatalf("got %s", result.String())
+		}
+	})
+
+	t.Run("delim_semicolon", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "semi.dat")
+		if err := os.WriteFile(path, []byte("a;b\n1;2\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		result := loadAndQuery(t, path+` with format=csv, delim=";"`, "select a")
+		if result.NumRows != 1 || result.Get(0, "a").Int != 1 {
+			t.Fatalf("got %s", result.String())
+		}
+	})
+
+	t.Run("delim_without_format_on_csv", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "semi.csv")
+		if err := os.WriteFile(path, []byte("a;b\n1;2\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		result := loadAndQuery(t, path+` with delim=";"`, "select a")
+		if result.NumRows != 1 || result.Get(0, "a").Int != 1 {
+			t.Fatalf("got %s", result.String())
+		}
+	})
 }
 
-func TestIntegrationGlobJoinFormatOverride(t *testing.T) {
-	dir := t.TempDir()
-	usersPath := filepath.Join(dir, "users.csv")
-	ordersGlob := filepath.Join(dir, "orders-*.dat")
-	if err := os.WriteFile(usersPath, []byte("name\nAlice\nBob\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "orders-001.dat"), []byte("user_name,status\nAlice,shipped\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "orders-002.dat"), []byte("user_name,status\nBob,pending\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	tbl, err := loader.Load(usersPath, "")
-	if err != nil {
-		t.Fatalf("load users: %v", err)
-	}
-	q, err := parser.Parse(usersPath + ` | join ` + ordersGlob + ` on name == user_name | sort name`)
+func TestIntegrationStdinWithLoadOptions(t *testing.T) {
+	data := "name,age\nAlice,30\nBob,25\n"
+	q, err := parser.Parse(`- with format=csv | filter { age > 25 } | select name`)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	result, err := Execute(q, tbl, joinLoad("csv"))
+	if q.Source.Load.Format != "csv" {
+		t.Fatalf("source format: got %q", q.Source.Load.Format)
+	}
+	tbl, err := loader.LoadInput("-", loader.FromAST(q.Source.Load), strings.NewReader(data))
+	if err != nil {
+		t.Fatalf("load stdin: %v", err)
+	}
+	result, err := Execute(q, tbl, nil)
 	if err != nil {
 		t.Fatalf("exec: %v", err)
 	}
-	if result.NumRows != 2 {
-		t.Fatalf("expected 2 rows, got %d", result.NumRows)
+	if result.NumRows != 1 || result.Get(0, "name").Str != "Alice" {
+		t.Fatalf("got %s", result.String())
 	}
-	if result.Get(0, "name").Str != "Alice" || result.Get(0, "status").Str != "shipped" {
-		t.Errorf("row 0: got %s", result.String())
+}
+
+func TestIntegrationStdinUnsupportedFormat(t *testing.T) {
+	q, err := parser.Parse(`- with format=parquet | count`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
 	}
-	if result.Get(1, "name").Str != "Bob" || result.Get(1, "status").Str != "pending" {
-		t.Errorf("row 1: got %s", result.String())
+	_, err = loader.LoadInput("-", loader.FromAST(q.Source.Load), strings.NewReader("x"))
+	if err == nil {
+		t.Fatal("expected error for parquet on stdin")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "unsupported") {
+		t.Errorf("error: %q", err.Error())
 	}
 }
 

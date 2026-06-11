@@ -10,8 +10,8 @@ import (
 	"github.com/razeghi71/dq/table"
 )
 
-// LoadFunc loads a table from a filename. Used by join to read the right side.
-type LoadFunc func(filename string) (*table.Table, error)
+// LoadFunc loads a table from a filename with per-join load options.
+type LoadFunc func(filename string, opts ast.LoadOptions) (*table.Table, error)
 
 func execJoin(o *ast.JoinOp, left *table.Table, load LoadFunc) (*table.Table, error) {
 	if load == nil {
@@ -21,7 +21,7 @@ func execJoin(o *ast.JoinOp, left *table.Table, load LoadFunc) (*table.Table, er
 		return nil, fmt.Errorf("join: stdin is not supported as join source")
 	}
 
-	right, err := load(o.Filename)
+	right, err := load(o.Filename, o.Load)
 	if err != nil {
 		return nil, fmt.Errorf("join: load %q: %w", o.Filename, err)
 	}

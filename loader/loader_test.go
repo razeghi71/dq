@@ -94,7 +94,7 @@ func checkUsersTable(t *testing.T, tbl *table.Table) {
 }
 
 func TestLoadCSV(t *testing.T) {
-	tbl, err := Load(testdataDir+"/users.csv", "")
+	tbl, err := Load(testdataDir+"/users.csv", Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestLoadCSV(t *testing.T) {
 }
 
 func TestLoadEmptyCSVReader(t *testing.T) {
-	tbl, err := LoadReader(strings.NewReader(""), "csv")
+	tbl, err := LoadReader(strings.NewReader(""), Options{Format: "csv"})
 	if err != nil {
 		t.Fatalf("empty CSV should load: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestLoadEmptyCSVFile(t *testing.T) {
 	if err := os.WriteFile(path, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tbl, err := Load(path, "")
+	tbl, err := Load(path, Options{})
 	if err != nil {
 		t.Fatalf("empty CSV file should load: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestLoadEmptyCSVFile(t *testing.T) {
 }
 
 func TestLoadCSVBOMOnlyReader(t *testing.T) {
-	tbl, err := LoadReader(strings.NewReader("\ufeff"), "csv")
+	tbl, err := LoadReader(strings.NewReader("\ufeff"), Options{Format: "csv"})
 	if err != nil {
 		t.Fatalf("BOM-only CSV should load: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestLoadCSVBOMOnlyFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("\ufeff"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tbl, err := Load(path, "")
+	tbl, err := Load(path, Options{})
 	if err != nil {
 		t.Fatalf("BOM-only CSV file should load: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestLoadCSVBOMOnlyFile(t *testing.T) {
 }
 
 func TestLoadEmptyCSVStdin(t *testing.T) {
-	tbl, err := LoadInput("-", "csv", strings.NewReader(""))
+	tbl, err := LoadInput("-", Options{Format: "csv"}, strings.NewReader(""))
 	if err != nil {
 		t.Fatalf("empty stdin CSV should load: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestLoadEmptyCSVStdinNilReader(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tbl, err := LoadInput("-", "csv", nil)
+	tbl, err := LoadInput("-", Options{Format: "csv"}, nil)
 	if err != nil {
 		t.Fatalf("empty stdin CSV should load: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestLoadEmptyCSVStdinNilReader(t *testing.T) {
 }
 
 func TestLoadCSVHeaderOnly(t *testing.T) {
-	tbl, err := LoadReader(strings.NewReader("name,age\n"), "csv")
+	tbl, err := LoadReader(strings.NewReader("name,age\n"), Options{Format: "csv"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func csvWithUTF8BOM(content string) string {
 }
 
 func TestLoadCSVUTF8BOMStripsFirstHeaderField(t *testing.T) {
-	tbl, err := LoadReader(strings.NewReader(csvWithUTF8BOM("name,age\nAlice,30\n")), "csv")
+	tbl, err := LoadReader(strings.NewReader(csvWithUTF8BOM("name,age\nAlice,30\n")), Options{Format: "csv"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +234,7 @@ func TestLoadCSVUTF8BOMStripsFirstHeaderField(t *testing.T) {
 
 func TestCSVColumnTypeWideningIntFloat(t *testing.T) {
 	csv := "val\n1\n2.5\n3\n"
-	tbl, err := LoadReader(strings.NewReader(csv), "csv")
+	tbl, err := LoadReader(strings.NewReader(csv), Options{Format: "csv"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +257,7 @@ func TestCSVColumnTypeWideningIntFloat(t *testing.T) {
 func TestCSVColumnTypeWidening(t *testing.T) {
 	// Column "val" goes int → float → string; all three rows must end up as strings.
 	csv := "val\n1\n2.5\nsomething\n"
-	tbl, err := LoadReader(strings.NewReader(csv), "csv")
+	tbl, err := LoadReader(strings.NewReader(csv), Options{Format: "csv"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestCSVColumnTypeWidening(t *testing.T) {
 }
 
 func TestLoadUsersJSON(t *testing.T) {
-	tbl, err := Load(testdataDir+"/users.json", "")
+	tbl, err := Load(testdataDir+"/users.json", Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +299,7 @@ func TestLoadUsersJSON(t *testing.T) {
 }
 
 func TestLoadUsersJSONL(t *testing.T) {
-	tbl, err := Load(testdataDir+"/users.jsonl", "")
+	tbl, err := Load(testdataDir+"/users.jsonl", Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +312,7 @@ func TestLoadUsersJSONL(t *testing.T) {
 }
 
 func TestLoadUsersAvro(t *testing.T) {
-	tbl, err := Load(testdataDir+"/users.avro", "")
+	tbl, err := Load(testdataDir+"/users.avro", Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +320,7 @@ func TestLoadUsersAvro(t *testing.T) {
 }
 
 func TestLoadUsersParquet(t *testing.T) {
-	tbl, err := Load(testdataDir+"/users.parquet", "")
+	tbl, err := Load(testdataDir+"/users.parquet", Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -536,7 +536,7 @@ func checkNestedTable(t *testing.T, tbl *table.Table) {
 }
 
 func TestLoadNestedJSON(t *testing.T) {
-	tbl, err := Load(testdataDir+"/nested.json", "")
+	tbl, err := Load(testdataDir+"/nested.json", Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -544,7 +544,7 @@ func TestLoadNestedJSON(t *testing.T) {
 }
 
 func TestLoadNestedJSONL(t *testing.T) {
-	tbl, err := Load(testdataDir+"/nested.jsonl", "")
+	tbl, err := Load(testdataDir+"/nested.jsonl", Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -552,7 +552,7 @@ func TestLoadNestedJSONL(t *testing.T) {
 }
 
 func TestLoadNestedAvro(t *testing.T) {
-	tbl, err := Load(testdataDir+"/nested.avro", "")
+	tbl, err := Load(testdataDir+"/nested.avro", Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -560,7 +560,7 @@ func TestLoadNestedAvro(t *testing.T) {
 }
 
 func TestLoadNestedParquet(t *testing.T) {
-	tbl, err := Load(testdataDir+"/nested.parquet", "")
+	tbl, err := Load(testdataDir+"/nested.parquet", Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -622,7 +622,7 @@ func TestLoadAvroNamespacedUnionRecord(t *testing.T) {
 	path := writeAvro(t, []map[string]any{
 		{"v": goavro.Union("com.example.Inner", map[string]any{"x": int64(7)})},
 	})
-	tbl, err := Load(path, "avro")
+	tbl, err := Load(path, Options{Format: "avro"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -637,7 +637,7 @@ func TestLoadAvroNamespacedUnionRecord(t *testing.T) {
 	path = writeAvro(t, []map[string]any{
 		{"v": goavro.Union("string", "hello")},
 	})
-	tbl, err = Load(path, "avro")
+	tbl, err = Load(path, Options{Format: "avro"})
 	if err != nil {
 		t.Fatal(err)
 	}

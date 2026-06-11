@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	dq "github.com/razeghi71/dq"
+	"github.com/razeghi71/dq/ast"
 	"github.com/razeghi71/dq/engine"
 	"github.com/razeghi71/dq/loader"
 	"github.com/razeghi71/dq/parser"
@@ -20,7 +21,7 @@ var (
 )
 
 func main() {
-	format, output, query, err := parseArgs(os.Args[1:])
+	output, query, err := parseArgs(os.Args[1:])
 	if err == errHelp {
 		printUsage()
 		os.Exit(0)
@@ -48,14 +49,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	input, err := loader.LoadInput(q.Source.Filename, format, nil)
+	inputOpts := loader.FromAST(q.Source.Load)
+	input, err := loader.LoadInput(q.Source.Filename, inputOpts, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "load error: %v\n", err)
 		os.Exit(1)
 	}
 
-	result, err := engine.Execute(q, input, func(filename string) (*table.Table, error) {
-		return loader.Load(filename, loader.JoinLoadFormat(filename, format))
+	result, err := engine.Execute(q, input, func(filename string, opts ast.LoadOptions) (*table.Table, error) {
+		return loader.Load(filename, loader.FromAST(opts))
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -68,48 +70,41 @@ func main() {
 	}
 }
 
-// parseArgs extracts -f/-o flags and the query string from argv.
+// parseArgs extracts -o flags and the query string from argv.
 // The query may start with '-' (stdin); manual parsing avoids the std flag
 // package treating it as a flag.
-func parseArgs(args []string) (format, output, query string, err error) {
+func parseArgs(args []string) (output, query string, err error) {
 	i := 0
 	for i < len(args) {
 		switch args[i] {
 		case "-h", "-help", "--help":
-			return "", "", "", errHelp
+			return "", "", errHelp
 		case "-agent-guide", "--agent-guide":
-			return "", "", "", errGuide
+			return "", "", errGuide
 		case "-f", "-format":
-			if i+1 >= len(args) {
-				return "", "", "", fmt.Errorf("missing value for %s", args[i])
-			}
-			format = args[i+1]
-			i += 2
+			return "", "", fmt.Errorf("flag %s removed: use with format=... in the query (e.g. '- with format=csv | count')", args[i])
 		case "-o", "-output":
 			if i+1 >= len(args) {
-				return "", "", "", fmt.Errorf("missing value for %s", args[i])
+				return "", "", fmt.Errorf("missing value for %s", args[i])
 			}
 			output = args[i+1]
 			i += 2
 		case "--":
-			return format, output, strings.Join(args[i+1:], " "), nil
+			return output, strings.Join(args[i+1:], " "), nil
 		default:
-			return format, output, strings.Join(args[i:], " "), nil
+			return output, strings.Join(args[i:], " "), nil
 		}
 	}
-	return format, output, "", nil
+	return output, "", nil
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "usage: dq [-f format] [-o output] '<query>'")
+	fmt.Fprintln(os.Stderr, "usage: dq [-o output] '<query>'")
 	fmt.Fprintln(os.Stderr, "example: dq 'users.csv | filter { age > 20 } | select name, age'")
 	fmt.Fprintln(os.Stderr, "         dq 'logs/**/*.csv | count'")
 	fmt.Fprintln(os.Stderr, "         dq -o csv 'users.json | select name, age'")
-	fmt.Fprintln(os.Stderr, "         cat users.csv | dq -f csv")
-	fmt.Fprintln(os.Stderr, "         dq -f csv '- | filter { age > 20 }'")
+	fmt.Fprintln(os.Stderr, "         cat users.csv | dq '- with format=csv | count'")
 	fmt.Fprintln(os.Stderr, "flags:")
-	fmt.Fprintln(os.Stderr, "  -f, -format string")
-	fmt.Fprintln(os.Stderr, "        input format: csv, json, jsonl, avro, parquet (overrides file extension)")
 	fmt.Fprintln(os.Stderr, "  -o, -output string")
 	fmt.Fprintln(os.Stderr, "        output format: table (default), csv, json, jsonl, avro, parquet")
 	fmt.Fprintln(os.Stderr, "  -agent-guide")

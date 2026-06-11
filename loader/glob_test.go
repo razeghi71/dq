@@ -62,7 +62,7 @@ func TestLoadGlobCSV(t *testing.T) {
 		"b.csv": "id,name\n2,Bob\n",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestLoadGlobCSVRepeatedHeaderSkipped(t *testing.T) {
 		"b.csv": "id,name\n2,Bob\n",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestLoadGlobCSVUTF8BOMFirstShard(t *testing.T) {
 		"b.csv": "id,name\n2,Bob\n",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestLoadGlobCSVUTF8BOMRepeatedHeaderOnLaterShard(t *testing.T) {
 		"b.csv": "\ufeffid,name\n2,Bob\n",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func TestLoadGlobCSVHeaderlessShard(t *testing.T) {
 		"b.csv": "2,Bob\n",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestLoadGlobCSVExtendedHeaderExplicit(t *testing.T) {
 		"b.csv": "id,name,email\n2,Bob,bob@x.com\n",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestLoadGlobCSVExtendedHeaderPascalCaseLimitation(t *testing.T) {
 		"b.csv": "id,name,Email\n2,Bob,bob@x.com\n",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func TestLoadGlobCSVRenamedColumnsPositional(t *testing.T) {
 		"b.csv": "user_id,full_name\n2,Bob\n",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func TestLoadGlobCSVPositionalExtraColumnsDropped(t *testing.T) {
 		"b.csv": "2,Bob,extra@x.com\n",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +276,7 @@ func TestLoadGlobCSVExtraColumnsUnion(t *testing.T) {
 		"b.csv": "id,email\n2,bob@x.com\n",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +301,7 @@ func TestLoadGlobCSVColumnReorder(t *testing.T) {
 		"b.csv": "name,id\nBob,2\n",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +323,7 @@ func TestLoadGlobCSVHeaderlessStringShard(t *testing.T) {
 		"b.csv": "Bob,Charlie\n",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +342,7 @@ func TestLoadGlobCSVOverlapFalsePositive(t *testing.T) {
 		"b.csv": "name,Bob\n",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,7 +364,7 @@ func TestLoadGlobCSVMixedTypePositionalShard(t *testing.T) {
 		"b.csv": "name,Bob\n2,Charlie\n",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,7 +383,7 @@ func TestLoadGlobCSVUnrelatedStringShard(t *testing.T) {
 		"b.csv": "foo,bar\nx,y\n",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +402,7 @@ func TestLoadGlobOrder(t *testing.T) {
 		"part-002.csv": "id\n1\n",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "part-*.csv"), "")
+	tbl, err := Load(filepath.Join(dir, "part-*.csv"), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,7 +422,7 @@ func TestLoadGlobEmptyMiddleShard(t *testing.T) {
 		"c.csv": "2,Bob\n",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +441,7 @@ func TestLoadGlobEmptyFirstShard(t *testing.T) {
 		"b.csv": "id,name\n2,Bob\n",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
 	if err != nil {
 		t.Fatalf("empty first glob shard should not fail load: %v", err)
 	}
@@ -459,7 +459,7 @@ func TestLoadGlobEmptyOnlyFile(t *testing.T) {
 		"only.csv": "",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
 	if err != nil {
 		t.Fatalf("glob of empty-only CSV should load: %v", err)
 	}
@@ -475,7 +475,7 @@ func TestLoadGlobAllEmptyShards(t *testing.T) {
 		"b.csv": "",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
 	if err != nil {
 		t.Fatalf("glob of all-empty CSV shards should load: %v", err)
 	}
@@ -492,7 +492,7 @@ func TestLoadGlobMultipleEmptyLeadingShards(t *testing.T) {
 		"c.csv": "id\n1\n",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
 	if err != nil {
 		t.Fatalf("glob with leading empty shards should load: %v", err)
 	}
@@ -511,7 +511,7 @@ func TestLoadGlobBOMOnlyFirstShard(t *testing.T) {
 		"b.csv": "id,name\n1,Alice\n",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
 	if err != nil {
 		t.Fatalf("BOM-only first glob shard should not break load: %v", err)
 	}
@@ -533,7 +533,7 @@ func TestLoadGlobJSON(t *testing.T) {
 		"b.json": `[{"id":2,"email":"bob@x.com"}]`,
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.json"), "")
+	tbl, err := Load(filepath.Join(dir, "*.json"), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -552,7 +552,7 @@ func TestLoadGlobFormatOverride(t *testing.T) {
 		"b.dat": "id\n2\n",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.dat"), "csv")
+	tbl, err := Load(filepath.Join(dir, "*.dat"), Options{Format: "csv"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -568,14 +568,14 @@ func TestLoadGlobMixedFormatsError(t *testing.T) {
 		"b.json": "[{\"id\":2}]\n",
 	})
 
-	_, err := Load(filepath.Join(dir, "*"), "")
+	_, err := Load(filepath.Join(dir, "*"), Options{})
 	if err == nil || !strings.Contains(err.Error(), "mixed formats") {
 		t.Fatalf("expected mixed formats error, got %v", err)
 	}
 }
 
 func TestLoadGlobFixture(t *testing.T) {
-	tbl, err := Load(testdataDir+"/glob/users-*.csv", "")
+	tbl, err := Load(testdataDir+"/glob/users-*.csv", Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -590,7 +590,7 @@ func TestLoadLiteralBracketFilename(t *testing.T) {
 	if err := os.WriteFile(path, []byte("id\n1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tbl, err := Load(path, "")
+	tbl, err := Load(path, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -608,11 +608,23 @@ func TestHasGlobMeta(t *testing.T) {
 	}
 }
 
-func TestJoinLoadFormat(t *testing.T) {
-	if got := JoinLoadFormat("orders.csv", "csv"); got != "" {
-		t.Errorf("literal join path: got %q", got)
+func TestLoadGlobCSVHeaderFalse(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "part-001.dat"), []byte("1,2\n10,20\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if got := JoinLoadFormat("orders/*.csv", "csv"); got != "csv" {
-		t.Errorf("glob join path: got %q", got)
+	if err := os.WriteFile(filepath.Join(dir, "part-002.dat"), []byte("30,40\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tbl, err := Load(filepath.Join(dir, "part-*.dat"), Options{Format: "csv", Header: BoolPtr(false)})
+	if err != nil {
+		t.Fatalf("load glob: %v", err)
+	}
+	if tbl.ColIndex("col1") < 0 || tbl.ColIndex("col2") < 0 {
+		t.Fatalf("expected col1/col2, got %v", tbl.Columns)
+	}
+	if tbl.NumRows != 3 {
+		t.Fatalf("expected 3 rows, got %d: %s", tbl.NumRows, tbl.String())
 	}
 }

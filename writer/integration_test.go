@@ -20,7 +20,7 @@ const testdataDir = "../testdata"
 // queryAndWriteBytes loads a file, runs a query, then writes the result in the given format.
 func queryAndWriteBytes(t *testing.T, file, query, format string) []byte {
 	t.Helper()
-	tbl, err := loader.Load(file, "")
+	tbl, err := loader.Load(file, loader.Options{})
 	if err != nil {
 		t.Fatalf("load %s: %v", file, err)
 	}
@@ -67,7 +67,7 @@ func writeAndReloadTable(t *testing.T, tbl *table.Table, format string) *table.T
 	t.Helper()
 	out := writeTableBytes(t, tbl, format)
 	path := writeTempOutput(t, out, "out."+format)
-	reloaded, err := loader.Load(path, format)
+	reloaded, err := loader.Load(path, loader.Options{Format: format})
 	if err != nil {
 		t.Fatalf("reload %s: %v", format, err)
 	}
@@ -265,7 +265,7 @@ func TestIntegrationCSVRoundTrip(t *testing.T) {
 	out := queryAndWrite(t, testdataDir+"/users.csv", "select name, age", "csv")
 
 	reader := strings.NewReader(out)
-	tbl, err := loader.LoadReader(reader, "csv")
+	tbl, err := loader.LoadReader(reader, loader.Options{Format: "csv"})
 	if err != nil {
 		t.Fatalf("reload CSV: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestIntegrationJSONRoundTrip(t *testing.T) {
 	out := queryAndWrite(t, testdataDir+"/users.csv", "select name, age", "json")
 
 	reader := strings.NewReader(out)
-	tbl, err := loader.LoadReader(reader, "json")
+	tbl, err := loader.LoadReader(reader, loader.Options{Format: "json"})
 	if err != nil {
 		t.Fatalf("reload JSON: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestIntegrationJSONLRoundTrip(t *testing.T) {
 	out := queryAndWrite(t, testdataDir+"/users.csv", "select name, age", "jsonl")
 
 	reader := strings.NewReader(out)
-	tbl, err := loader.LoadReader(reader, "jsonl")
+	tbl, err := loader.LoadReader(reader, loader.Options{Format: "jsonl"})
 	if err != nil {
 		t.Fatalf("reload JSONL: %v", err)
 	}
@@ -317,7 +317,7 @@ func TestIntegrationAvroRoundTrip(t *testing.T) {
 	out := queryAndWriteBytes(t, testdataDir+"/users.csv", "select name, age, city", "avro")
 	path := writeTempOutput(t, out, "users.avro")
 
-	tbl, err := loader.Load(path, "avro")
+	tbl, err := loader.Load(path, loader.Options{Format: "avro"})
 	if err != nil {
 		t.Fatalf("reload Avro: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestIntegrationParquetRoundTrip(t *testing.T) {
 	out := queryAndWriteBytes(t, testdataDir+"/users.csv", "select name, age, city", "parquet")
 	path := writeTempOutput(t, out, "users.parquet")
 
-	tbl, err := loader.Load(path, "parquet")
+	tbl, err := loader.Load(path, loader.Options{Format: "parquet"})
 	if err != nil {
 		t.Fatalf("reload Parquet: %v", err)
 	}
@@ -363,7 +363,7 @@ func TestIntegrationNestedBinaryRoundTrip(t *testing.T) {
 			out := queryAndWriteBytes(t, testdataDir+"/nested.json", "select name, address, tags, orders", format)
 			path := writeTempOutput(t, out, "nested."+format)
 
-			tbl, err := loader.Load(path, format)
+			tbl, err := loader.Load(path, loader.Options{Format: format})
 			if err != nil {
 				t.Fatalf("reload %s: %v", format, err)
 			}
@@ -402,7 +402,7 @@ func TestIntegrationAvroEmptyResultRoundTrip(t *testing.T) {
 	out := queryAndWriteBytes(t, testdataDir+"/users.csv", "filter { age > 100 } | select name, age", "avro")
 	path := writeTempOutput(t, out, "empty.avro")
 
-	tbl, err := loader.Load(path, "avro")
+	tbl, err := loader.Load(path, loader.Options{Format: "avro"})
 	if err != nil {
 		t.Fatalf("reload empty Avro: %v", err)
 	}
@@ -418,7 +418,7 @@ func TestIntegrationParquetGroupRoundTrip(t *testing.T) {
 	out := queryAndWriteBytes(t, testdataDir+"/users.csv", "group city | sort city", "parquet")
 	path := writeTempOutput(t, out, "grouped.parquet")
 
-	tbl, err := loader.Load(path, "parquet")
+	tbl, err := loader.Load(path, loader.Options{Format: "parquet"})
 	if err != nil {
 		t.Fatalf("reload grouped Parquet: %v", err)
 	}
@@ -512,7 +512,7 @@ func TestIntegrationAvroRecordNameCollisionUsesUniqueNames(t *testing.T) {
 	}
 
 	path := writeTempOutput(t, out, "collision.avro")
-	got, err := loader.Load(path, "avro")
+	got, err := loader.Load(path, loader.Options{Format: "avro"})
 	if err != nil {
 		t.Fatalf("reload collision Avro: %v", err)
 	}
@@ -561,7 +561,7 @@ func TestIntegrationParquetColumnOrderRoundTrip(t *testing.T) {
 	out := queryAndWriteBytes(t, testdataDir+"/users.csv", "select name, age, city", "parquet")
 	path := writeTempOutput(t, out, "ordered.parquet")
 
-	tbl, err := loader.Load(path, "parquet")
+	tbl, err := loader.Load(path, loader.Options{Format: "parquet"})
 	if err != nil {
 		t.Fatalf("reload Parquet: %v", err)
 	}
@@ -574,7 +574,7 @@ func TestIntegrationParquetEmptyResultRoundTrip(t *testing.T) {
 	out := queryAndWriteBytes(t, testdataDir+"/users.csv", "filter { age > 100 } | select name, age", "parquet")
 	path := writeTempOutput(t, out, "empty.parquet")
 
-	tbl, err := loader.Load(path, "parquet")
+	tbl, err := loader.Load(path, loader.Options{Format: "parquet"})
 	if err != nil {
 		t.Fatalf("reload empty Parquet: %v", err)
 	}

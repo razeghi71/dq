@@ -40,6 +40,7 @@ const (
 	TokenFalse // false
 	TokenNull  // null
 	TokenAs    // as
+	TokenWith  // with
 
 	// Literals
 	TokenInt    // integer literal
@@ -61,7 +62,7 @@ var tokenNames = map[TokenType]string{
 	TokenPlus: "+", TokenMinus: "-", TokenStar: "*", TokenSlash: "/",
 	TokenEq: "==", TokenNeq: "!=", TokenLt: "<", TokenGt: ">", TokenLte: "<=", TokenGte: ">=",
 	TokenAnd: "and", TokenOr: "or", TokenNot: "not", TokenIs: "is",
-	TokenTrue: "true", TokenFalse: "false", TokenNull: "null", TokenAs: "as",
+	TokenTrue: "true", TokenFalse: "false", TokenNull: "null", TokenAs: "as", TokenWith: "with",
 	TokenInt: "INT", TokenFloat: "FLOAT", TokenString: "STRING",
 	TokenIdent: "IDENT", TokenBacktickIdent: "BACKTICK_IDENT", TokenStdin: "STDIN", TokenEOF: "EOF",
 }
@@ -93,6 +94,7 @@ var keywords = map[string]TokenType{
 	"false": TokenFalse,
 	"null":  TokenNull,
 	"as":    TokenAs,
+	"with":  TokenWith,
 }
 
 // Lexer is a stateful tokenizer that supports both normal tokenization
@@ -123,7 +125,7 @@ func (l *Lexer) isNegativeContext() bool {
 	case TokenLParen, TokenComma, TokenEquals, TokenPipe, TokenLBrace,
 		TokenPlus, TokenMinus, TokenStar, TokenSlash,
 		TokenEq, TokenNeq, TokenLt, TokenGt, TokenLte, TokenGte,
-		TokenAnd, TokenOr, TokenNot:
+		TokenAnd, TokenOr, TokenNot, TokenWith:
 		return true
 	}
 	return false
