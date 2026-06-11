@@ -959,6 +959,11 @@ func TestJoinBasename(t *testing.T) {
 		{"MyOrders.csv", "my_orders"},
 		{"v2Data.json", "v2_data"},
 		{"---.csv", "right"},
+		{"data[1].csv", "data_1"},
+		{"orders/part-*.csv", "part"},
+		{"orders/*.csv", "orders"},
+		{"logs/**/*.csv", "logs"},
+		{"*.csv", "right"},
 	}
 	for _, c := range cases {
 		if got := joinBasename(c.in); got != c.want {

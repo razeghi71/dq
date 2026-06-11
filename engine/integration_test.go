@@ -2,6 +2,7 @@ package engine
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -577,5 +578,119 @@ func TestJoinIntegration(t *testing.T) {
 	}
 	if result.ColIndex("product") < 0 {
 		t.Fatal("expected product column from orders")
+	}
+}
+
+func TestIntegrationGlobPrimarySource(t *testing.T) {
+	result := loadAndQuery(t, testdataDir+"/glob/users-*.csv", "count")
+	if result.NumRows != 1 || result.Get(0, "count").Int != 2 {
+		t.Fatalf("expected count 2, got %s", result.String())
+	}
+}
+
+func TestIntegrationGlobJoin(t *testing.T) {
+	usersFile := testdataDir + "/users.csv"
+	ordersGlob := testdataDir + "/glob/orders-*.csv"
+
+	tbl, err := loader.Load(usersFile, "")
+	if err != nil {
+		t.Fatalf("load users: %v", err)
+	}
+	q, err := parser.Parse(usersFile + ` | join ` + ordersGlob + ` on name == user_name | sort name`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	load := func(filename string) (*table.Table, error) {
+		return loader.Load(filename, "")
+	}
+	result, err := Execute(q, tbl, load)
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if result.NumRows != 2 {
+		t.Fatalf("expected 2 rows, got %d", result.NumRows)
+	}
+	if result.Get(0, "name").Str != "Alice" || result.Get(0, "order_id").Int != 101 {
+		t.Errorf("row 0: got %s", result.String())
+	}
+	if result.Get(1, "name").Str != "Bob" || result.Get(1, "status").Str != "pending" {
+		t.Errorf("row 1: got %s", result.String())
+	}
+}
+
+func TestIntegrationGlobJoinCollisionPrefix(t *testing.T) {
+	left := table.NewTable([]string{"name", "note"})
+	left.AddRow([]table.Value{table.StrVal("Alice"), table.StrVal("left-note")})
+	left.AddRow([]table.Value{table.StrVal("Bob"), table.StrVal("left-note-2")})
+
+	q, err := parser.Parse("left.csv | join left " + testdataDir + "/glob/collision-*.csv on name")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	load := func(filename string) (*table.Table, error) {
+		return loader.Load(filename, "")
+	}
+	result, err := Execute(q, left, load)
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if result.ColIndex("collision_note") < 0 {
+		t.Fatalf("expected collision_note column, got %v", result.Columns)
+	}
+	if result.Get(0, "note").Str != "left-note" || result.Get(0, "collision_note").Str != "from-shard-a" {
+		t.Errorf("Alice row: got %s", result.String())
+	}
+	if result.Get(1, "note").Str != "left-note-2" || result.Get(1, "collision_note").Str != "from-shard-b" {
+		t.Errorf("Bob row: got %s", result.String())
+	}
+}
+
+func TestIntegrationGlobRecursivePrimary(t *testing.T) {
+	result := loadAndQuery(t, testdataDir+"/glob/recursive/**/*.csv", "count")
+	if result.NumRows != 1 || result.Get(0, "count").Int != 2 {
+		t.Fatalf("expected count 2, got %s", result.String())
+	}
+}
+
+func joinLoad(format string) func(string) (*table.Table, error) {
+	return func(filename string) (*table.Table, error) {
+		return loader.Load(filename, loader.JoinLoadFormat(filename, format))
+	}
+}
+
+func TestIntegrationGlobJoinFormatOverride(t *testing.T) {
+	dir := t.TempDir()
+	usersPath := filepath.Join(dir, "users.csv")
+	ordersGlob := filepath.Join(dir, "orders-*.dat")
+	if err := os.WriteFile(usersPath, []byte("name\nAlice\nBob\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "orders-001.dat"), []byte("user_name,status\nAlice,shipped\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "orders-002.dat"), []byte("user_name,status\nBob,pending\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tbl, err := loader.Load(usersPath, "")
+	if err != nil {
+		t.Fatalf("load users: %v", err)
+	}
+	q, err := parser.Parse(usersPath + ` | join ` + ordersGlob + ` on name == user_name | sort name`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	result, err := Execute(q, tbl, joinLoad("csv"))
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if result.NumRows != 2 {
+		t.Fatalf("expected 2 rows, got %d", result.NumRows)
+	}
+	if result.Get(0, "name").Str != "Alice" || result.Get(0, "status").Str != "shipped" {
+		t.Errorf("row 0: got %s", result.String())
+	}
+	if result.Get(1, "name").Str != "Bob" || result.Get(1, "status").Str != "pending" {
+		t.Errorf("row 1: got %s", result.String())
 	}
 }

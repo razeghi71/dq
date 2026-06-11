@@ -3,6 +3,7 @@ module github.com/razeghi71/dq
 go 1.25.0
 
 require (
+	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/linkedin/goavro/v2 v2.15.0
 	github.com/parquet-go/parquet-go v0.27.0
 )

@@ -7,7 +7,7 @@ dq 'filename | op [args] | op2 [args] ...'
 ```
 
 * The entire query is passed as a **single-quoted string** to avoid shell interpretation of `|`, `{`, `}`, `>`, `<`, and backticks.
-* Takes a file (csv, avro, json, etc.) as input.
+* Takes a file (csv, avro, json, etc.) as input. Globs are supported (`logs/**/*.csv`, `orders/part-*.csv`) — matched files are concatenated. All matched files are loaded into memory before the pipeline runs. CSV glob shards without a detectable header row are read positionally under the first file's columns; extra cells per row are dropped. Extended headers require shared column names plus new lowercase identifiers (`email`, not `Email`); renamed columns with no anchor overlap are positional.
 * Everything is **pipe-based** — each op takes a table and returns a table.
 * Arguments are **space-separated**, strings use double quotes.
 * Column lists use spaces, not commas (avoids escaping issues).
@@ -225,9 +225,9 @@ dq 'users.csv | join left orders.csv on user_id'
 dq 'users.csv | join full orders.csv on id == customer_id and region == region'
 ```
 
-Each key is either a column path (same name on both sides) or `left_path == right_path`. Join key columns appear once under the left-side name; dot-path keys get a flattened column (`address.city` -> `address_city`, suffixed if taken). Colliding right-side columns are prefixed with the join file basename.
+Each key is either a column path (same name on both sides) or `left_path == right_path`. Join key columns appear once under the left-side name; dot-path keys get a flattened column (`address.city` -> `address_city`, suffixed if taken). Colliding right-side columns are prefixed with the join file basename (for globs, derived from the pattern — e.g. `orders/*.csv` with colliding column `note` -> `orders_note`).
 
-The join file's format comes from its extension (`-f` applies only to the primary input). Null keys never match. Keys match by value representation (consistent with `group`/`distinct`), so `1` matches `"1"` across formats.
+The join file's format comes from its extension. `-f` applies to the primary input; for join globs (not literal join paths), `-f` also sets the format when extensions are missing or mixed. Join sources support globs (`orders/part-*.csv`); matched files are concatenated before the join. Null keys never match. Keys match by value representation (consistent with `group`/`distinct`), so `1` matches `"1"` across formats.
 
 ---
 

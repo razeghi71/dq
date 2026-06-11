@@ -272,6 +272,24 @@ dq -o parquet 'users.csv | select name age' > out.parquet # Parquet file
 
 CSV (`.csv`), JSON (`.json`), JSONL (`.jsonl`), Avro (`.avro`), Parquet (`.parquet`)
 
+### Glob patterns
+
+Primary sources and join files support shell-style globs, including recursive `**`:
+
+```bash
+dq 'logs/**/*.csv | filter { level == "ERROR" } | count'
+dq 'users.csv | join left orders/part-*.csv on user_id'
+```
+
+- Patterns are matched relative to the current working directory.
+- Matched files are loaded and concatenated (column union; missing values are null).
+- Matched paths are sorted lexicographically (use zero-padded partition names like `part-001` for correct order).
+- Use `-f` when a glob matches files with mixed extensions; `-f` also applies to join globs (not literal join paths).
+- CSV shards after the first: repeated headers are skipped; reordered or extended headers are detected when the first row is clearly a header (shared column names, new lowercase identifiers such as `email`, not `Email`). Otherwise rows are read positionally under the first file's columns.
+- Positional shards: values map to the first file's columns by position; extra cells in a row beyond that width are dropped (no error).
+- Renamed columns with no overlap with the first file's header (e.g. `user_id` vs anchor `id`) are read positionally, not by name.
+- Literal paths with `[` (e.g. `data[1].csv`) are not globs unless `*`, `?`, or `{` is present.
+- All matched files are loaded into memory before the pipeline runs.
 
 ## License
 

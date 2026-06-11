@@ -622,3 +622,22 @@ func TestParseJoinAfterOtherOp(t *testing.T) {
 		t.Errorf("expected orders.csv, got %q", j.Filename)
 	}
 }
+
+func TestParseGlobSourceFilename(t *testing.T) {
+	q, err := Parse("logs/**/*.csv | head 5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Source.Filename != "logs/**/*.csv" {
+		t.Errorf("expected logs/**/*.csv, got %q", q.Source.Filename)
+	}
+
+	q, err = Parse("users.csv | join left orders/*.csv on id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := q.Ops[0].(*ast.JoinOp)
+	if j.Filename != "orders/*.csv" {
+		t.Errorf("expected orders/*.csv, got %q", j.Filename)
+	}
+}

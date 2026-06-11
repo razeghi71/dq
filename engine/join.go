@@ -211,9 +211,28 @@ func buildJoinSchema(left, right *table.Table, leftKeys, rightKeys []resolvedJoi
 // joinBasename derives a sanitized column prefix from the join filename:
 // extension stripped, camelCase split on lower-to-upper boundaries, other
 // characters replaced with underscores ("data/OrderItems.csv" -> "order_items").
+// Glob metacharacters are stripped first; if the basename is empty afterward,
+// the parent directory name is used ("orders/*.csv" -> "orders").
 func joinBasename(filename string) string {
-	base := filepath.Base(filename)
-	name := strings.TrimSuffix(base, filepath.Ext(base))
+	stripMeta := strings.ContainsAny(filename, "*?{")
+	if s := sanitizeJoinBasename(filepath.Base(filename), stripMeta); s != "" {
+		return s
+	}
+	dir := filepath.Dir(filename)
+	for dir != "." && dir != string(filepath.Separator) && dir != "" {
+		if s := sanitizeJoinBasename(filepath.Base(dir), stripMeta); s != "" {
+			return s
+		}
+		dir = filepath.Dir(dir)
+	}
+	return "right"
+}
+
+func sanitizeJoinBasename(name string, stripMeta bool) string {
+	name = strings.TrimSuffix(name, filepath.Ext(name))
+	if stripMeta {
+		name = stripGlobMeta(name)
+	}
 	var b strings.Builder
 	prevLower := false
 	for _, r := range name {
@@ -228,11 +247,20 @@ func joinBasename(filename string) string {
 			prevLower = false
 		}
 	}
-	s := strings.Trim(b.String(), "_")
-	if s == "" {
-		return "right"
+	return strings.Trim(b.String(), "_")
+}
+
+func stripGlobMeta(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '*', '?', '{', '}', '[', ']', '\\':
+			continue
+		default:
+			b.WriteRune(r)
+		}
 	}
-	return s
+	return strings.Trim(b.String(), "_")
 }
 
 // joinKeyAt builds the composite key for a row. ok is false when any key part

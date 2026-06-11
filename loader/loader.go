@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	goavro "github.com/linkedin/goavro/v2"
 	parquet "github.com/parquet-go/parquet-go"
@@ -43,17 +44,25 @@ func LoadInput(filename, format string, stdin io.Reader) (*table.Table, error) {
 
 // Load reads a file and returns a Table. If format is non-empty it overrides
 // the file extension; otherwise the extension is used. An error is returned if
-// neither provides a recognisable format.
+// neither provides a recognisable format. Patterns containing *, ?, or { expand
+// to all matching files and are concatenated.
 func Load(filename, format string) (*table.Table, error) {
 	if IsStdin(filename) {
 		return LoadInput(filename, format, nil)
 	}
+	if HasGlobMeta(filename) {
+		return loadGlob(filename, format)
+	}
+	return loadFile(filename, format, nil)
+}
+
+func loadFile(filename, format string, csvColumns []string) (*table.Table, error) {
 	if format == "" {
 		format = strings.TrimPrefix(strings.ToLower(filepath.Ext(filename)), ".")
 	}
 	switch format {
 	case "csv":
-		return loadCSV(filename)
+		return loadCSV(filename, csvColumns)
 	case "json":
 		return loadJSON(filename)
 	case "jsonl":
@@ -70,12 +79,61 @@ func Load(filename, format string) (*table.Table, error) {
 	}
 }
 
+func loadGlob(pattern, format string) (*table.Table, error) {
+	matches, err := expandGlob(pattern)
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := validateUniformFormat(matches, format)
+	if err != nil {
+		return nil, err
+	}
+
+	if resolved == "csv" {
+		return loadGlobCSV(pattern, matches)
+	}
+
+	var parts []*table.Table
+	for _, path := range matches {
+		tbl, err := loadFile(path, resolved, nil)
+		if err != nil {
+			return nil, fmt.Errorf("loading glob %q: loading %q: %w", pattern, path, err)
+		}
+		parts = append(parts, tbl)
+	}
+	return table.Concat(parts)
+}
+
+func loadGlobCSV(pattern string, matches []string) (*table.Table, error) {
+	var parts []*table.Table
+	var anchor []string
+	for i, path := range matches {
+		var (
+			tbl *table.Table
+			err error
+		)
+		if i == 0 {
+			tbl, err = loadCSV(path, nil)
+		} else {
+			tbl, err = loadCSVGlobShard(path, anchor)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("loading glob %q: loading %q: %w", pattern, path, err)
+		}
+		if i == 0 {
+			anchor = append([]string(nil), tbl.Columns...)
+		}
+		parts = append(parts, tbl)
+	}
+	return table.Concat(parts)
+}
+
 // LoadReader reads a table from r in the given format.
 // Supported formats: csv, json, jsonl.
 func LoadReader(r io.Reader, format string) (*table.Table, error) {
 	switch format {
 	case "csv":
-		return loadCSVReader(r)
+		return loadCSVReader(r, nil)
 	case "json":
 		return loadJSONReader(r)
 	case "jsonl":
@@ -85,33 +143,187 @@ func LoadReader(r io.Reader, format string) (*table.Table, error) {
 	}
 }
 
-func loadCSV(filename string) (*table.Table, error) {
+func loadCSV(filename string, columns []string) (*table.Table, error) {
 	f, err := os.Open(filename)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open %s: %w", filename, err)
 	}
 	defer f.Close()
-	return loadCSVReader(f)
+	return loadCSVReader(f, columns)
 }
 
-func loadCSVReader(r io.Reader) (*table.Table, error) {
-	reader := csv.NewReader(r)
+func isRepeatedHeader(row, columns []string) bool {
+	if len(row) != len(columns) {
+		return false
+	}
+	for i := range columns {
+		if strings.TrimSpace(row[i]) != columns[i] {
+			return false
+		}
+	}
+	return true
+}
+
+type csvGlobShardKind int
+
+const (
+	csvGlobShardData csvGlobShardKind = iota
+	csvGlobShardRepeated
+	csvGlobShardNewHeader
+)
+
+func trimmedCSVFields(row []string) []string {
+	out := make([]string, len(row))
+	for i, f := range row {
+		out[i] = strings.TrimSpace(f)
+	}
+	return out
+}
+
+func csvRowLooksLikeData(cells []string) bool {
+	for _, c := range cells {
+		if c == "" {
+			continue
+		}
+		if _, err := strconv.ParseInt(c, 10, 64); err == nil {
+			return true
+		}
+		if _, err := strconv.ParseFloat(c, 64); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeColumnName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		if i == 0 {
+			if r != '_' && !unicode.IsLower(r) {
+				return false
+			}
+			continue
+		}
+		if r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func isAnchorColumnPermutation(row, anchor []string) bool {
+	if len(row) != len(anchor) {
+		return false
+	}
+	counts := make(map[string]int, len(anchor))
+	for _, col := range anchor {
+		counts[col]++
+	}
+	for _, col := range row {
+		counts[col]--
+		if counts[col] < 0 {
+			return false
+		}
+	}
+	for _, n := range counts {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func isExtendedHeaderRow(row, anchor []string) bool {
+	if csvRowLooksLikeData(row) {
+		return false
+	}
+	anchorSet := make(map[string]bool, len(anchor))
+	for _, col := range anchor {
+		anchorSet[col] = true
+	}
+	overlap := 0
+	for _, col := range row {
+		if anchorSet[col] {
+			overlap++
+		}
+	}
+	if overlap == 0 {
+		return false
+	}
+	for _, col := range row {
+		if anchorSet[col] {
+			continue
+		}
+		if !looksLikeColumnName(col) {
+			return false
+		}
+	}
+	return true
+}
+
+func classifyCSVGlobFirstRow(peek, anchor []string) csvGlobShardKind {
+	peekCols := trimmedCSVFields(peek)
+	if isRepeatedHeader(peek, anchor) {
+		return csvGlobShardRepeated
+	}
+	if isAnchorColumnPermutation(peekCols, anchor) {
+		return csvGlobShardNewHeader
+	}
+	if csvRowLooksLikeData(peekCols) {
+		return csvGlobShardData
+	}
+	if isExtendedHeaderRow(peekCols, anchor) {
+		return csvGlobShardNewHeader
+	}
+	return csvGlobShardData
+}
+
+func loadCSVGlobShard(path string, anchor []string) (*table.Table, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("cannot open %s: %w", path, err)
+	}
+	defer f.Close()
+
+	reader := csv.NewReader(f)
 	reader.TrimLeadingSpace = true
 
-	// Read header
-	header, err := reader.Read()
+	peek, err := reader.Read()
+	if err == io.EOF {
+		return table.NewTable(append([]string(nil), anchor...)), nil
+	}
 	if err != nil {
-		return nil, fmt.Errorf("cannot read CSV header: %w", err)
+		return nil, fmt.Errorf("error reading CSV row: %w", err)
 	}
 
-	// Trim whitespace from column names
-	columns := make([]string, len(header))
-	for i, h := range header {
-		columns[i] = strings.TrimSpace(h)
+	switch classifyCSVGlobFirstRow(peek, anchor) {
+	case csvGlobShardRepeated:
+		return readCSVRows(reader, anchor)
+	case csvGlobShardNewHeader:
+		columns := trimmedCSVFields(peek)
+		return readCSVRows(reader, columns)
+	default:
+		t := table.NewTable(append([]string(nil), anchor...))
+		t.AddRow(csvRowValues(peek, anchor))
+		rest, err := readCSVRows(reader, anchor)
+		if err != nil {
+			return nil, err
+		}
+		for row := 0; row < rest.NumRows; row++ {
+			vals := make([]table.Value, len(anchor))
+			for i, col := range anchor {
+				vals[i] = rest.Get(row, col)
+			}
+			t.AddRow(vals)
+		}
+		return t, nil
 	}
+}
 
-	t := table.NewTable(columns)
-
+func readCSVRows(reader *csv.Reader, columns []string) (*table.Table, error) {
+	t := table.NewTable(append([]string(nil), columns...))
 	for {
 		record, err := reader.Read()
 		if err == io.EOF {
@@ -120,19 +332,36 @@ func loadCSVReader(r io.Reader) (*table.Table, error) {
 		if err != nil {
 			return nil, fmt.Errorf("error reading CSV row: %w", err)
 		}
+		t.AddRow(csvRowValues(record, columns))
+	}
+	return t, nil
+}
 
-		vals := make([]table.Value, len(columns))
-		for i := range columns {
-			if i < len(record) {
-				vals[i] = parseValue(strings.TrimSpace(record[i]))
-			} else {
-				vals[i] = table.Null()
-			}
+func loadCSVReader(r io.Reader, columns []string) (*table.Table, error) {
+	reader := csv.NewReader(r)
+	reader.TrimLeadingSpace = true
+
+	if len(columns) == 0 {
+		header, err := reader.Read()
+		if err != nil {
+			return nil, fmt.Errorf("cannot read CSV header: %w", err)
 		}
-		t.AddRow(vals)
+		columns = trimmedCSVFields(header)
 	}
 
-	return t, nil
+	return readCSVRows(reader, columns)
+}
+
+func csvRowValues(record, columns []string) []table.Value {
+	vals := make([]table.Value, len(columns))
+	for i := range columns {
+		if i < len(record) {
+			vals[i] = parseValue(strings.TrimSpace(record[i]))
+		} else {
+			vals[i] = table.Null()
+		}
+	}
+	return vals
 }
 
 // parseValue infers the type of a CSV cell value.

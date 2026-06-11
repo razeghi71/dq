@@ -2,6 +2,7 @@ package table
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -233,7 +234,7 @@ func (c *Column) Append(v Value) {
 		f, _ := v.AsFloat()
 		c.floats = append(c.floats, f)
 	case TypeString:
-		c.strs = append(c.strs, v.Str)
+		c.strs = append(c.strs, v.AsString())
 	case TypeBool:
 		c.bools = append(c.bools, v.Bool)
 	case TypeList:
@@ -534,6 +535,51 @@ func (t *Table) ShallowClone(newColNames []string) *Table {
 	copy(result.Columns, newColNames)
 	copy(result.cols, t.cols)
 	return result
+}
+
+// Concat combines tables by column union. Columns from the first table keep
+// their order; new columns from later tables are appended in sorted order.
+// Missing values are null-filled. Rows are copied via AddRow so column types widen.
+func Concat(tables []*Table) (*Table, error) {
+	if len(tables) == 0 {
+		return nil, fmt.Errorf("concat: no tables")
+	}
+
+	firstCols := append([]string(nil), tables[0].Columns...)
+	firstSet := make(map[string]bool, len(firstCols))
+	for _, col := range firstCols {
+		firstSet[col] = true
+	}
+	extraSet := make(map[string]bool)
+	for _, tbl := range tables[1:] {
+		for _, col := range tbl.Columns {
+			if !firstSet[col] && !extraSet[col] {
+				extraSet[col] = true
+			}
+		}
+	}
+	extra := make([]string, 0, len(extraSet))
+	for col := range extraSet {
+		extra = append(extra, col)
+	}
+	sort.Strings(extra)
+	unionCols := append(firstCols, extra...)
+
+	result := NewTable(unionCols)
+	for _, tbl := range tables {
+		for row := 0; row < tbl.NumRows; row++ {
+			vals := make([]Value, len(unionCols))
+			for i, col := range unionCols {
+				if idx := tbl.ColIndex(col); idx >= 0 {
+					vals[i] = tbl.Col(idx).Get(row)
+				} else {
+					vals[i] = Null()
+				}
+			}
+			result.AddRow(vals)
+		}
+	}
+	return result, nil
 }
 
 // Clone creates a deep copy of the table.

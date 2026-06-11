@@ -55,7 +55,7 @@ func main() {
 	}
 
 	result, err := engine.Execute(q, input, func(filename string) (*table.Table, error) {
-		return loader.Load(filename, "")
+		return loader.Load(filename, loader.JoinLoadFormat(filename, format))
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -103,6 +103,7 @@ func parseArgs(args []string) (format, output, query string, err error) {
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "usage: dq [-f format] [-o output] '<query>'")
 	fmt.Fprintln(os.Stderr, "example: dq 'users.csv | filter { age > 20 } | select name age'")
+	fmt.Fprintln(os.Stderr, "         dq 'logs/**/*.csv | count'")
 	fmt.Fprintln(os.Stderr, "         dq -o csv 'users.json | select name age'")
 	fmt.Fprintln(os.Stderr, "         cat users.csv | dq -f csv")
 	fmt.Fprintln(os.Stderr, "         dq -f csv '- | filter { age > 20 }'")

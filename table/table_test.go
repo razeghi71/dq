@@ -150,3 +150,73 @@ func TestShallowCloneRenamesOnly(t *testing.T) {
 		t.Error("ShallowClone should share column data")
 	}
 }
+
+func TestConcatIdenticalSchema(t *testing.T) {
+	a := NewTable([]string{"id", "name"})
+	a.AddRow([]Value{IntVal(1), StrVal("Alice")})
+	b := NewTable([]string{"id", "name"})
+	b.AddRow([]Value{IntVal(2), StrVal("Bob")})
+
+	got, err := Concat([]*Table{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.NumRows != 2 {
+		t.Fatalf("expected 2 rows, got %d", got.NumRows)
+	}
+	if got.Get(0, "name").Str != "Alice" || got.Get(1, "name").Str != "Bob" {
+		t.Errorf("unexpected rows: %s", got.String())
+	}
+}
+
+func TestConcatExtraColumnsSorted(t *testing.T) {
+	a := NewTable([]string{"id", "name"})
+	a.AddRow([]Value{IntVal(1), StrVal("Alice")})
+	b := NewTable([]string{"id", "email"})
+	b.AddRow([]Value{IntVal(2), StrVal("bob@x.com")})
+
+	got, err := Concat([]*Table{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Columns[0] != "id" || got.Columns[1] != "name" || got.Columns[2] != "email" {
+		t.Fatalf("columns: %v", got.Columns)
+	}
+	if got.Get(0, "email").Type != TypeNull {
+		t.Errorf("row 0 email should be null")
+	}
+	if got.Get(1, "name").Type != TypeNull {
+		t.Errorf("row 1 name should be null")
+	}
+}
+
+func TestConcatTypeWidening(t *testing.T) {
+	a := NewTable([]string{"v"})
+	a.AddRow([]Value{IntVal(1)})
+	b := NewTable([]string{"v"})
+	b.AddRow([]Value{FloatVal(2.5)})
+
+	got, err := Concat([]*Table{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Col(0).ColType() != TypeFloat {
+		t.Fatalf("expected float column, got %v", got.Col(0).ColType())
+	}
+}
+
+func TestConcatEmpty(t *testing.T) {
+	_, err := Concat(nil)
+	if err == nil || err.Error() != "concat: no tables" {
+		t.Fatalf("expected concat: no tables error, got %v", err)
+	}
+}
+
+func TestAppendIntToStringColumn(t *testing.T) {
+	tbl := NewTable([]string{"id"})
+	tbl.AddRow([]Value{StrVal("name")})
+	tbl.AddRow([]Value{IntVal(2)})
+	if tbl.Get(1, "id").AsString() != "2" {
+		t.Fatalf("expected stringified int, got %v", tbl.Get(1, "id"))
+	}
+}
