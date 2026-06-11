@@ -547,12 +547,13 @@ func (p *Parser) parseAssignments() ([]ast.Assignment, error) {
 
 // Precedence levels
 const (
-	precOr    = 1
-	precAnd   = 2
-	precComp  = 3
-	precAdd   = 4
-	precMul   = 5
-	precUnary = 6
+	precOr     = 1
+	precAnd    = 2
+	precIsNull = 3
+	precComp   = 3
+	precAdd    = 4
+	precMul    = 5
+	precUnary  = 6
 )
 
 func (p *Parser) parseExpr() (ast.Expr, error) {
@@ -566,6 +567,17 @@ func (p *Parser) parseExprPrec(minPrec int) (ast.Expr, error) {
 	}
 
 	for {
+		if minPrec <= precIsNull {
+			var applied bool
+			left, applied, err = p.parsePostfixIsNull(left)
+			if err != nil {
+				return nil, err
+			}
+			if applied {
+				continue
+			}
+		}
+
 		op, prec, ok := p.peekBinaryOp()
 		if !ok || prec < minPrec {
 			break
@@ -582,26 +594,35 @@ func (p *Parser) parseExprPrec(minPrec int) (ast.Expr, error) {
 		left = &ast.BinaryExpr{Op: op, Left: left, Right: right}
 	}
 
-	// Handle "is [not] null"
-	if p.peek().Type == lexer.TokenIs {
-		p.advance() // consume "is"
-		negated := false
-		if p.peek().Type == lexer.TokenNot {
-			p.advance() // consume "not"
-			negated = true
+	if minPrec <= precIsNull {
+		left, _, err = p.parsePostfixIsNull(left)
+		if err != nil {
+			return nil, err
 		}
-		if _, err := p.expect(lexer.TokenNull); err != nil {
-			return nil, fmt.Errorf("expected 'null' after 'is%s'", func() string {
-				if negated {
-					return " not"
-				}
-				return ""
-			}())
-		}
-		left = &ast.IsNullExpr{Operand: left, Negated: negated}
 	}
 
 	return left, nil
+}
+
+func (p *Parser) parsePostfixIsNull(left ast.Expr) (ast.Expr, bool, error) {
+	if p.peek().Type != lexer.TokenIs {
+		return left, false, nil
+	}
+	p.advance() // consume "is"
+	negated := false
+	if p.peek().Type == lexer.TokenNot {
+		p.advance() // consume "not"
+		negated = true
+	}
+	if _, err := p.expect(lexer.TokenNull); err != nil {
+		return nil, false, fmt.Errorf("expected 'null' after 'is%s'", func() string {
+			if negated {
+				return " not"
+			}
+			return ""
+		}())
+	}
+	return &ast.IsNullExpr{Operand: left, Negated: negated}, true, nil
 }
 
 func isNullLiteral(e ast.Expr) bool {
@@ -680,7 +701,23 @@ func (p *Parser) parseUnary() (ast.Expr, error) {
 		}
 		return &ast.UnaryExpr{Op: "-", Operand: operand}, nil
 	}
-	return p.parsePrimary()
+	primary, err := p.parsePrimary()
+	if err != nil {
+		return nil, err
+	}
+	if isLiteralExpr(primary) {
+		return primary, nil
+	}
+	left, _, err := p.parsePostfixIsNull(primary)
+	if err != nil {
+		return nil, err
+	}
+	return left, nil
+}
+
+func isLiteralExpr(e ast.Expr) bool {
+	_, ok := e.(*ast.LiteralExpr)
+	return ok
 }
 
 func (p *Parser) parsePrimary() (ast.Expr, error) {

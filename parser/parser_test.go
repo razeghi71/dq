@@ -175,6 +175,117 @@ func TestParseIsNullNotNegated(t *testing.T) {
 	}
 }
 
+func TestParseIsNullCombinesWithAnd(t *testing.T) {
+	q, err := Parse(`users.csv | filter { age is not null and city == "NY" }`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := q.Ops[0].(*ast.FilterOp)
+	bin, ok := f.Expr.(*ast.BinaryExpr)
+	if !ok || bin.Op != "and" {
+		t.Fatalf("expected BinaryExpr(and), got %T", f.Expr)
+	}
+	isn, ok := bin.Left.(*ast.IsNullExpr)
+	if !ok {
+		t.Fatalf("expected left IsNullExpr, got %T", bin.Left)
+	}
+	if !isn.Negated {
+		t.Error("expected is not null (negated)")
+	}
+	col, ok := isn.Operand.(*ast.ColumnExpr)
+	if !ok || len(col.Path) != 1 || col.Path[0] != "age" {
+		t.Fatalf("expected age column, got %T %v", isn.Operand, isn.Operand)
+	}
+	comp, ok := bin.Right.(*ast.BinaryExpr)
+	if !ok || comp.Op != "==" {
+		t.Fatalf("expected right == comparison, got %T", bin.Right)
+	}
+}
+
+func TestParseIsNullCombinesWithOr(t *testing.T) {
+	q, err := Parse("users.csv | filter { city is null or age > 30 }")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := q.Ops[0].(*ast.FilterOp)
+	bin, ok := f.Expr.(*ast.BinaryExpr)
+	if !ok || bin.Op != "or" {
+		t.Fatalf("expected BinaryExpr(or), got %T", f.Expr)
+	}
+	isn, ok := bin.Left.(*ast.IsNullExpr)
+	if !ok || isn.Negated {
+		t.Fatalf("expected left is null, got %T negated=%v", bin.Left, isn != nil && isn.Negated)
+	}
+	comp, ok := bin.Right.(*ast.BinaryExpr)
+	if !ok || comp.Op != ">" {
+		t.Fatalf("expected right > comparison, got %T", bin.Right)
+	}
+}
+
+func TestParseIsNullBothSidesWithAnd(t *testing.T) {
+	q, err := Parse("users.csv | filter { age is null and city is null }")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := q.Ops[0].(*ast.FilterOp)
+	bin, ok := f.Expr.(*ast.BinaryExpr)
+	if !ok || bin.Op != "and" {
+		t.Fatalf("expected BinaryExpr(and), got %T", f.Expr)
+	}
+	if _, ok := bin.Left.(*ast.IsNullExpr); !ok {
+		t.Fatalf("expected left IsNullExpr, got %T", bin.Left)
+	}
+	if _, ok := bin.Right.(*ast.IsNullExpr); !ok {
+		t.Fatalf("expected right IsNullExpr, got %T", bin.Right)
+	}
+}
+
+func TestParseNotAgeIsNull(t *testing.T) {
+	q, err := Parse("users.csv | filter { not age is null }")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := q.Ops[0].(*ast.FilterOp)
+	unary, ok := f.Expr.(*ast.UnaryExpr)
+	if !ok || unary.Op != "not" {
+		t.Fatalf("expected UnaryExpr(not), got %T", f.Expr)
+	}
+	isn, ok := unary.Operand.(*ast.IsNullExpr)
+	if !ok || isn.Negated {
+		t.Fatalf("expected not (age is null), got %T negated=%v", unary.Operand, isn != nil && isn.Negated)
+	}
+	col, ok := isn.Operand.(*ast.ColumnExpr)
+	if !ok || len(col.Path) != 1 || col.Path[0] != "age" {
+		t.Fatalf("expected age column inside is null, got %T", isn.Operand)
+	}
+}
+
+func TestParseIsNullOnCompoundExpr(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{"parens", "users.csv | filter { (age + 1) is null }"},
+		{"no_parens", "users.csv | filter { age + 1 is null }"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			q, err := Parse(tc.query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f := q.Ops[0].(*ast.FilterOp)
+			isn, ok := f.Expr.(*ast.IsNullExpr)
+			if !ok {
+				t.Fatalf("expected IsNullExpr, got %T", f.Expr)
+			}
+			if _, ok := isn.Operand.(*ast.BinaryExpr); !ok {
+				t.Fatalf("expected is null over arithmetic expr, got operand %T", isn.Operand)
+			}
+		})
+	}
+}
+
 func TestParseNullEqualityRejected(t *testing.T) {
 	cases := []struct {
 		name    string

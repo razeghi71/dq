@@ -374,6 +374,52 @@ func TestIsNull(t *testing.T) {
 	}
 }
 
+func nullableUsersTable() *table.Table {
+	t := table.NewTable([]string{"name", "age", "city"})
+	t.AddRow([]table.Value{table.StrVal("Alice"), table.IntVal(30), table.StrVal("NY")})
+	t.AddRow([]table.Value{table.StrVal("Bob"), table.Null(), table.StrVal("LA")})
+	t.AddRow([]table.Value{table.StrVal("Charlie"), table.IntVal(35), table.StrVal("NY")})
+	t.AddRow([]table.Value{table.StrVal("Diana"), table.Null(), table.Null()})
+	t.AddRow([]table.Value{table.StrVal("Eve"), table.IntVal(22), table.Null()})
+	return t
+}
+
+func TestIsNullCombinesWithAnd(t *testing.T) {
+	result := runQuery(t, nullableUsersTable(), `filter { age is not null and city == "NY" }`)
+	if result.NumRows != 2 {
+		t.Fatalf("expected 2 rows (Alice, Charlie), got %d", result.NumRows)
+	}
+	names := sortedNames(t, result)
+	if names[0] != "Alice" || names[1] != "Charlie" {
+		t.Errorf("expected [Alice Charlie], got %v", names)
+	}
+}
+
+func TestIsNullCombinesWithOr(t *testing.T) {
+	result := runQuery(t, nullableUsersTable(), "filter { city is null or age > 30 }")
+	if result.NumRows != 3 {
+		t.Fatalf("expected 3 rows (Charlie, Diana, Eve), got %d", result.NumRows)
+	}
+	names := sortedNames(t, result)
+	if names[0] != "Charlie" || names[1] != "Diana" || names[2] != "Eve" {
+		t.Errorf("expected [Charlie Diana Eve], got %v", names)
+	}
+}
+
+func TestNotAgeIsNull(t *testing.T) {
+	tbl := nullableUsersTable()
+	want := runQuery(t, tbl, "filter { age is not null }")
+	got := runQuery(t, tbl, "filter { not age is null }")
+	if got.NumRows != want.NumRows {
+		t.Fatalf("expected %d rows, got %d", want.NumRows, got.NumRows)
+	}
+	for i := 0; i < want.NumRows; i++ {
+		if got.GetAt(i, 0).Str != want.GetAt(i, 0).Str {
+			t.Errorf("row %d: expected name %q, got %q", i, want.GetAt(i, 0).Str, got.GetAt(i, 0).Str)
+		}
+	}
+}
+
 func TestIfFunction(t *testing.T) {
 	result := runQuery(t, usersTable(), `transform label = if(age > 30, "old", "young") | select name label`)
 	// Alice(30) -> young, Charlie(35) -> old
