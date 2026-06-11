@@ -259,6 +259,45 @@ func assertNestedQueries(t *testing.T, file string) {
 	})
 }
 
+func TestIntegrationNestedMissingJSON(t *testing.T) {
+	t.Helper()
+	file := testdataDir + "/nested_missing.json"
+
+	t.Run("select_null_parent", func(t *testing.T) {
+		result := loadAndQuery(t, file, "select name addr.city")
+		if result.NumRows != 2 {
+			t.Fatalf("expected 2 rows, got %d", result.NumRows)
+		}
+		cityIdx := result.ColIndex("addr_city")
+		if !result.GetAt(0, cityIdx).IsNull() {
+			t.Errorf("row 0 addr.city: expected null, got %v", result.GetAt(0, cityIdx))
+		}
+		if got := result.GetAt(1, cityIdx).Str; got != "NY" {
+			t.Errorf("row 1 addr.city: expected NY, got %q", got)
+		}
+	})
+
+	t.Run("filter_equality", func(t *testing.T) {
+		result := loadAndQuery(t, file, `filter { addr.city == "NY" }`)
+		if result.NumRows != 1 {
+			t.Fatalf("expected 1 row, got %d", result.NumRows)
+		}
+		if got := result.GetAt(0, result.ColIndex("name")).Str; got != "b" {
+			t.Errorf("expected name b, got %q", got)
+		}
+	})
+
+	t.Run("filter_is_null", func(t *testing.T) {
+		result := loadAndQuery(t, file, "filter { addr.city is null }")
+		if result.NumRows != 1 {
+			t.Fatalf("expected 1 row, got %d", result.NumRows)
+		}
+		if got := result.GetAt(0, result.ColIndex("name")).Str; got != "a" {
+			t.Errorf("expected name a, got %q", got)
+		}
+	})
+}
+
 func TestIntegrationNestedJSON(t *testing.T) {
 	assertNestedQueries(t, testdataDir+"/nested.json")
 }

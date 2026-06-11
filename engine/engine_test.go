@@ -702,6 +702,119 @@ func nestedTable() *table.Table {
 	return t
 }
 
+// optionalNestedTable has one row with a null parent record and one with a nested value.
+// Mirrors testdata/nested_missing.json for unit-level TDD on ticket 001.
+func optionalNestedTable() *table.Table {
+	t := table.NewTable([]string{"name", "addr"})
+	t.AddRow([]table.Value{
+		table.StrVal("a"),
+		table.Null(),
+	})
+	t.AddRow([]table.Value{
+		table.StrVal("b"),
+		table.RecordVal([]table.RecordField{
+			{Name: "city", Value: table.StrVal("NY")},
+		}),
+	})
+	return t
+}
+
+func TestSelectNullParentDotPath(t *testing.T) {
+	result := runQuery(t, optionalNestedTable(), "select name addr.city")
+	if result.NumRows != 2 {
+		t.Fatalf("expected 2 rows, got %d", result.NumRows)
+	}
+	cityIdx := result.ColIndex("addr_city")
+	if !result.GetAt(0, cityIdx).IsNull() {
+		t.Errorf("row 0 addr.city: expected null, got %v", result.GetAt(0, cityIdx))
+	}
+	if got := result.GetAt(1, cityIdx).Str; got != "NY" {
+		t.Errorf("row 1 addr.city: expected NY, got %q", got)
+	}
+}
+
+func TestFilterNullParentDotPathEquality(t *testing.T) {
+	result := runQuery(t, optionalNestedTable(), `filter { addr.city == "NY" }`)
+	if result.NumRows != 1 {
+		t.Fatalf("expected 1 row, got %d", result.NumRows)
+	}
+	if got := result.GetAt(0, 0).Str; got != "b" {
+		t.Errorf("expected name b, got %q", got)
+	}
+}
+
+func TestFilterNullParentDotPathIsNull(t *testing.T) {
+	result := runQuery(t, optionalNestedTable(), "filter { addr.city is null }")
+	if result.NumRows != 1 {
+		t.Fatalf("expected 1 row, got %d", result.NumRows)
+	}
+	if got := result.GetAt(0, 0).Str; got != "a" {
+		t.Errorf("expected name a, got %q", got)
+	}
+}
+
+func TestTransformNullParentDotPath(t *testing.T) {
+	result := runQuery(t, optionalNestedTable(), "transform city = addr.city | select name city")
+	cityIdx := result.ColIndex("city")
+	if !result.GetAt(0, cityIdx).IsNull() {
+		t.Errorf("row 0 city: expected null, got %v", result.GetAt(0, cityIdx))
+	}
+	if got := result.GetAt(1, cityIdx).Str; got != "NY" {
+		t.Errorf("row 1 city: expected NY, got %q", got)
+	}
+}
+
+func TestGroupNullParentDotPath(t *testing.T) {
+	result := runQuery(t, optionalNestedTable(), "group addr.city | reduce n = count() | remove grouped")
+	if result.NumRows != 2 {
+		t.Fatalf("expected 2 groups, got %d", result.NumRows)
+	}
+	nIdx := result.ColIndex("n")
+	for i := 0; i < result.NumRows; i++ {
+		key := result.GetAt(i, 0)
+		n := result.GetAt(i, nIdx).Int
+		if key.IsNull() && n != 1 {
+			t.Errorf("null group: expected count 1, got %d", n)
+		}
+		if !key.IsNull() && key.Str == "NY" && n != 1 {
+			t.Errorf("NY group: expected count 1, got %d", n)
+		}
+	}
+}
+
+func TestSortNullParentDotPath(t *testing.T) {
+	result := runQuery(t, optionalNestedTable(), "sort addr.city | select name addr.city")
+	if result.NumRows != 2 {
+		t.Fatalf("expected 2 rows, got %d", result.NumRows)
+	}
+	// null sorts last
+	nameIdx := result.ColIndex("name")
+	if got := result.GetAt(0, nameIdx).Str; got != "b" {
+		t.Errorf("row 0: expected b (NY first), got %q", got)
+	}
+	if got := result.GetAt(1, nameIdx).Str; got != "a" {
+		t.Errorf("row 1: expected a (null last), got %q", got)
+	}
+}
+
+func TestDistinctNullParentDotPath(t *testing.T) {
+	result := runQuery(t, optionalNestedTable(), "distinct addr.city")
+	if result.NumRows != 2 {
+		t.Fatalf("expected 2 distinct values (null + NY), got %d", result.NumRows)
+	}
+}
+
+func TestNullParentDotPathPreservesTypeMismatchError(t *testing.T) {
+	// String parent is not null — must still error after ticket 001 fix.
+	err := runQueryExpectErr(t, optionalNestedTable(), "sort name.first")
+	if err == nil {
+		t.Fatal("expected error for dot path through string column")
+	}
+	if !strings.Contains(err.Error(), "sort \"name.first\"") {
+		t.Errorf("expected full path in sort error, got: %v", err)
+	}
+}
+
 func TestSelectDotPath(t *testing.T) {
 	result := runQuery(t, nestedTable(), "select name address.city")
 	if len(result.Columns) != 2 {

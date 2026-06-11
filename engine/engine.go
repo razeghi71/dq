@@ -65,6 +65,9 @@ func resolveColumnPath(path []string, t *table.Table, rowIdx int) (table.Value, 
 	val := t.Col(idx).Get(rowIdx)
 	for _, seg := range path[1:] {
 		if val.Type != table.TypeRecord {
+			if val.IsNull() {
+				return table.Null(), nil
+			}
 			return table.Null(), fmt.Errorf("cannot access field %q: value is not a record", seg)
 		}
 		found := false
