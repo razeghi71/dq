@@ -290,7 +290,3 @@ dq 'users.csv | join left orders/part-*.csv on user_id'
 - Renamed columns with no overlap with the first file's header (e.g. `user_id` vs anchor `id`) are read positionally, not by name.
 - Literal paths with `[` (e.g. `data[1].csv`) are not globs unless `*`, `?`, or `{` is present.
 - All matched files are loaded into memory before the pipeline runs.
-
-## License
-
-MIT
