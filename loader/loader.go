@@ -107,12 +107,12 @@ func loadGlob(pattern, format string) (*table.Table, error) {
 func loadGlobCSV(pattern string, matches []string) (*table.Table, error) {
 	var parts []*table.Table
 	var anchor []string
-	for i, path := range matches {
+	for _, path := range matches {
 		var (
 			tbl *table.Table
 			err error
 		)
-		if i == 0 {
+		if len(anchor) == 0 {
 			tbl, err = loadCSV(path, nil)
 		} else {
 			tbl, err = loadCSVGlobShard(path, anchor)
@@ -120,7 +120,7 @@ func loadGlobCSV(pattern string, matches []string) (*table.Table, error) {
 		if err != nil {
 			return nil, fmt.Errorf("loading glob %q: loading %q: %w", pattern, path, err)
 		}
-		if i == 0 {
+		if len(anchor) == 0 && hasNonEmptyColumnName(tbl.Columns) {
 			anchor = append([]string(nil), tbl.Columns...)
 		}
 		parts = append(parts, tbl)
@@ -348,16 +348,53 @@ func readCSVRows(reader *csv.Reader, columns []string) (*table.Table, error) {
 	return t, nil
 }
 
+func hasNonEmptyColumnName(columns []string) bool {
+	for _, col := range columns {
+		if col != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func loadCSVReader(r io.Reader, columns []string) (*table.Table, error) {
 	reader := csv.NewReader(r)
 	reader.TrimLeadingSpace = true
 
 	if len(columns) == 0 {
 		header, err := reader.Read()
+		if err == io.EOF {
+			return table.NewTable(nil), nil
+		}
 		if err != nil {
 			return nil, fmt.Errorf("cannot read CSV header: %w", err)
 		}
 		columns = trimmedCSVFields(header)
+		// BOM-only or whitespace-only first lines parse as a single empty column
+		// name; treat as an empty file when no data rows follow.
+		if len(columns) == 1 && columns[0] == "" {
+			record, err := reader.Read()
+			if err == io.EOF {
+				return table.NewTable(nil), nil
+			}
+			if err != nil {
+				return nil, fmt.Errorf("error reading CSV row: %w", err)
+			}
+			t := table.NewTable(columns)
+			t.AddRow(csvRowValues(record, columns))
+			rest, err := readCSVRows(reader, columns)
+			if err != nil {
+				return nil, err
+			}
+			for row := 0; row < rest.NumRows; row++ {
+				vals := make([]table.Value, len(columns))
+				for i, col := range columns {
+					vals[i] = rest.Get(row, col)
+				}
+				t.AddRow(vals)
+			}
+			return t, nil
+		}
 	}
 
 	return readCSVRows(reader, columns)

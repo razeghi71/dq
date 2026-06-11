@@ -733,3 +733,31 @@ func TestIntegrationGlobJoinFormatOverride(t *testing.T) {
 		t.Errorf("row 1: got %s", result.String())
 	}
 }
+
+func TestIntegrationEmptyCSV(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "empty.csv")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("count", func(t *testing.T) {
+		result := loadAndQuery(t, path, "count")
+		if result.NumRows != 1 || result.Get(0, "count").Int != 0 {
+			t.Fatalf("expected count 0, got %s", result.String())
+		}
+	})
+
+	t.Run("head", func(t *testing.T) {
+		result := loadAndQuery(t, path, "head 5")
+		if result.NumRows != 0 {
+			t.Fatalf("expected 0 rows, got %d", result.NumRows)
+		}
+	})
+
+	t.Run("select", func(t *testing.T) {
+		result := loadAndQuery(t, path, "select name")
+		if result.NumRows != 0 || len(result.Columns) != 1 || result.Columns[0] != "name" {
+			t.Fatalf("expected empty projected table, got %s", result.String())
+		}
+	})
+}

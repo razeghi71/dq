@@ -434,6 +434,98 @@ func TestLoadGlobEmptyMiddleShard(t *testing.T) {
 	}
 }
 
+func TestLoadGlobEmptyFirstShard(t *testing.T) {
+	dir := t.TempDir()
+	writeGlobTestFiles(t, dir, map[string]string{
+		"a.csv": "",
+		"b.csv": "id,name\n2,Bob\n",
+	})
+
+	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	if err != nil {
+		t.Fatalf("empty first glob shard should not fail load: %v", err)
+	}
+	if tbl.NumRows != 1 {
+		t.Fatalf("expected 1 row, got %d", tbl.NumRows)
+	}
+	if tbl.Get(0, "id").Int != 2 || tbl.Get(0, "name").Str != "Bob" {
+		t.Errorf("row: got %s", tbl.String())
+	}
+}
+
+func TestLoadGlobEmptyOnlyFile(t *testing.T) {
+	dir := t.TempDir()
+	writeGlobTestFiles(t, dir, map[string]string{
+		"only.csv": "",
+	})
+
+	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	if err != nil {
+		t.Fatalf("glob of empty-only CSV should load: %v", err)
+	}
+	if tbl.NumRows != 0 || len(tbl.Columns) != 0 {
+		t.Fatalf("expected empty table, got %s", tbl.String())
+	}
+}
+
+func TestLoadGlobAllEmptyShards(t *testing.T) {
+	dir := t.TempDir()
+	writeGlobTestFiles(t, dir, map[string]string{
+		"a.csv": "",
+		"b.csv": "",
+	})
+
+	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	if err != nil {
+		t.Fatalf("glob of all-empty CSV shards should load: %v", err)
+	}
+	if tbl.NumRows != 0 || len(tbl.Columns) != 0 {
+		t.Fatalf("expected empty table, got %s", tbl.String())
+	}
+}
+
+func TestLoadGlobMultipleEmptyLeadingShards(t *testing.T) {
+	dir := t.TempDir()
+	writeGlobTestFiles(t, dir, map[string]string{
+		"a.csv": "",
+		"b.csv": "",
+		"c.csv": "id\n1\n",
+	})
+
+	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	if err != nil {
+		t.Fatalf("glob with leading empty shards should load: %v", err)
+	}
+	if tbl.NumRows != 1 || tbl.ColIndex("id") < 0 {
+		t.Fatalf("expected one row with id column, got %s", tbl.String())
+	}
+	if tbl.Get(0, "id").Int != 1 {
+		t.Errorf("row: got %s", tbl.String())
+	}
+}
+
+func TestLoadGlobBOMOnlyFirstShard(t *testing.T) {
+	dir := t.TempDir()
+	writeGlobTestFiles(t, dir, map[string]string{
+		"a.csv": "\ufeff",
+		"b.csv": "id,name\n1,Alice\n",
+	})
+
+	tbl, err := Load(filepath.Join(dir, "*.csv"), "")
+	if err != nil {
+		t.Fatalf("BOM-only first glob shard should not break load: %v", err)
+	}
+	if tbl.NumRows != 1 {
+		t.Fatalf("expected 1 row, got %d", tbl.NumRows)
+	}
+	if tbl.ColIndex("id") < 0 || tbl.ColIndex("name") < 0 {
+		t.Fatalf("expected id and name columns, got %v", tbl.Columns)
+	}
+	if tbl.Get(0, "id").Int != 1 || tbl.Get(0, "name").Str != "Alice" {
+		t.Errorf("row: got %s", tbl.String())
+	}
+}
+
 func TestLoadGlobJSON(t *testing.T) {
 	dir := t.TempDir()
 	writeGlobTestFiles(t, dir, map[string]string{

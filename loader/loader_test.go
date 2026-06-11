@@ -3,6 +3,7 @@ package loader
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,6 +99,111 @@ func TestLoadCSV(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkUsersTable(t, tbl)
+}
+
+func TestLoadEmptyCSVReader(t *testing.T) {
+	tbl, err := LoadReader(strings.NewReader(""), "csv")
+	if err != nil {
+		t.Fatalf("empty CSV should load: %v", err)
+	}
+	if tbl.NumRows != 0 {
+		t.Fatalf("expected 0 rows, got %d", tbl.NumRows)
+	}
+	if len(tbl.Columns) != 0 {
+		t.Fatalf("expected 0 columns, got %v", tbl.Columns)
+	}
+}
+
+func TestLoadEmptyCSVFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "empty.csv")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tbl, err := Load(path, "")
+	if err != nil {
+		t.Fatalf("empty CSV file should load: %v", err)
+	}
+	if tbl.NumRows != 0 || len(tbl.Columns) != 0 {
+		t.Fatalf("expected empty table, got %s", tbl.String())
+	}
+}
+
+func TestLoadCSVBOMOnlyReader(t *testing.T) {
+	tbl, err := LoadReader(strings.NewReader("\ufeff"), "csv")
+	if err != nil {
+		t.Fatalf("BOM-only CSV should load: %v", err)
+	}
+	if tbl.NumRows != 0 || len(tbl.Columns) != 0 {
+		t.Fatalf("expected empty table, got %s", tbl.String())
+	}
+}
+
+func TestLoadCSVBOMOnlyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bom.csv")
+	if err := os.WriteFile(path, []byte("\ufeff"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tbl, err := Load(path, "")
+	if err != nil {
+		t.Fatalf("BOM-only CSV file should load: %v", err)
+	}
+	if tbl.NumRows != 0 || len(tbl.Columns) != 0 {
+		t.Fatalf("expected empty table, got %s", tbl.String())
+	}
+}
+
+func TestLoadEmptyCSVStdin(t *testing.T) {
+	tbl, err := LoadInput("-", "csv", strings.NewReader(""))
+	if err != nil {
+		t.Fatalf("empty stdin CSV should load: %v", err)
+	}
+	if tbl.NumRows != 0 || len(tbl.Columns) != 0 {
+		t.Fatalf("expected empty table, got %s", tbl.String())
+	}
+}
+
+func TestLoadEmptyCSVStdinNilReader(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires os.Stdin")
+	}
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = r
+	defer func() { os.Stdin = oldStdin }()
+	if _, err := w.Write([]byte("")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	tbl, err := LoadInput("-", "csv", nil)
+	if err != nil {
+		t.Fatalf("empty stdin CSV should load: %v", err)
+	}
+	if tbl.NumRows != 0 || len(tbl.Columns) != 0 {
+		t.Fatalf("expected empty table, got %s", tbl.String())
+	}
+	_, err = io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadCSVHeaderOnly(t *testing.T) {
+	tbl, err := LoadReader(strings.NewReader("name,age\n"), "csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tbl.NumRows != 0 {
+		t.Fatalf("expected 0 rows, got %d", tbl.NumRows)
+	}
+	if tbl.ColIndex("name") < 0 || tbl.ColIndex("age") < 0 {
+		t.Fatalf("expected name and age columns, got %v", tbl.Columns)
+	}
 }
 
 func csvWithUTF8BOM(content string) string {
