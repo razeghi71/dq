@@ -35,29 +35,10 @@ go build -ldflags="-s -w" -o dq ./cmd/dq
 Every query starts with a file or stdin and pipes it through operations. Each operation takes a table in and returns a table out.
 
 ```
-dq 'file.csv | operation1 | operation2 | ...'
+dq 'data.dat [with format=..., delim=..., ...] | operation1 | operation2 | ...'
 ```
 
 Wrap queries in single quotes so your shell doesn't interpret `|`, `{`, `}`, or `>`.
-
-## Load options (`with`)
-
-Optional `with key=value, ...` clauses on the primary source or join file control how data is loaded. Same binding style as `transform` / `rename` (comma-separated `=` pairs).
-
-```bash
-dq 'data.dat with format=csv | head 5'
-dq 'logs/part-* with format=csv | count'
-dq 'data.csv with format=csv, header=false | head 3'
-dq 'users.csv | join orders/part-*.dat with format=csv, delim=";" on user_id == customer_id'
-```
-
-| Key | Applies to | Values | Notes |
-|-----|------------|--------|-------|
-| `format` | all | `csv`, `json`, `jsonl`, `avro`, `parquet` | Overrides extension; required when extension is missing |
-| `header` | csv | `true`, `false` | Default `true`; `false` uses `col1`, `col2`, … from first row width |
-| `delim` | csv | string, e.g. `delim=";"` | Default `,`; only the first character is used as the separator |
-
-Format resolution: explicit `format=` in `with` → file extension → error. Use `with format=...` when a glob matches mixed or missing extensions.
 
 ## Operations
 
@@ -203,19 +184,13 @@ Join the current table with another file. Kind is optional: `inner` (default), `
 dq 'users.csv | join orders.csv on name == user_name'
 dq 'users.csv | join left orders.csv on name == user_name'
 dq 'users.csv | join full orders.csv on id == customer_id and region == region'
-```
-
-When both sides use the same column name, shorthand works:
-
-```bash
-dq 'users.csv | join orders.csv on user_id'
+dq 'users.csv | join orders.dat with format=csv, delim=";" on user_id'
 ```
 
 Join keys can use dot paths for nested fields; a dot-path key gets its own flattened output column (`address.city` -> `address_city`, suffixed with `_2` if taken). If both tables share a column name, the right table's column is prefixed with the join file's basename (e.g. `orders_amount` from `orders.csv`).
 
 Notes:
 
-- Per-source load options: `join orders.dat with format=csv on id` (literal paths and globs).
 - Null keys never match (rows with null keys still appear in left/right/full joins, with the other side null).
 - Keys match by value representation, consistent with `group` and `distinct` -- e.g. integer `1` matches string `"1"` across files of different formats.
 
@@ -282,6 +257,14 @@ dq -o parquet 'users.csv | select name, age' > out.parquet # Parquet file
 
 CSV (`.csv`), JSON (`.json`), JSONL (`.jsonl`), Avro (`.avro`), Parquet (`.parquet`)
 
+If the extension isn't clear, add `with format=...` after the source — or after a join file:
+
+```bash
+dq 'data.dat with format=csv | head 5'
+cat users.csv | dq '- with format=csv | count'
+dq 'users.csv | join orders.dat with format=csv, delim=";" on user_id'
+```
+
 ### Glob patterns
 
 Primary sources and join files support shell-style globs, including recursive `**`:
@@ -294,7 +277,6 @@ dq 'users.csv | join left orders/part-*.csv on user_id'
 - Patterns are matched relative to the current working directory.
 - Matched files are loaded and concatenated (column union; missing values are null).
 - Matched paths are sorted lexicographically (use zero-padded partition names like `part-001` for correct order).
-- Use `with format=...` when a glob matches files with mixed or missing extensions (on primary or join sources).
 - CSV shards after the first: repeated headers are skipped; reordered or extended headers are detected when the first row is clearly a header (shared column names, new lowercase identifiers such as `email`, not `Email`). Otherwise rows are read positionally under the first file's columns.
 - Positional shards: values map to the first file's columns by position; extra cells in a row beyond that width are dropped (no error).
 - Renamed columns with no overlap with the first file's header (e.g. `user_id` vs anchor `id`) are read positionally, not by name.
