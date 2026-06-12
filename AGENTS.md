@@ -123,6 +123,29 @@ op ::= + | - | * | / | == | != | < | > | <= | >= | and | or | not
 * Comparisons use `==`: `age == 20` (single `=` is invalid in expressions)
 * Backticks for column names with special chars: `` `first name` ``
 * Null checks: `age is null`, `age is not null` (do NOT use `== null`)
+* Logical `and`, `or`, `not` use SQL three-valued logic (see below)
+
+**Three-valued logic (`and`, `or`, `not`):**
+
+`null` in boolean context means *unknown*, not false.
+
+| Expression | Result |
+|------------|--------|
+| `true and true` | true |
+| `true and false` | false |
+| `true and null` | null |
+| `false and null` | false |
+| `null and null` | null |
+| `true or false` | true |
+| `false or null` | null |
+| `null or null` | null |
+| `not true` | false |
+| `not false` | true |
+| `not null` | null |
+
+`and` binds tighter than `or` (same as SQL): `null and true or false` is `(null and true) or false`.
+
+In `filter`, a row is kept only when the expression is explicitly `true`; `false` and `null` both drop the row. In `if(cond, then, else)`, only explicit `true` takes the then branch; `false` and `null` take else.
 
 ---
 
@@ -169,10 +192,17 @@ Filter rows by expression. Expression is wrapped in braces `{ }` for clear bound
 dq 'users.csv | filter { age > 20 and city == "NY" }'
 ```
 
-**Null handling:**
+**Null and boolean handling:**
+
+`filter` keeps a row only when the expression is explicitly `true`. Comparisons and predicates that yield `null` drop the row (same as `false`). Use `is null` / `is not null` for definite null checks. A bare boolean column is a valid predicate (`filter { active }` keeps rows where `active` is explicitly `true`; `false` and `null` drop).
+
 ```
 dq 'users.csv | filter { age is not null }'
 dq 'users.csv | filter { city is null }'
+dq 'users.csv | filter { active }'              // true keeps; false/null drop
+dq 'users.csv | filter { age > null }'          // null → drops row
+dq 'users.csv | filter { null and true }'       // null → drops row
+dq 'users.csv | filter { null or true }'        // true → keeps row
 ```
 
 ### 6. `group col1, col2, ... [as nested_name]`
@@ -352,7 +382,7 @@ These are available in `transform` and `reduce` expressions:
 * `substr(s, start, len)` — substring
 * `trim(s)` — remove whitespace
 * `coalesce(a, b, ...)` — first non-null value
-* `if(cond, then, else)` — conditional
+* `if(cond, then, else)` — conditional; only explicit `true` takes then, `false` and `null` take else
 * `year(date)`, `month(date)`, `day(date)` — date extraction
 
 **String predicates (return booleans; usable in `filter` and `transform`):**
@@ -365,7 +395,7 @@ Matching is **case-sensitive** (`"ERROR"` does not match `"error"`). Use `upper(
 
 Non-string values are converted with `AsString()` before matching (same as `upper` / `len`).
 
-Null arguments produce null. In `filter`, a null predicate is treated as false and the row is dropped.
+Null arguments produce null. In `filter`, a null result drops the row (same as `false`).
 
 Invalid regex in `matches()` fails the query when that row is evaluated (including patterns taken from a column).
 
@@ -378,7 +408,7 @@ dq 'access.log.csv | filter { matches(message, "timeout|refused") }'
 **Operators work in both:**
 * Arithmetic: `+`, `-`, `*`, `/`
 * Comparison: `==`, `!=`, `<`, `>`, `<=`, `>=`
-* Logical: `and`, `or`, `not`
+* Logical: `and`, `or`, `not` (SQL three-valued logic; see Expression Grammar)
 
 ---
 

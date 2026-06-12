@@ -220,3 +220,134 @@ func TestAppendIntToStringColumn(t *testing.T) {
 		t.Fatalf("expected stringified int, got %v", tbl.Get(1, "id"))
 	}
 }
+
+type triOutcome int
+
+const (
+	outFalse triOutcome = iota
+	outTrue
+	outNull
+)
+
+func boolOrNull(b bool, isNull bool) Value {
+	if isNull {
+		return Null()
+	}
+	return BoolVal(b)
+}
+
+func assertTriOutcome(t *testing.T, v Value, want triOutcome) {
+	t.Helper()
+	switch want {
+	case outNull:
+		if !v.IsNull() {
+			t.Errorf("expected null, got %v", v.AsString())
+		}
+	case outTrue:
+		if v.Type != TypeBool || !v.Bool {
+			t.Errorf("expected true, got %v", v.AsString())
+		}
+	case outFalse:
+		if v.Type != TypeBool || v.Bool {
+			t.Errorf("expected false, got %v", v.AsString())
+		}
+	}
+}
+
+func TestEvalTruthAnd(t *testing.T) {
+	cases := []struct {
+		left, right triOutcome
+		want        triOutcome
+	}{
+		{outTrue, outTrue, outTrue},
+		{outTrue, outFalse, outFalse},
+		{outTrue, outNull, outNull},
+		{outFalse, outTrue, outFalse},
+		{outFalse, outFalse, outFalse},
+		{outFalse, outNull, outFalse},
+		{outNull, outTrue, outNull},
+		{outNull, outFalse, outFalse},
+		{outNull, outNull, outNull},
+	}
+	for _, tc := range cases {
+		left := boolOrNull(tc.left == outTrue, tc.left == outNull)
+		right := boolOrNull(tc.right == outTrue, tc.right == outNull)
+		got, err := EvalTruthAnd(left, right)
+		if err != nil {
+			t.Fatalf("EvalTruthAnd: %v", err)
+		}
+		assertTriOutcome(t, got, tc.want)
+	}
+}
+
+func TestEvalTruthOr(t *testing.T) {
+	cases := []struct {
+		left, right triOutcome
+		want        triOutcome
+	}{
+		{outTrue, outTrue, outTrue},
+		{outTrue, outFalse, outTrue},
+		{outTrue, outNull, outTrue},
+		{outFalse, outTrue, outTrue},
+		{outFalse, outFalse, outFalse},
+		{outFalse, outNull, outNull},
+		{outNull, outTrue, outTrue},
+		{outNull, outFalse, outNull},
+		{outNull, outNull, outNull},
+	}
+	for _, tc := range cases {
+		left := boolOrNull(tc.left == outTrue, tc.left == outNull)
+		right := boolOrNull(tc.right == outTrue, tc.right == outNull)
+		got, err := EvalTruthOr(left, right)
+		if err != nil {
+			t.Fatalf("EvalTruthOr: %v", err)
+		}
+		assertTriOutcome(t, got, tc.want)
+	}
+}
+
+func TestEvalTruthNot(t *testing.T) {
+	for _, tc := range []struct {
+		in   triOutcome
+		want triOutcome
+	}{
+		{outTrue, outFalse},
+		{outFalse, outTrue},
+		{outNull, outNull},
+	} {
+		in := boolOrNull(tc.in == outTrue, tc.in == outNull)
+		got, err := EvalTruthNot(in)
+		if err != nil {
+			t.Fatalf("EvalTruthNot: %v", err)
+		}
+		assertTriOutcome(t, got, tc.want)
+	}
+}
+
+func TestIsExplicitTrueAndIsBoolOrNull(t *testing.T) {
+	if !BoolVal(true).IsExplicitTrue() {
+		t.Error("true should be explicit true")
+	}
+	if BoolVal(false).IsExplicitTrue() || Null().IsExplicitTrue() {
+		t.Error("false and null should not be explicit true")
+	}
+	if !BoolVal(true).IsBoolOrNull() || !BoolVal(false).IsBoolOrNull() || !Null().IsBoolOrNull() {
+		t.Error("bool and null should be valid logical operands")
+	}
+	if IntVal(1).IsBoolOrNull() || StrVal("x").IsBoolOrNull() {
+		t.Error("non-bool/non-null should not be valid logical operands")
+	}
+}
+
+func TestEvalTruthNonBooleanErrors(t *testing.T) {
+	intVal := IntVal(1)
+	if _, err := EvalTruthAnd(intVal, BoolVal(true)); err == nil {
+		t.Fatal("expected error for non-boolean and operand")
+	}
+	if _, err := EvalTruthOr(BoolVal(false), intVal); err == nil {
+		t.Fatal("expected error for non-boolean or operand")
+	}
+	if _, err := EvalTruthNot(intVal); err == nil {
+		t.Fatal("expected error for non-boolean not operand")
+	}
+}

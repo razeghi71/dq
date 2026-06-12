@@ -77,9 +77,9 @@ func evalBinary(e *ast.BinaryExpr, ctx *EvalContext) (table.Value, error) {
 	case "==", "!=", "<", ">", "<=", ">=":
 		return evalComparison(e.Op, left, right)
 	case "and":
-		return evalLogicalAnd(left, right)
+		return table.EvalTruthAnd(left, right)
 	case "or":
-		return evalLogicalOr(left, right)
+		return table.EvalTruthOr(left, right)
 	default:
 		return table.Null(), fmt.Errorf("unknown operator %q", e.Op)
 	}
@@ -242,24 +242,6 @@ func cmpResult(op string, cmp int) bool {
 	return false
 }
 
-func evalLogicalAnd(left, right table.Value) (table.Value, error) {
-	lb, lok := left.AsBool()
-	rb, rok := right.AsBool()
-	if !lok || !rok {
-		return table.Null(), fmt.Errorf("'and' requires boolean operands")
-	}
-	return table.BoolVal(lb && rb), nil
-}
-
-func evalLogicalOr(left, right table.Value) (table.Value, error) {
-	lb, lok := left.AsBool()
-	rb, rok := right.AsBool()
-	if !lok || !rok {
-		return table.Null(), fmt.Errorf("'or' requires boolean operands")
-	}
-	return table.BoolVal(lb || rb), nil
-}
-
 func evalUnary(e *ast.UnaryExpr, ctx *EvalContext) (table.Value, error) {
 	operand, err := Eval(e.Operand, ctx)
 	if err != nil {
@@ -268,11 +250,7 @@ func evalUnary(e *ast.UnaryExpr, ctx *EvalContext) (table.Value, error) {
 
 	switch e.Op {
 	case "not":
-		b, ok := operand.AsBool()
-		if !ok {
-			return table.Null(), fmt.Errorf("'not' requires boolean operand")
-		}
-		return table.BoolVal(!b), nil
+		return table.EvalTruthNot(operand)
 	case "-":
 		if operand.IsNull() {
 			return table.Null(), nil

@@ -122,7 +122,8 @@ func (v Value) AsString() string {
 	}
 }
 
-// AsBool coerces to boolean for logical operations.
+// AsBool coerces to boolean. TypeBool returns its value; TypeNull returns (false, true).
+// Prefer EvalTruthAnd/Or/Not for logical operations (SQL three-valued logic).
 func (v Value) AsBool() (bool, bool) {
 	switch v.Type {
 	case TypeBool:
@@ -132,6 +133,111 @@ func (v Value) AsBool() (bool, bool) {
 	default:
 		return false, false
 	}
+}
+
+// IsExplicitTrue reports whether v is TypeBool with value true (SQL WHERE / CASE WHEN).
+func (v Value) IsExplicitTrue() bool {
+	return v.Type == TypeBool && v.Bool
+}
+
+// IsBoolOrNull reports whether v is a valid operand for and/or/not (bool or unknown null).
+func (v Value) IsBoolOrNull() bool {
+	return v.Type == TypeBool || v.Type == TypeNull
+}
+
+type triBool int
+
+const (
+	triFalse triBool = iota
+	triTrue
+	triUnknown
+)
+
+func valueToTri(v Value) (triBool, bool) {
+	switch v.Type {
+	case TypeBool:
+		if v.Bool {
+			return triTrue, true
+		}
+		return triFalse, true
+	case TypeNull:
+		return triUnknown, true
+	default:
+		return triFalse, false
+	}
+}
+
+func triToValue(t triBool) Value {
+	switch t {
+	case triTrue:
+		return BoolVal(true)
+	case triFalse:
+		return BoolVal(false)
+	default:
+		return Null()
+	}
+}
+
+func triAnd(a, b triBool) triBool {
+	switch {
+	case a == triFalse || b == triFalse:
+		return triFalse
+	case a == triTrue && b == triTrue:
+		return triTrue
+	default:
+		return triUnknown
+	}
+}
+
+func triOr(a, b triBool) triBool {
+	switch {
+	case a == triTrue || b == triTrue:
+		return triTrue
+	case a == triFalse && b == triFalse:
+		return triFalse
+	default:
+		return triUnknown
+	}
+}
+
+func triNot(a triBool) triBool {
+	switch a {
+	case triTrue:
+		return triFalse
+	case triFalse:
+		return triTrue
+	default:
+		return triUnknown
+	}
+}
+
+// EvalTruthAnd applies SQL three-valued AND to bool/null operands.
+func EvalTruthAnd(left, right Value) (Value, error) {
+	la, lok := valueToTri(left)
+	ra, rok := valueToTri(right)
+	if !lok || !rok {
+		return Null(), fmt.Errorf("'and' requires boolean operands")
+	}
+	return triToValue(triAnd(la, ra)), nil
+}
+
+// EvalTruthOr applies SQL three-valued OR to bool/null operands.
+func EvalTruthOr(left, right Value) (Value, error) {
+	la, lok := valueToTri(left)
+	ra, rok := valueToTri(right)
+	if !lok || !rok {
+		return Null(), fmt.Errorf("'or' requires boolean operands")
+	}
+	return triToValue(triOr(la, ra)), nil
+}
+
+// EvalTruthNot applies SQL three-valued NOT to a bool/null operand.
+func EvalTruthNot(v Value) (Value, error) {
+	a, ok := valueToTri(v)
+	if !ok {
+		return Null(), fmt.Errorf("'not' requires boolean operand")
+	}
+	return triToValue(triNot(a)), nil
 }
 
 // ListToTable converts a TypeList of TypeRecord values into a *Table.

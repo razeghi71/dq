@@ -271,11 +271,10 @@ func callIf(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
 	if err != nil {
 		return table.Null(), err
 	}
-	b, ok := cond.AsBool()
-	if !ok {
+	if !cond.IsBoolOrNull() {
 		return table.Null(), fmt.Errorf("if: condition must be boolean")
 	}
-	if b {
+	if cond.IsExplicitTrue() {
 		return Eval(args[1], ctx)
 	}
 	return Eval(args[2], ctx)

@@ -236,12 +236,13 @@ func execFilter(o *ast.FilterOp, t *table.Table) (*table.Table, error) {
 		if err != nil {
 			return nil, fmt.Errorf("filter: %w", err)
 		}
-		b, ok := val.AsBool()
-		if !ok {
-			return nil, fmt.Errorf("filter: expression did not return boolean, got %v", val.AsString())
-		}
-		if b {
+		switch {
+		case val.IsExplicitTrue():
 			result.AddRow(rowVals(t, i))
+		case val.IsBoolOrNull():
+			// false or unknown — drop row
+		default:
+			return nil, fmt.Errorf("filter: expression did not return boolean, got %v", val.AsString())
 		}
 	}
 	return result, nil
