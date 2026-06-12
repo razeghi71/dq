@@ -384,7 +384,7 @@ These are available in `transform` and `reduce` expressions:
 * `trim(s)` — remove whitespace (`TypeString` only)
 * `coalesce(a, b, ...)` — first non-null value
 * `if(cond, then, else)` — conditional; only explicit `true` takes then, `false` and `null` take else
-* `year(date)`, `month(date)`, `day(date)` — date extraction
+* `year(date)`, `month(date)`, `day(date)` — extract year, month, or day from a date string (`TypeString` only). Supported formats include `YYYY-MM-DD`, ISO timestamps, `YYYY-MM-DD HH:MM:SS`, and common slash-separated forms (see `engine/functions.go` `dateFormats`). Null input → null. Unparseable strings **error** and fail the query (same strict parse semantics as BigQuery `PARSE_DATE`, Trino `date_parse`, PostgreSQL `::date` — not silent null).
 
 **String predicates (return booleans; usable in `filter` and `transform`; `TypeString` only):**
 * `contains(s, sub)` — true if `s` contains substring `sub`
@@ -398,13 +398,21 @@ Matching is **case-sensitive** (`"ERROR"` does not match `"error"`).
 
 Null arguments produce null. In `filter`, a null result drops the row (same as `false`).
 
+**Strict builtins — invalid content errors (not null):** Some functions accept the right type but reject invalid *content*. The query fails on the first bad row (in `filter` / `transform`), matching strict SQL engines (BigQuery/Trino default parse; PostgreSQL cast). This is intentional — unlike missing data (null in → null out) or arithmetic edge cases (e.g. division by zero → null).
+
+| Function | Null input | Invalid content |
+|----------|------------|-----------------|
+| `year` / `month` / `day` | null | unparseable date string → error |
+| `matches` | null | invalid RE2 regex → error |
+
+Wrong *type* (e.g. `year(quantity)`, `matches(age, "x")`) also errors. For messy string columns, clean or filter upstream; opt-in `try_*` / `safe_*` helpers may be added later for the same pattern (Trino `TRY(...)`, BigQuery `SAFE.*`).
+
 ```
 dq 'users.csv | transform name_len = str_len(name)'
 dq 'nested.json | transform order_count = list_len(orders)'
 dq 'nested.json | filter { list_len(orders) > 1 } | select name'
+dq 'dates.csv | transform y = year(d)'   # "2024-13-99" → error, not null
 ```
-
-Invalid regex in `matches()` fails the query when that row is evaluated (including patterns taken from a column).
 
 ```
 dq 'logs.csv | filter { contains(upper(message), "ERROR") }'
