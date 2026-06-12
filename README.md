@@ -196,40 +196,56 @@ Notes:
 
 ## Functions
 
-**For `reduce`** (aggregate across rows):
+**`reduce`** — aggregate over nested rows:
 `count()`, `sum(col)`, `avg(col)`, `min(col)`, `max(col)`, `first(col)`, `last(col)`
 
-**For `transform`** (compute per row):
-`upper(s)`, `lower(s)`, `len(s)`, `trim(s)`, `substr(s, start, len)`, `coalesce(a, b, ...)`, `if(cond, then, else)`, `year(d)`, `month(d)`, `day(d)`
+**`transform`** — per-row values:
 
-**String predicates** (return booleans; handy in `filter` and `transform`):
-`contains(s, sub)`, `starts_with(s, prefix)`, `ends_with(s, suffix)`, `matches(s, regex)` (unanchored RE2 regex; use `^...$` to match the whole string). Matching is case-sensitive; use `upper(s)` / `lower(s)` for case-insensitive checks. Non-string values are converted with `AsString()` before matching. Null arguments produce null; in `filter`, a null predicate is treated as false and the row is dropped. Invalid regex in `matches()` fails the query when that row is evaluated.
+Strings — `upper(s)`, `lower(s)`, `trim(s)`, `substr(s, start, length)`, `str_len(s)`, `contains(s, sub)`, `starts_with(s, prefix)`, `ends_with(s, suffix)`, `matches(s, regex)`
+
+Lists — `list_len(xs)`
+
+General — `coalesce(a, b, ...)`, `if(cond, then, else)`
+
+Dates — `year(d)`, `month(d)`, `day(d)`
+
+Indexes are 0-based. `matches()` uses RE2 regex (unanchored by default; use `^...$` for a full-string match).
+
+**Operators** — in any expression:
+`+`, `-`, `*`, `/`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `and`, `or`, `not`
 
 ```bash
+dq 'users.csv | transform name = upper(name), name_len = str_len(name)'
+dq 'nested.json | transform n = list_len(orders)'
+dq 'sales.csv | transform total = coalesce(qty, 0) * price, y = year(date)'
 dq 'logs.csv | filter { contains(upper(message), "ERROR") }'
 dq 'logs.csv | filter { starts_with(level, "WARN") }'
 dq 'access.csv | filter { ends_with(path, ".json") }'
 dq 'logs.csv | filter { matches(message, "timeout|refused") }'
 ```
 
-**Operators** (work everywhere):
-`+`, `-`, `*`, `/`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `and`, `or`, `not`
+## Nested records
 
-## Nested Fields
-
-JSON, Avro, and Parquet files can contain nested records. Use dot notation to access sub-fields in `filter`, `transform`, `select`, and `group`:
+Nested objects from JSON, Avro, or Parquet. Use dot paths in `filter`, `transform`, `select`, and `group`:
 
 ```bash
 dq 'data.json | filter { address.city == "Chicago" }'
 dq 'data.json | transform city = address.city | select name, city'
-dq 'data.json | filter { profile.stats.logins > 10 }'
-dq 'data.json | select name, address.city'                          # -> columns: name, address_city
+dq 'data.json | select name, address.city'                    # -> column address_city
 dq 'data.json | group address.city | reduce n = count() | remove grouped'
 ```
 
-Dot paths in `select` and `group` flatten to underscore-separated column names (e.g., `address.city` becomes `address_city`). If a column with that name already exists, a numeric suffix is added (`address_city_2`).
+`select` and `group` flatten dot paths to underscore names (`address.city` → `address_city`). Missing sub-fields return null.
 
-Missing sub-fields return null.
+## List columns
+
+JSON/Avro/Parquet arrays load as **lists**.
+
+```bash
+dq 'nested.json | transform n = list_len(orders) | select name, n'
+dq 'nested.json | filter { list_len(tags) >= 2 } | select name'
+dq 'nested.json | reduce orders total = sum(amount) | select name, total'
+```
 
 ## Output Formats
 

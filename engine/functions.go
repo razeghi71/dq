@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/razeghi71/dq/ast"
 	"github.com/razeghi71/dq/table"
@@ -20,8 +21,10 @@ func evalFunc(e *ast.FuncCallExpr, ctx *EvalContext) (table.Value, error) {
 		return callUpper(e.Args, ctx)
 	case "lower":
 		return callLower(e.Args, ctx)
-	case "len":
-		return callLen(e.Args, ctx)
+	case "str_len":
+		return callStrLen(e.Args, ctx)
+	case "list_len":
+		return callListLen(e.Args, ctx)
 	case "substr":
 		return callSubstr(e.Args, ctx)
 	case "trim":
@@ -65,7 +68,10 @@ func callUpper(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
 	if v.IsNull() {
 		return table.Null(), nil
 	}
-	return table.StrVal(strings.ToUpper(v.AsString())), nil
+	if v.Type != table.TypeString {
+		return table.Null(), fmt.Errorf("upper() requires a string, got %s", valueTypeName(v))
+	}
+	return table.StrVal(strings.ToUpper(v.Str)), nil
 }
 
 func callLower(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
@@ -79,12 +85,36 @@ func callLower(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
 	if v.IsNull() {
 		return table.Null(), nil
 	}
-	return table.StrVal(strings.ToLower(v.AsString())), nil
+	if v.Type != table.TypeString {
+		return table.Null(), fmt.Errorf("lower() requires a string, got %s", valueTypeName(v))
+	}
+	return table.StrVal(strings.ToLower(v.Str)), nil
 }
 
-func callLen(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
+func valueTypeName(v table.Value) string {
+	switch v.Type {
+	case table.TypeNull:
+		return "null"
+	case table.TypeInt:
+		return "int"
+	case table.TypeFloat:
+		return "float"
+	case table.TypeString:
+		return "string"
+	case table.TypeBool:
+		return "bool"
+	case table.TypeList:
+		return "list"
+	case table.TypeRecord:
+		return "record"
+	default:
+		return "unknown"
+	}
+}
+
+func callStrLen(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
 	if len(args) != 1 {
-		return table.Null(), fmt.Errorf("len() takes 1 argument, got %d", len(args))
+		return table.Null(), fmt.Errorf("str_len() takes 1 argument, got %d", len(args))
 	}
 	v, err := Eval(args[0], ctx)
 	if err != nil {
@@ -93,7 +123,78 @@ func callLen(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
 	if v.IsNull() {
 		return table.Null(), nil
 	}
-	return table.IntVal(int64(len(v.AsString()))), nil
+	if v.Type != table.TypeString {
+		return table.Null(), fmt.Errorf("str_len() requires a string, got %s", valueTypeName(v))
+	}
+	return table.IntVal(int64(stringCodePointCount(v.Str))), nil
+}
+
+func callListLen(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
+	if len(args) != 1 {
+		return table.Null(), fmt.Errorf("list_len() takes 1 argument, got %d", len(args))
+	}
+	v, err := Eval(args[0], ctx)
+	if err != nil {
+		return table.Null(), err
+	}
+	if v.IsNull() {
+		return table.Null(), nil
+	}
+	if v.Type != table.TypeList {
+		return table.Null(), fmt.Errorf("list_len() requires a list, got %s", valueTypeName(v))
+	}
+	return table.IntVal(int64(len(v.List))), nil
+}
+
+// stringCodePointCount returns the number of Unicode code points in s.
+func stringCodePointCount(s string) int {
+	return utf8.RuneCountInString(s)
+}
+
+// normalizeCodePointStart converts a 0-based code point index, counting from the end
+// when negative (Python-style). Values below 0 after adjustment clamp to 0.
+func normalizeCodePointStart(start, n int) int {
+	if start < 0 {
+		start += n
+	}
+	if start < 0 {
+		return 0
+	}
+	return start
+}
+
+// codePointIndex converts a stored int64 index to int for string slicing.
+func codePointIndex(v int64, field string) (int, error) {
+	if v > int64(int(^uint(0)>>1)) {
+		return 0, fmt.Errorf("substr: %s out of range", field)
+	}
+	return int(v), nil
+}
+
+// substrByCodePoints slices s by 0-based code point start and length without
+// materializing the full rune slice.
+func substrByCodePoints(s string, start, length int) string {
+	n := stringCodePointCount(s)
+	start = normalizeCodePointStart(start, n)
+	if start >= n || length == 0 {
+		return ""
+	}
+	end := start + length
+	if end > n {
+		end = n
+	}
+	var b strings.Builder
+	i := 0
+	for _, r := range s {
+		if i >= end {
+			break
+		}
+		if i >= start {
+			b.WriteRune(r)
+		}
+		i++
+	}
+	return b.String()
 }
 
 func callSubstr(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
@@ -107,7 +208,10 @@ func callSubstr(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
 	if sv.IsNull() {
 		return table.Null(), nil
 	}
-	s := sv.AsString()
+	if sv.Type != table.TypeString {
+		return table.Null(), fmt.Errorf("substr() requires a string, got %s", valueTypeName(sv))
+	}
+	s := sv.Str
 
 	startV, err := Eval(args[1], ctx)
 	if err != nil {
@@ -117,29 +221,29 @@ func callSubstr(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
 	if err != nil {
 		return table.Null(), err
 	}
-
-	startF, ok := startV.AsFloat()
-	if !ok {
-		return table.Null(), fmt.Errorf("substr: start must be a number")
-	}
-	lenF, ok := lenV.AsFloat()
-	if !ok {
-		return table.Null(), fmt.Errorf("substr: length must be a number")
+	if startV.IsNull() || lenV.IsNull() {
+		return table.Null(), nil
 	}
 
-	start := int(startF)
-	length := int(lenF)
-	if start < 0 {
-		start = 0
+	if startV.Type != table.TypeInt {
+		return table.Null(), fmt.Errorf("substr: start must be an int, got %s", valueTypeName(startV))
 	}
-	if start >= len(s) {
-		return table.StrVal(""), nil
+	if lenV.Type != table.TypeInt {
+		return table.Null(), fmt.Errorf("substr: length must be an int, got %s", valueTypeName(lenV))
 	}
-	end := start + length
-	if end > len(s) {
-		end = len(s)
+
+	start, err := codePointIndex(startV.Int, "start")
+	if err != nil {
+		return table.Null(), err
 	}
-	return table.StrVal(s[start:end]), nil
+	length, err := codePointIndex(lenV.Int, "length")
+	if err != nil {
+		return table.Null(), err
+	}
+	if length < 0 {
+		return table.Null(), fmt.Errorf("substr: length must not be negative")
+	}
+	return table.StrVal(substrByCodePoints(s, start, length)), nil
 }
 
 func callTrim(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
@@ -153,12 +257,15 @@ func callTrim(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
 	if v.IsNull() {
 		return table.Null(), nil
 	}
-	return table.StrVal(strings.TrimSpace(v.AsString())), nil
+	if v.Type != table.TypeString {
+		return table.Null(), fmt.Errorf("trim() requires a string, got %s", valueTypeName(v))
+	}
+	return table.StrVal(strings.TrimSpace(v.Str)), nil
 }
 
-// strPredicateArgs evaluates the two arguments of a binary string predicate,
-// returning the haystack and needle as strings. If either argument is null,
-// ok is false so the caller can propagate null.
+// strPredicateArgs evaluates the two arguments of a binary string predicate.
+// Both arguments must be TypeString (non-string types error); null yields ok=false
+// so the caller can propagate null. On success, returns the haystack and needle strings.
 func strPredicateArgs(name, secondArgLabel string, args []ast.Expr, ctx *EvalContext) (s, sub string, ok bool, err error) {
 	if len(args) != 2 {
 		return "", "", false, fmt.Errorf("%s() takes 2 arguments (string, %s), got %d", name, secondArgLabel, len(args))
@@ -174,7 +281,13 @@ func strPredicateArgs(name, secondArgLabel string, args []ast.Expr, ctx *EvalCon
 	if sv.IsNull() || subv.IsNull() {
 		return "", "", false, nil
 	}
-	return sv.AsString(), subv.AsString(), true, nil
+	if sv.Type != table.TypeString {
+		return "", "", false, fmt.Errorf("%s() requires a string, got %s", name, valueTypeName(sv))
+	}
+	if subv.Type != table.TypeString {
+		return "", "", false, fmt.Errorf("%s() requires a string %s, got %s", name, secondArgLabel, valueTypeName(subv))
+	}
+	return sv.Str, subv.Str, true, nil
 }
 
 func callContains(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
@@ -301,7 +414,10 @@ func callDatePart(args []ast.Expr, ctx *EvalContext, part string) (table.Value, 
 	if v.IsNull() {
 		return table.Null(), nil
 	}
-	s := v.AsString()
+	if v.Type != table.TypeString {
+		return table.Null(), fmt.Errorf("%s() requires a string, got %s", part, valueTypeName(v))
+	}
+	s := v.Str
 
 	var t time.Time
 	parsed := false

@@ -113,6 +113,35 @@ func assertFlatQueries(t *testing.T, file string) {
 			t.Errorf("expected count 6, got %d", result.GetAt(0, 0).Int)
 		}
 	})
+
+	assertFlatLengthQueries(t, file)
+}
+
+// assertFlatLengthQueries exercises str_len and substr on flat user files.
+func assertFlatLengthQueries(t *testing.T, file string) {
+	t.Helper()
+
+	t.Run("str_len_filter", func(t *testing.T) {
+		result := loadAndQuery(t, file, "filter { str_len(name) > 4 } | select name | sort name")
+		assertNameSet(t, result, "name", "Alice", "Charlie", "Diana", "Frank")
+	})
+
+	t.Run("substr_prefix", func(t *testing.T) {
+		result := loadAndQuery(t, file, `transform prefix = substr(name, 0, 2) | filter { prefix == "Al" } | select name`)
+		if result.NumRows != 1 {
+			t.Fatalf("expected 1 row, got %d", result.NumRows)
+		}
+		if got := result.GetAt(0, 0).Str; got != "Alice" {
+			t.Errorf("expected Alice, got %q", got)
+		}
+	})
+
+	t.Run("substr_unicode_literal", func(t *testing.T) {
+		result := loadAndQuery(t, file, `transform part = substr("café", 3, 1) | head 1 | select part`)
+		if got := result.GetAt(0, 0).Str; got != "é" {
+			t.Errorf("expected %q, got %q", "é", got)
+		}
+	})
 }
 
 func TestIntegrationFlatCSV(t *testing.T) {
@@ -258,6 +287,86 @@ func assertNestedQueries(t *testing.T, file string) {
 			}
 		}
 	})
+
+	assertNestedLengthQueries(t, file)
+}
+
+// assertNestedLengthQueries exercises str_len, list_len, and substr on nested files.
+func assertNestedLengthQueries(t *testing.T, file string) {
+	t.Helper()
+
+	t.Run("str_len_name", func(t *testing.T) {
+		result := loadAndQuery(t, file, "transform name_len = str_len(name) | select name, name_len")
+		assertIntColByName(t, result, "name", "name_len", map[string]int64{
+			"Alice": 5, "Bob": 3, "Charlie": 7,
+		})
+	})
+
+	t.Run("str_len_filter", func(t *testing.T) {
+		result := loadAndQuery(t, file, "filter { str_len(name) > 5 } | select name")
+		assertNameSet(t, result, "name", "Charlie")
+	})
+
+	t.Run("list_len_orders", func(t *testing.T) {
+		result := loadAndQuery(t, file, "transform n = list_len(orders) | select name, n")
+		assertIntColByName(t, result, "name", "n", map[string]int64{
+			"Alice": 2, "Bob": 1, "Charlie": 0,
+		})
+	})
+
+	t.Run("list_len_filter_orders", func(t *testing.T) {
+		result := loadAndQuery(t, file, "filter { list_len(orders) > 1 } | select name")
+		assertNameSet(t, result, "name", "Alice")
+	})
+
+	t.Run("list_len_filter_tags", func(t *testing.T) {
+		result := loadAndQuery(t, file, "filter { list_len(tags) >= 2 } | select name")
+		assertNameSet(t, result, "name", "Alice", "Charlie")
+	})
+
+	t.Run("list_len_dot_path_history", func(t *testing.T) {
+		result := loadAndQuery(t, file, "transform n = list_len(profile.history) | select name, n")
+		assertIntColByName(t, result, "name", "n", map[string]int64{
+			"Alice": 2, "Bob": 1, "Charlie": 0,
+		})
+	})
+
+	t.Run("substr_name_prefix", func(t *testing.T) {
+		result := loadAndQuery(t, file, `transform prefix = substr(name, 0, 2) | select name, prefix`)
+		want := map[string]string{"Alice": "Al", "Bob": "Bo", "Charlie": "Ch"}
+		nameIdx := result.ColIndex("name")
+		prefixIdx := result.ColIndex("prefix")
+		for i := 0; i < result.NumRows; i++ {
+			name := result.GetAt(i, nameIdx).Str
+			if w, ok := want[name]; ok {
+				if got := result.GetAt(i, prefixIdx).Str; got != w {
+					t.Errorf("%s prefix: want %q, got %q", name, w, got)
+				}
+			}
+		}
+	})
+
+	t.Run("substr_unicode_literal", func(t *testing.T) {
+		result := loadAndQuery(t, file, `transform part = substr("日本語", 1, 2) | head 1 | select part`)
+		if got := result.GetAt(0, 0).Str; got != "本語" {
+			t.Errorf("expected %q, got %q", "本語", got)
+		}
+	})
+
+	t.Run("substr_negative_start", func(t *testing.T) {
+		result := loadAndQuery(t, file, `transform suffix = substr(name, -1, 1) | select name, suffix`)
+		want := map[string]string{"Alice": "e", "Bob": "b", "Charlie": "e"}
+		nameIdx := result.ColIndex("name")
+		suffixIdx := result.ColIndex("suffix")
+		for i := 0; i < result.NumRows; i++ {
+			name := result.GetAt(i, nameIdx).Str
+			if w, ok := want[name]; ok {
+				if got := result.GetAt(i, suffixIdx).Str; got != w {
+					t.Errorf("%s suffix: want %q, got %q", name, w, got)
+				}
+			}
+		}
+	})
 }
 
 func TestIntegrationNestedMissingJSON(t *testing.T) {
@@ -313,6 +422,41 @@ func TestIntegrationNestedAvro(t *testing.T) {
 
 func TestIntegrationNestedParquet(t *testing.T) {
 	assertNestedQueries(t, testdataDir+"/nested.parquet")
+}
+
+func TestReduceOrdersSumAmount(t *testing.T) {
+	result := loadAndQuery(t, testdataDir+"/nested.json", "reduce orders total = sum(amount) | select name, total | sort name")
+	nameIdx := result.ColIndex("name")
+	totalIdx := result.ColIndex("total")
+	want := map[string]struct {
+		null  bool
+		total float64
+	}{
+		"Alice":   {total: 188.99},
+		"Bob":     {total: 39.99},
+		"Charlie": {null: true},
+	}
+	if result.NumRows != len(want) {
+		t.Fatalf("expected %d rows, got %d", len(want), result.NumRows)
+	}
+	for i := 0; i < result.NumRows; i++ {
+		name := result.GetAt(i, nameIdx).Str
+		w, ok := want[name]
+		if !ok {
+			t.Fatalf("unexpected name %q", name)
+		}
+		v := result.GetAt(i, totalIdx)
+		if w.null {
+			if !v.IsNull() {
+				t.Errorf("%s: want null total, got %v", name, v.AsString())
+			}
+			continue
+		}
+		f, ok := v.AsFloat()
+		if !ok || f != w.total {
+			t.Errorf("%s: want %v, got %v", name, w.total, v.AsString())
+		}
+	}
 }
 
 // assertNestedDotPathOps tests select and group with dot-path columns on nested files.

@@ -464,6 +464,27 @@ func TestUpperLower(t *testing.T) {
 	}
 }
 
+func TestStringTransformsNullPropagation(t *testing.T) {
+	tbl := table.NewTable([]string{"s"})
+	tbl.AddRow([]table.Value{table.Null()})
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{"upper", "transform x = upper(s) | select x"},
+		{"lower", "transform x = lower(s) | select x"},
+		{"trim", "transform x = trim(s) | select x"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := runQuery(t, tbl, tc.query)
+			if !result.GetAt(0, 0).IsNull() {
+				t.Errorf("want null, got %v", result.GetAt(0, 0).AsString())
+			}
+		})
+	}
+}
+
 func sortedNames(t *testing.T, result *table.Table) []string {
 	t.Helper()
 	idx := result.ColIndex("name")
@@ -537,17 +558,23 @@ func TestStringPredicatesTransform(t *testing.T) {
 	}
 }
 
-func TestStringPredicatesCoercion(t *testing.T) {
-	result := runQuery(t, usersTable(), `transform hit = contains(age, "3") | select name, hit`)
-	hitIdx := result.ColIndex("hit")
-	nameIdx := result.ColIndex("name")
-	for i := 0; i < result.NumRows; i++ {
-		name := result.GetAt(i, nameIdx).Str
-		hit, ok := result.GetAt(i, hitIdx).AsBool()
-		want := name == "Alice" || name == "Charlie" // ages 30, 35 stringify to "30", "35"
-		if !ok || hit != want {
-			t.Errorf("%s: expected hit=%v, got ok=%v val=%v", name, want, ok, hit)
-		}
+func TestStringPredicatesWrongTypeErrors(t *testing.T) {
+	cases := []struct {
+		name    string
+		query   string
+		wantErr string
+	}{
+		{"contains_int_haystack", `transform hit = contains(age, "3")`, "contains() requires a string, got int"},
+		{"contains_int_needle", `transform hit = contains(name, age)`, "contains() requires a string substring, got int"},
+		{"starts_with_int_needle", `transform hit = starts_with(name, age)`, "starts_with() requires a string prefix, got int"},
+		{"ends_with_int_needle", `transform hit = ends_with(name, age)`, "ends_with() requires a string suffix, got int"},
+		{"matches_int_haystack", `transform hit = matches(age, "3")`, "matches() requires a string, got int"},
+		{"matches_int_pattern", `filter { matches(name, age) }`, "matches() requires a string regex, got int"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			expectQueryErrContains(t, usersTable(), tc.query, tc.wantErr)
+		})
 	}
 }
 
@@ -643,6 +670,17 @@ func runQueryExpectErr(t *testing.T, input *table.Table, query string) error {
 	return err
 }
 
+func expectQueryErrContains(t *testing.T, input *table.Table, query, substr string) {
+	t.Helper()
+	err := runQueryExpectErr(t, input, query)
+	if err == nil {
+		t.Fatalf("expected error containing %q", substr)
+	}
+	if !strings.Contains(err.Error(), substr) {
+		t.Fatalf("expected error containing %q, got: %v", substr, err)
+	}
+}
+
 func salesTable() *table.Table {
 	t := table.NewTable([]string{"date", "quantity"})
 	t.AddRow([]table.Value{table.StrVal("2024-01-15"), table.IntVal(10)})
@@ -677,10 +715,7 @@ func TestDatePartNullPropagation(t *testing.T) {
 }
 
 func TestDatePartErrorOnInt(t *testing.T) {
-	err := runQueryExpectErr(t, salesTable(), "transform y = year(quantity)")
-	if err == nil {
-		t.Fatal("expected error for year(quantity) on int column")
-	}
+	expectQueryErrContains(t, salesTable(), "transform y = year(quantity)", "year() requires a string, got int")
 }
 
 func TestDatePartErrorOnString(t *testing.T) {
@@ -695,16 +730,24 @@ func TestDatePartErrorOnString(t *testing.T) {
 
 func TestDatePartErrorOnIntResult(t *testing.T) {
 	// year(date) returns int; year(year(date)) should error
-	err := runQueryExpectErr(t, salesTable(), "transform y = year(date) | transform yy = year(y)")
-	if err == nil {
-		t.Fatal("expected error for year() on int result of year()")
-	}
+	expectQueryErrContains(t, salesTable(), "transform y = year(date) | transform yy = year(y)", "year() requires a string, got int")
 }
 
-func TestStringFuncsCoerceInt(t *testing.T) {
-	result := runQuery(t, usersTable(), "transform x = upper(age) | head 1")
-	if result.GetAt(0, 3).Str != "30" {
-		t.Errorf("expected '30', got %q", result.GetAt(0, 3).Str)
+func TestStringFuncsWrongTypeErrors(t *testing.T) {
+	cases := []struct {
+		name    string
+		query   string
+		wantErr string
+	}{
+		{"upper_int", "transform x = upper(age)", "upper() requires a string, got int"},
+		{"lower_int", "transform x = lower(age)", "lower() requires a string, got int"},
+		{"trim_int", "transform x = trim(age)", "trim() requires a string, got int"},
+		{"substr_int", "transform x = substr(age, 0, 1)", "substr() requires a string, got int"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			expectQueryErrContains(t, usersTable(), tc.query, tc.wantErr)
+		})
 	}
 }
 

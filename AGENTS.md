@@ -377,25 +377,32 @@ These are available in `transform` and `reduce` expressions:
 * `first(col)`, `last(col)` — first/last value in group
 
 **Transformations (for `transform` only):**
-* `upper(s)`, `lower(s)` — case conversion
-* `len(s)` — string length
-* `substr(s, start, len)` — substring
-* `trim(s)` — remove whitespace
+* `upper(s)`, `lower(s)` — case conversion (`TypeString` only)
+* `str_len(s)` — string length in Unicode code points, 0-based indexing companion (`TypeString` only)
+* `list_len(xs)` — list element count (`TypeList` only)
+* `substr(s, start, length)` — substring by **0-based code point** index and length (`TypeString` only for `s`; `start` and `length` must be `TypeInt`); negative `start` counts from the end (Python-style); `length` must be non-negative
+* `trim(s)` — remove whitespace (`TypeString` only)
 * `coalesce(a, b, ...)` — first non-null value
 * `if(cond, then, else)` — conditional; only explicit `true` takes then, `false` and `null` take else
 * `year(date)`, `month(date)`, `day(date)` — date extraction
 
-**String predicates (return booleans; usable in `filter` and `transform`):**
+**String predicates (return booleans; usable in `filter` and `transform`; `TypeString` only):**
 * `contains(s, sub)` — true if `s` contains substring `sub`
 * `starts_with(s, prefix)` — true if `s` starts with `prefix`
 * `ends_with(s, suffix)` — true if `s` ends with `suffix`
 * `matches(s, regex)` — true if `s` contains a match for the (RE2) regular expression `regex` (unanchored; use `^...$` for full-string match)
 
-Matching is **case-sensitive** (`"ERROR"` does not match `"error"`). Use `upper(s)` / `lower(s)` for case-insensitive checks.
+Predicates match on **UTF-8 text** (contiguous substring or regex over the string bytes), not by code-point index. Only `str_len` / `substr` use code-point units.
 
-Non-string values are converted with `AsString()` before matching (same as `upper` / `len`).
+Matching is **case-sensitive** (`"ERROR"` does not match `"error"`).
 
 Null arguments produce null. In `filter`, a null result drops the row (same as `false`).
+
+```
+dq 'users.csv | transform name_len = str_len(name)'
+dq 'nested.json | transform order_count = list_len(orders)'
+dq 'nested.json | filter { list_len(orders) > 1 } | select name'
+```
 
 Invalid regex in `matches()` fails the query when that row is evaluated (including patterns taken from a column).
 

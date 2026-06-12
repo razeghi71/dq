@@ -269,3 +269,16 @@ func TestCLIParseErrorOutputFormatNotLast(t *testing.T) {
 		t.Fatalf("expected parse error message, got:\n%s", out)
 	}
 }
+
+func TestCLILengthFunctionsSmoke(t *testing.T) {
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, `../../testdata/nested.json | transform n = list_len(orders) | filter { n > 1 } | count | csv`)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli: %v\n%s", err, out)
+	}
+	s := strings.TrimSpace(string(out))
+	if s != "count\n1" {
+		t.Fatalf("expected count\\n1, got:\n%s", s)
+	}
+}
