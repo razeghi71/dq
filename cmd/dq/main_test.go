@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,6 +34,23 @@ func TestCLIStdinWithFormat(t *testing.T) {
 	}
 }
 
+func TestCLIStdinWithOutputFormatJSONL(t *testing.T) {
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, "- with format=csv | select name | head 1 | jsonl")
+	cmd.Stdin = strings.NewReader("name,age\nAlice,30\nBob,25\n")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli: %v\n%s", err, out)
+	}
+	s := strings.TrimSpace(string(out))
+	if !strings.HasPrefix(s, "{") || !strings.Contains(s, `"name"`) || !strings.Contains(s, "Alice") {
+		t.Fatalf("expected JSONL object output, got:\n%s", s)
+	}
+	if strings.Contains(s, " | ") {
+		t.Fatalf("expected JSONL not table, got:\n%s", s)
+	}
+}
+
 func TestCLIFileWithHeaderFalse(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "rows.csv")
@@ -51,28 +69,8 @@ func TestCLIFileWithHeaderFalse(t *testing.T) {
 	}
 }
 
-func TestParseArgsRejectsFormatFlag(t *testing.T) {
-	cases := []string{
-		"-f csv users.csv | count",
-		"-format csv users.csv | count",
-		"-f csv",
-		"-f csv -- - | head",
-	}
-	for _, args := range cases {
-		t.Run(args, func(t *testing.T) {
-			_, _, err := parseArgs(strings.Fields(args))
-			if err == nil {
-				t.Fatalf("expected error for %q", args)
-			}
-			if !strings.Contains(err.Error(), "-f") && !strings.Contains(err.Error(), "format") {
-				t.Errorf("error should mention removed flag: %v", err)
-			}
-		})
-	}
-}
-
 func TestParseArgsFileQuery(t *testing.T) {
-	_, query, err := parseArgs([]string{"users.csv | head 10"})
+	query, err := parseArgs([]string{"users.csv | head 10"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +80,7 @@ func TestParseArgsFileQuery(t *testing.T) {
 }
 
 func TestParseArgsQueryWithLoadOptions(t *testing.T) {
-	_, query, err := parseArgs([]string{"- with format=csv | count"})
+	query, err := parseArgs([]string{"- with format=csv | count"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +90,7 @@ func TestParseArgsQueryWithLoadOptions(t *testing.T) {
 }
 
 func TestParseArgsNoQuery(t *testing.T) {
-	_, query, err := parseArgs(nil)
+	query, err := parseArgs(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +100,7 @@ func TestParseArgsNoQuery(t *testing.T) {
 }
 
 func TestParseArgsAgentGuide(t *testing.T) {
-	_, query, err := parseArgs([]string{"-agent-guide"})
+	query, err := parseArgs([]string{"-agent-guide"})
 	if err != errGuide {
 		t.Fatalf("got err=%v, want errGuide", err)
 	}
@@ -122,7 +120,7 @@ func TestAgentGuideMatchesREADME(t *testing.T) {
 }
 
 func TestParseArgsDoubleDash(t *testing.T) {
-	_, query, err := parseArgs([]string{"--", "- with format=csv | head"})
+	query, err := parseArgs([]string{"--", "- with format=csv | head"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,12 +129,143 @@ func TestParseArgsDoubleDash(t *testing.T) {
 	}
 }
 
-func TestParseArgsOutputFlag(t *testing.T) {
-	output, query, err := parseArgs([]string{"-o", "csv", "users.csv | count"})
+func TestCLIOutputFormatDefaultTable(t *testing.T) {
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, "../../testdata/users.csv | select name, age | head 2")
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("run cli: %v\n%s", err, out)
 	}
-	if output != "csv" || query != "users.csv | count" {
-		t.Fatalf("got output=%q query=%q", output, query)
+	s := string(out)
+	if !strings.Contains(s, "name") || !strings.Contains(s, "age") {
+		t.Fatalf("expected pretty table headers, got:\n%s", s)
+	}
+	if !strings.Contains(s, " | ") {
+		t.Fatalf("expected table column separator, got:\n%s", s)
+	}
+	if strings.HasPrefix(strings.TrimSpace(s), "name,age") {
+		t.Fatalf("expected table not CSV, got:\n%s", s)
+	}
+}
+
+func TestCLIOutputFormatExplicitTable(t *testing.T) {
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, "../../testdata/users.csv | select name, age | head 2 | table")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli: %v\n%s", err, out)
+	}
+	s := string(out)
+	if !strings.Contains(s, " | ") {
+		t.Fatalf("expected pretty table output, got:\n%s", s)
+	}
+}
+
+func TestCLIOutputFormatCSV(t *testing.T) {
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, "../../testdata/users.csv | select name, age | head 2 | csv")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli: %v\n%s", err, out)
+	}
+	s := strings.TrimSpace(string(out))
+	if !strings.HasPrefix(s, "name,age") {
+		t.Fatalf("expected CSV header, got:\n%s", s)
+	}
+	if strings.Contains(s, " | ") {
+		t.Fatalf("expected CSV not table, got:\n%s", s)
+	}
+}
+
+func TestCLIOutputFormatJSON(t *testing.T) {
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, "../../testdata/users.csv | select name, age | head 1 | json")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli: %v\n%s", err, out)
+	}
+	s := strings.TrimSpace(string(out))
+	if !strings.HasPrefix(s, "[") || !strings.Contains(s, `"name"`) {
+		t.Fatalf("expected JSON array output, got:\n%s", s)
+	}
+}
+
+func TestCLIOutputFormatJSONL(t *testing.T) {
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, "../../testdata/users.csv | select name | head 1 | jsonl")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli: %v\n%s", err, out)
+	}
+	s := strings.TrimSpace(string(out))
+	if !strings.HasPrefix(s, "{") || !strings.Contains(s, `"name"`) {
+		t.Fatalf("expected JSONL object output, got:\n%s", s)
+	}
+}
+
+func TestCLIOutputFormatZeroOpsCSV(t *testing.T) {
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, "../../testdata/users.csv | csv")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli: %v\n%s", err, out)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(string(out)), "name,age,city") {
+		t.Fatalf("expected CSV with header row, got:\n%s", out)
+	}
+}
+
+func TestCLIOutputFormatAfterCount(t *testing.T) {
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, "../../testdata/users.csv | count | json")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli: %v\n%s", err, out)
+	}
+	s := strings.TrimSpace(string(out))
+	if !strings.Contains(s, "[") {
+		t.Fatalf("expected JSON count output, got:\n%s", s)
+	}
+}
+
+func TestCLIOutputFormatAvro(t *testing.T) {
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, "../../testdata/users.csv | select name, age | head 2 | avro")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli: %v\n%s", err, out)
+	}
+	if len(out) == 0 {
+		t.Fatal("expected non-empty Avro output")
+	}
+	if !bytes.HasPrefix(out, []byte("Obj\x01")) {
+		t.Fatalf("expected Avro OCF header, got %d bytes", len(out))
+	}
+}
+
+func TestCLIOutputFormatParquet(t *testing.T) {
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, "../../testdata/users.csv | select name, age | head 2 | parquet")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli: %v\n%s", err, out)
+	}
+	if len(out) == 0 {
+		t.Fatal("expected non-empty Parquet output")
+	}
+	if !bytes.HasPrefix(out, []byte("PAR1")) {
+		t.Fatalf("expected Parquet magic bytes, got %d bytes", len(out))
+	}
+}
+
+func TestCLIParseErrorOutputFormatNotLast(t *testing.T) {
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, "../../testdata/users.csv | csv | head 2")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected parse error, got output:\n%s", out)
+	}
+	if !strings.Contains(string(out), "parse error") {
+		t.Fatalf("expected parse error message, got:\n%s", out)
 	}
 }

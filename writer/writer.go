@@ -7,12 +7,17 @@ import (
 	"io"
 	"strings"
 
+	"github.com/razeghi71/dq/ast"
 	"github.com/razeghi71/dq/table"
 )
 
 // Write writes the table to w in the specified format.
-// Supported formats: "table" (default), "csv", "json", "jsonl", "avro", "parquet".
+// Supported formats are listed by ast.OutputFormatsList().
 func Write(w io.Writer, t *table.Table, format string) error {
+	format, err := ast.CanonicalOutputFormat(format)
+	if err != nil {
+		return err
+	}
 	switch format {
 	case "", "table":
 		return writeTable(w, t)
@@ -27,7 +32,7 @@ func Write(w io.Writer, t *table.Table, format string) error {
 	case "parquet":
 		return writeParquet(w, t)
 	default:
-		return fmt.Errorf("unsupported output format %q (supported: table, csv, json, jsonl, avro, parquet)", format)
+		return fmt.Errorf("writer: unhandled output format %q", format)
 	}
 }
 

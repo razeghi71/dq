@@ -201,4 +201,7 @@ func (o *JoinOp) opNode() {}
 type Query struct {
 	Source *SourceOp
 	Ops    []Op
+	// Output is the terminal format command: "" = implicit table;
+	// table, csv, json, jsonl, avro, parquet when explicitly requested.
+	Output string
 }

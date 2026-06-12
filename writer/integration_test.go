@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	goavro "github.com/linkedin/goavro/v2"
+	"github.com/razeghi71/dq/ast"
 	"github.com/razeghi71/dq/engine"
 	"github.com/razeghi71/dq/loader"
 	"github.com/razeghi71/dq/parser"
@@ -641,6 +642,42 @@ func TestIntegrationBinaryNestedEmptyListRoundTrip(t *testing.T) {
 	}
 }
 
+// TestIntegrationQueryOutputEndToEnd runs parse → engine → writer using Query.Output from the query string.
+func TestIntegrationQueryOutputEndToEnd(t *testing.T) {
+	file := testdataDir + "/users.csv"
+	query := file + " | select name, age | head 2 | csv"
+
+	tbl, err := loader.Load(file, loader.Options{})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	q, err := parser.Parse(query)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if q.Output != "csv" {
+		t.Fatalf("Output: got %q, want csv", q.Output)
+	}
+
+	result, err := engine.Execute(q, tbl, nil)
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := Write(&buf, result, q.Output); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	out := strings.TrimSpace(buf.String())
+	if !strings.HasPrefix(out, "name,age") {
+		t.Fatalf("expected CSV header, got:\n%s", out)
+	}
+	if strings.Contains(out, " | ") {
+		t.Fatalf("expected CSV not table, got:\n%s", out)
+	}
+}
+
 // Test writing results from all supported input formats to all output formats.
 func TestIntegrationAllFormatsMatrix(t *testing.T) {
 	inputFiles := []string{
@@ -648,7 +685,7 @@ func TestIntegrationAllFormatsMatrix(t *testing.T) {
 		testdataDir + "/users.avro",
 		testdataDir + "/users.parquet",
 	}
-	outputFormats := []string{"table", "csv", "json", "jsonl", "avro", "parquet"}
+	outputFormats := ast.OutputFormatNames()
 
 	for _, file := range inputFiles {
 		for _, format := range outputFormats {

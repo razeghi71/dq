@@ -6,14 +6,6 @@ import (
 	"strings"
 )
 
-// SupportedLoadFormatsList is the user-facing list of load format names.
-const SupportedLoadFormatsList = "csv, json, jsonl, avro, parquet"
-
-// SupportedLoadFormats is the set of recognized load format names.
-var SupportedLoadFormats = map[string]bool{
-	"csv": true, "json": true, "jsonl": true, "avro": true, "parquet": true,
-}
-
 // EffectiveFormat returns the explicit format or inferred file extension.
 // Returns "" for stdin, globs, or extensionless literal paths when format is not set.
 func EffectiveFormat(filename, explicitFormat string) string {
@@ -28,14 +20,14 @@ func EffectiveFormat(filename, explicitFormat string) string {
 
 // IsSupportedLoadFormat reports whether name is a recognized load format.
 func IsSupportedLoadFormat(format string) bool {
-	return SupportedLoadFormats[strings.ToLower(format)]
+	return isSupportedFormat(supportedLoadFormats, format)
 }
 
 // ValidateLoadOptions checks format and CSV-only options when format is explicit.
 func ValidateLoadOptions(opts LoadOptions) error {
 	if opts.Format != "" {
 		if !IsSupportedLoadFormat(opts.Format) {
-			return fmt.Errorf("with: unsupported format %q (supported: %s)", opts.Format, SupportedLoadFormatsList)
+			return fmt.Errorf("with: unsupported format %q (supported: %s)", opts.Format, LoadFormatsList())
 		}
 	}
 	if opts.Format != "" && opts.Format != "csv" {
@@ -69,7 +61,7 @@ func validateCSVOnlyOptions(header *bool, delim, format, prefix string) error {
 		return nil
 	}
 	if format == "" || !IsSupportedLoadFormat(format) {
-		return fmt.Errorf("%scannot determine file format: use with format=... in query (%s)", prefix, SupportedLoadFormatsList)
+		return fmt.Errorf("%scannot determine file format: use with format=... in query (%s)", prefix, LoadFormatsList())
 	}
 	if header != nil {
 		return fmt.Errorf("%sheader applies only to csv format", prefix)

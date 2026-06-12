@@ -41,7 +41,7 @@ func validateUniformFormat(paths []string, format string) (string, error) {
 	for i, path := range paths {
 		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
 		if ext == "" {
-			return "", fmt.Errorf("cannot determine file format for %q: use with format=... in query (%s)", path, ast.SupportedLoadFormatsList)
+			return "", fmt.Errorf("cannot determine file format for %q: use with format=... in query (%s)", path, ast.LoadFormatsList())
 		}
 		resolved[i] = ext
 		seen[ext] = true

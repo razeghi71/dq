@@ -3,13 +3,15 @@
 ### Core structure
 
 ```
-dq 'filename | op [args] | op2 [args] ...'
+dq 'filename | op [args] | op2 [args] ... [| output_format]'
 ```
 
 * The entire query is passed as a **single-quoted string** to avoid shell interpretation of `|`, `{`, `}`, `>`, `<`, and backticks.
 * Takes a file (csv, avro, json, etc.) as input. Globs are supported (`logs/**/*.csv`, `orders/part-*.csv`) — matched files are concatenated. All matched files are loaded into memory before the pipeline runs. A zero-byte CSV (or BOM-/whitespace-only with no data rows) loads as an empty table (0 columns, 0 rows). Empty glob shards are skipped when establishing the column schema; the first non-empty shard defines the anchor columns. CSV glob shards without a detectable header row are read positionally under the first file's columns; extra cells per row are dropped. Extended headers require shared column names plus new lowercase identifiers (`email`, not `Email`); renamed columns with no anchor overlap are positional.
 * Optional **`with key=value, ...`** on the primary source or join file sets load format and CSV options (see Load options below).
+* Optional **output format command** at the end of the query (`table`, `csv`, `json`, `jsonl`, `avro`, `parquet`); omitted means pretty table output.
 * Everything is **pipe-based** — each op takes a table and returns a table.
+* **Column lists** (`select`, `sort`, `group`, `distinct`, `remove`) and **assignment lists** (`transform`, `reduce`, `rename`) are **comma-separated**. A single item needs no comma (see Syntax rules below).
 * Default state: all columns are selected unless explicitly changed.
 
 **Why single quotes?** Characters like `|`, `{`, `}`, `>`, `` ` `` are special in most shells. Wrapping the query in single quotes passes it through to `dq` untouched, similar to how `jq` works.
@@ -87,7 +89,7 @@ Separate assignments with **commas**. Use a single **`=`** (not `==`).
 
 Rules:
 * `rename` pairs use `old=new` bindings (same `=` style as `transform`; whitespace around `=` is ignored).
-* `reduce` takes an optional nested column name **before** the assignments (space-separated, not comma): `reduce entries max_age = max(age), count = count()`.
+* `reduce` takes an optional nested column name as a **single identifier** before the assignments: `reduce entries max_age = max(age), count = count()`.
 
 ### Comparisons (double `==`, not comma lists)
 
@@ -309,6 +311,27 @@ dq 'users.csv | join full orders.csv on id == customer_id and region == region'
 Each key is either a column path (same name on both sides) or `left_path == right_path`. Join key columns appear once under the left-side name; dot-path keys get a flattened column (`address.city` -> `address_city`, suffixed if taken). Colliding right-side columns are prefixed with the join file basename (for globs, derived from the pattern — e.g. `orders/*.csv` with colliding column `note` -> `orders_note`).
 
 The join file's format comes from its extension unless overridden with `with format=...` on the join path. Join sources support globs (`orders/part-*.csv`); matched files are concatenated before the join. Null keys never match. Keys match by value representation (consistent with `group`/`distinct`), so `1` matches `"1"` across formats.
+
+---
+
+## Output format commands
+
+Optional terminal stage after the pipeline. At most one per query; must be last (reject `| csv | head`).
+
+```
+output_cmd ::= "table" | "csv" | "json" | "jsonl" | "avro" | "parquet"
+```
+
+Omitted `output_cmd` → pretty **table** (same as `| table` for rendering).
+
+```
+dq 'users.csv | select name, age'
+dq 'users.csv | select name, age | csv'
+dq 'users.csv | count | json'
+cat data.csv | dq '- with format=csv | count | jsonl'
+```
+
+Not lexer keywords — only recognized as the final `|`-stage. Column names like `csv` in `{ csv == "x" }` are unaffected.
 
 ---
 

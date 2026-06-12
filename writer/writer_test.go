@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/razeghi71/dq/ast"
 	"github.com/razeghi71/dq/table"
 )
 
@@ -233,14 +234,21 @@ func TestWriteJSONEmpty(t *testing.T) {
 }
 
 func TestWriteUnsupportedFormat(t *testing.T) {
-	var buf bytes.Buffer
 	tbl := table.NewTable([]string{"x"})
-	err := Write(&buf, tbl, "xml")
-	if err == nil {
-		t.Fatal("expected error for unsupported format")
-	}
-	if !strings.Contains(err.Error(), "unsupported") {
-		t.Errorf("expected 'unsupported' in error, got: %v", err)
+	for _, format := range []string{"xml", "XML", "tsv"} {
+		t.Run(format, func(t *testing.T) {
+			var buf bytes.Buffer
+			err := Write(&buf, tbl, format)
+			if err == nil {
+				t.Fatal("expected error for unsupported format")
+			}
+			if !strings.Contains(err.Error(), "unsupported output format") {
+				t.Errorf("expected unsupported output format in error, got: %v", err)
+			}
+			if !strings.Contains(err.Error(), ast.OutputFormatsList()) {
+				t.Errorf("expected supported formats list in error, got: %v", err)
+			}
+		})
 	}
 }
 

@@ -77,8 +77,17 @@ func (p *Parser) parseQuery() (*ast.Query, error) {
 	}
 
 	var ops []ast.Op
+	var output string
 	for p.peek().Type == lexer.TokenPipe {
 		p.advance() // consume |
+		format, ok, err := p.tryParseOutputCommand()
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			output = format
+			break
+		}
 		op, err := p.parseOp()
 		if err != nil {
 			return nil, err
@@ -90,7 +99,26 @@ func (p *Parser) parseQuery() (*ast.Query, error) {
 		return nil, fmt.Errorf("unexpected token %s (%q) at position %d", p.peek().Type, p.peek().Val, p.peek().Pos)
 	}
 
-	return &ast.Query{Source: source, Ops: ops}, nil
+	return &ast.Query{Source: source, Ops: ops, Output: output}, nil
+}
+
+func (p *Parser) tryParseOutputCommand() (string, bool, error) {
+	tok := p.peek()
+	if tok.Type != lexer.TokenIdent {
+		return "", false, nil
+	}
+	format, err := ast.CanonicalOutputFormat(tok.Val)
+	if err != nil {
+		return "", false, nil
+	}
+	p.advance()
+	if p.peek().Type == lexer.TokenPipe {
+		return "", false, fmt.Errorf("output format command %q must be the last pipeline stage", format)
+	}
+	if p.peek().Type != lexer.TokenEOF {
+		return "", false, fmt.Errorf("unexpected token %s (%q) after output format %q at position %d", p.peek().Type, p.peek().Val, format, p.peek().Pos)
+	}
+	return format, true, nil
 }
 
 func (p *Parser) parseSource() (*ast.SourceOp, error) {

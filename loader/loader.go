@@ -34,7 +34,7 @@ func LoadInput(filename string, opts Options, stdin io.Reader) (*table.Table, er
 	opts = normalizeOptions(opts)
 	if IsStdin(filename) {
 		if opts.Format == "" {
-			return nil, fmt.Errorf("reading from stdin requires with format=... in query (csv, json, jsonl)")
+			return nil, fmt.Errorf("reading from stdin requires with format=... in query (%s)", ast.StreamFormatsList())
 		}
 		if err := validateOptionsForFormat(opts, opts.Format); err != nil {
 			return nil, err
@@ -82,9 +82,9 @@ func loadFile(filename string, opts Options, csvColumns []string) (*table.Table,
 		return loadParquet(filename)
 	default:
 		if format == "" {
-			return nil, fmt.Errorf("cannot determine file format for %q: use with format=... in query (%s)", filename, ast.SupportedLoadFormatsList)
+			return nil, fmt.Errorf("cannot determine file format for %q: use with format=... in query (%s)", filename, ast.LoadFormatsList())
 		}
-		return nil, fmt.Errorf("unsupported format %q (supported: %s)", format, ast.SupportedLoadFormatsList)
+		return nil, fmt.Errorf("unsupported format %q (supported: %s)", format, ast.LoadFormatsList())
 	}
 }
 
@@ -187,7 +187,7 @@ func LoadReader(r io.Reader, opts Options) (*table.Table, error) {
 	case "jsonl":
 		return loadJSONLReader(r)
 	default:
-		return nil, fmt.Errorf("LoadReader: unsupported format %q (supported: csv, json, jsonl)", opts.Format)
+		return nil, fmt.Errorf("LoadReader: unsupported format %q (supported: %s)", opts.Format, ast.StreamFormatsList())
 	}
 }
 

@@ -4,7 +4,7 @@ Query CSV, JSON, Avro, and Parquet files from the command line. Pipe operations 
 
 ```bash
 dq 'users.csv | filter { age > 25 } | select name, city | sort name'
-dq -o csv 'users.json | filter { age > 25 }' > filtered.csv
+dq 'users.json | filter { age > 25 } | csv' > filtered.csv
 ```
 
 ## Install
@@ -35,7 +35,7 @@ go build -ldflags="-s -w" -o dq ./cmd/dq
 Every query starts with a file or stdin and pipes it through operations. Each operation takes a table in and returns a table out.
 
 ```
-dq 'data.dat [with format=..., delim=..., ...] | operation1 | operation2 | ...'
+dq 'data.dat [with format=..., delim=..., ...] | operation1 | operation2 | ... [| output_format]'
 ```
 
 Wrap queries in single quotes so your shell doesn't interpret `|`, `{`, `}`, or `>`.
@@ -233,25 +233,28 @@ Missing sub-fields return null.
 
 ## Output Formats
 
-By default `dq` prints a pretty ASCII table. Use `-o` to change the output format:
+By default `dq` prints a pretty ASCII table. Append a terminal format command to change how results are written:
 
 ```bash
 dq 'users.csv | select name, age'                        # table (default)
-dq -o csv  'users.csv | select name, age' > out.csv      # CSV
-dq -o json 'users.csv | select name, age' > out.json     # JSON array of objects
-dq -o jsonl 'users.csv | select name, age' > out.jsonl   # one JSON object per line
-dq -o avro 'users.csv | select name, age' > out.avro     # Avro object container file
-dq -o parquet 'users.csv | select name, age' > out.parquet # Parquet file
+dq 'users.csv | select name, age | table'                  # explicit table
+dq 'users.csv | select name, age | csv' > out.csv          # CSV
+dq 'users.csv | select name, age | json' > out.json        # JSON array of objects
+dq 'users.csv | select name, age | jsonl' > out.jsonl      # one JSON object per line
+dq 'users.csv | select name, age | avro' > out.avro        # Avro object container file
+dq 'users.csv | select name, age | parquet' > out.parquet  # Parquet file
 ```
 
-| Format  | Flag          | Notes                                                    |
-|---------|---------------|----------------------------------------------------------|
-| `table` | default       | Pretty-printed ASCII table                               |
-| `csv`   | `-o csv`      | Standard CSV. Nulls render as empty strings.             |
-| `json`  | `-o json`     | JSON array. Preserves types (ints, bools, nulls, nested).|
-| `jsonl` | `-o jsonl`    | One JSON object per line. Same type preservation as JSON. |
-| `avro`  | `-o avro`     | Avro object container file. Field names must match `[A-Za-z_][A-Za-z0-9_]*`. Requires at least one output column. |
-| `parquet` | `-o parquet` | Parquet file. Requires at least one output column. Column order is preserved via file metadata. |
+Output format commands (`table`, `csv`, `json`, `jsonl`, `avro`, `parquet`) must be the last stage in the query — nothing may follow except end of query.
+
+| Format  | Command   | Notes                                                    |
+|---------|-----------|----------------------------------------------------------|
+| `table` | *(default)* or `\| table` | Pretty-printed ASCII table                   |
+| `csv`   | `\| csv`  | Standard CSV. Nulls render as empty strings.             |
+| `json`  | `\| json` | JSON array. Preserves types (ints, bools, nulls, nested).|
+| `jsonl` | `\| jsonl`| One JSON object per line. Same type preservation as JSON. |
+| `avro`  | `\| avro` | Avro object container file. Field names must match `[A-Za-z_][A-Za-z0-9_]*`. Requires at least one output column. |
+| `parquet` | `\| parquet` | Parquet file. Requires at least one output column. Column order is preserved via file metadata. |
 
 ## Supported Input Formats
 
