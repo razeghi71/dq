@@ -314,10 +314,39 @@ func TestParseNullEqualityRejected(t *testing.T) {
 	}
 }
 
+func TestParseNotNullLiteralRejected(t *testing.T) {
+	cases := []struct {
+		name    string
+		query   string
+		wantMsg string
+	}{
+		{"filter", "users.csv | filter { not null }", `use "is not null" for null checks, not "not null"`},
+		{"transform", "users.csv | transform x = not null", `use "is not null" for null checks, not "not null"`},
+		{"parens", "users.csv | filter { not (null) }", `use "is not null" for null checks, not "not null"`},
+		{"inside_or", "users.csv | filter { age > 20 or not null }", `use "is not null" for null checks, not "not null"`},
+		{"inside_and", "users.csv | filter { not null and age > 20 }", `use "is not null" for null checks, not "not null"`},
+		{"in_if", `users.csv | transform x = if(not null, 0, age)`, `use "is not null" for null checks, not "not null"`},
+		{"in_reduce", "users.csv | group name | reduce grouped total = if(not null, 1, 0)", `use "is not null" for null checks, not "not null"`},
+		{"double_not", "users.csv | filter { not not null }", `use "is not null" for null checks, not "not null"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse(tc.query)
+			if err == nil {
+				t.Fatalf("expected parse error for %q", tc.query)
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.wantMsg)
+			}
+		})
+	}
+}
+
 func TestParseNullLiteralStillAllowed(t *testing.T) {
 	valid := []string{
 		"users.csv | filter { age is null }",
 		"users.csv | filter { age is not null }",
+		"users.csv | filter { not age is null }",
 		"users.csv | transform x = coalesce(age, null)",
 		`users.csv | transform x = if(age is null, 0, age)`,
 		"users.csv | filter { age > 20 }",

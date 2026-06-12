@@ -840,6 +840,9 @@ func (p *Parser) parseUnary() (ast.Expr, error) {
 		if err != nil {
 			return nil, err
 		}
+		if isNullLiteral(operand) {
+			return nil, fmt.Errorf(`use "is not null" for null checks, not "not null"`)
+		}
 		return &ast.UnaryExpr{Op: "not", Operand: operand}, nil
 	}
 	if p.peek().Type == lexer.TokenMinus {
