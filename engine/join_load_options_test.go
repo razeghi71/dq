@@ -195,6 +195,54 @@ func TestIntegrationJoinWithLoadOptions(t *testing.T) {
 		}
 	})
 
+	t.Run("jagged_and_ignore_unknown", func(t *testing.T) {
+		dir := t.TempDir()
+		left, usersPath := loadUsersCSV(t, dir)
+		ordersPath := filepath.Join(dir, "orders.dat")
+		// Row 2 is jagged (missing trailing column); row 3 has an extra column.
+		if err := os.WriteFile(ordersPath, []byte("user_name,status,note\nAlice,shipped,x\nBob,pending\nCharlie,cancelled,ignored,drop\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		q, err := parser.Parse(usersPath + ` | join ` + ordersPath + ` with format=csv, allow_jagged_rows=true, ignore_unknown_values=true on name == user_name | sort name`)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		j := q.Ops[0].(*ast.JoinOp)
+		if j.Load.AllowJaggedRows == nil || !*j.Load.AllowJaggedRows {
+			t.Fatalf("join allow_jagged_rows=true: got %v", j.Load.AllowJaggedRows)
+		}
+		if j.Load.IgnoreUnknownValues == nil || !*j.Load.IgnoreUnknownValues {
+			t.Fatalf("join ignore_unknown_values=true: got %v", j.Load.IgnoreUnknownValues)
+		}
+
+		var gotOpts ast.LoadOptions
+		loadFunc := func(filename string, opts ast.LoadOptions) (*table.Table, error) {
+			gotOpts = opts
+			return loader.Load(filename, loader.FromAST(opts))
+		}
+
+		result, err := Execute(q, left, loadFunc)
+		if err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+		if gotOpts.AllowJaggedRows == nil || !*gotOpts.AllowJaggedRows {
+			t.Fatalf("load callback allow_jagged_rows: got %v", gotOpts.AllowJaggedRows)
+		}
+		if gotOpts.IgnoreUnknownValues == nil || !*gotOpts.IgnoreUnknownValues {
+			t.Fatalf("load callback ignore_unknown_values: got %v", gotOpts.IgnoreUnknownValues)
+		}
+		if result.NumRows != 2 {
+			t.Fatalf("expected 2 rows, got %d: %s", result.NumRows, result.String())
+		}
+		if result.Get(0, "name").Str != "Alice" || result.Get(0, "status").Str != "shipped" || result.Get(0, "note").Str != "x" {
+			t.Fatalf("Alice row: got %s", result.String())
+		}
+		if result.Get(1, "name").Str != "Bob" || result.Get(1, "status").Str != "pending" || !result.Get(1, "note").IsNull() {
+			t.Fatalf("Bob row (jagged note null-filled): got %s", result.String())
+		}
+	})
+
 	t.Run("header_false", func(t *testing.T) {
 		dir := t.TempDir()
 		left, usersPath := loadUsersCSV(t, dir)

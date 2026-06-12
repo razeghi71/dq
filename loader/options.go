@@ -9,9 +9,11 @@ import (
 // Options configures how a file or stdin stream is loaded.
 // Zero value keeps extension-based inference and CSV defaults.
 type Options struct {
-	Format string
-	Header *bool
-	Delim  string
+	Format              string
+	Header              *bool
+	Delim               string
+	AllowJaggedRows     *bool
+	IgnoreUnknownValues *bool
 }
 
 func normalizeOptions(o Options) Options {
@@ -24,8 +26,10 @@ func normalizeOptions(o Options) Options {
 // FromAST converts parser load options to loader options.
 func FromAST(o ast.LoadOptions) Options {
 	return normalizeOptions(Options{
-		Format: o.Format,
-		Header: o.Header,
-		Delim:  o.Delim,
+		Format:              o.Format,
+		Header:              o.Header,
+		Delim:               o.Delim,
+		AllowJaggedRows:     o.AllowJaggedRows,
+		IgnoreUnknownValues: o.IgnoreUnknownValues,
 	})
 }

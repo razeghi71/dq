@@ -210,7 +210,15 @@ func TestLoadGlobCSVExtendedHeaderPascalCaseLimitation(t *testing.T) {
 		"b.csv": "id,name,Email\n2,Bob,bob@x.com\n",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
+	_, err := Load(filepath.Join(dir, "*.csv"), Options{})
+	if err == nil {
+		t.Fatal("expected error for extra field on misclassified header row with strict CSV options")
+	}
+	if !strings.Contains(err.Error(), "ignore_unknown_values=true") {
+		t.Fatalf("error should suggest ignore_unknown_values: %v", err)
+	}
+
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{IgnoreUnknownValues: BoolPtr(true)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +262,15 @@ func TestLoadGlobCSVPositionalExtraColumnsDropped(t *testing.T) {
 		"b.csv": "2,Bob,extra@x.com\n",
 	})
 
-	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
+	_, err := Load(filepath.Join(dir, "*.csv"), Options{})
+	if err == nil {
+		t.Fatal("expected error for extra columns with default strict CSV options")
+	}
+	if !strings.Contains(err.Error(), "ignore_unknown_values=true") {
+		t.Fatalf("error should suggest ignore_unknown_values: %v", err)
+	}
+
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{IgnoreUnknownValues: BoolPtr(true)})
 	if err != nil {
 		t.Fatal(err)
 	}

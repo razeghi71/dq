@@ -297,7 +297,7 @@ dq 'users.csv | join left orders/part-*.csv on user_id'
 - Matched files are loaded and concatenated (column union; missing values are null).
 - Matched paths are sorted lexicographically (use zero-padded partition names like `part-001` for correct order).
 - CSV shards after the first: repeated headers are skipped; reordered or extended headers are detected when the first row is clearly a header (shared column names, new lowercase identifiers such as `email`, not `Email`). Otherwise rows are read positionally under the first file's columns.
-- Positional shards: values map to the first file's columns by position; extra cells in a row beyond that width are dropped (no error).
+- Positional shards: values map to the first file's columns by position. CSV row-width rules match single-file loading (strict by default): use `with format=csv, allow_jagged_rows=true` and/or `with format=csv, ignore_unknown_values=true` on globs (format is required at parse time for CSV-only options).
 - Renamed columns with no overlap with the first file's header (e.g. `user_id` vs anchor `id`) are read positionally, not by name.
 - Literal paths with `[` (e.g. `data[1].csv`) are not globs unless `*`, `?`, or `{` is present.
 - All matched files are loaded into memory before the pipeline runs.

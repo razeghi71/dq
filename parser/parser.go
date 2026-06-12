@@ -152,9 +152,11 @@ func (p *Parser) parseSource() (*ast.SourceOp, error) {
 }
 
 var loadOptionKeys = map[string]bool{
-	"format": true,
-	"header": true,
-	"delim":  true,
+	"format":                true,
+	"header":                true,
+	"delim":                 true,
+	"allow_jagged_rows":     true,
+	"ignore_unknown_values": true,
 }
 
 func (p *Parser) parseOptionalWithClause() (ast.LoadOptions, error) {
@@ -195,16 +197,30 @@ func (p *Parser) parseWithClause() (ast.LoadOptions, error) {
 				return ast.LoadOptions{}, fmt.Errorf("with: format value must be an identifier, got %s", valTok.Type)
 			}
 			opts.Format = strings.ToLower(valTok.Val)
-		case "header":
+		case "header", "allow_jagged_rows", "ignore_unknown_values":
 			switch valTok.Type {
 			case lexer.TokenTrue:
 				v := true
-				opts.Header = &v
+				switch keyTok.Val {
+				case "header":
+					opts.Header = &v
+				case "allow_jagged_rows":
+					opts.AllowJaggedRows = &v
+				default:
+					opts.IgnoreUnknownValues = &v
+				}
 			case lexer.TokenFalse:
 				v := false
-				opts.Header = &v
+				switch keyTok.Val {
+				case "header":
+					opts.Header = &v
+				case "allow_jagged_rows":
+					opts.AllowJaggedRows = &v
+				default:
+					opts.IgnoreUnknownValues = &v
+				}
 			default:
-				return ast.LoadOptions{}, fmt.Errorf("with: header value must be true or false, got %s", valTok.Type)
+				return ast.LoadOptions{}, fmt.Errorf("with: %s value must be true or false, got %s", keyTok.Val, valTok.Type)
 			}
 		case "delim":
 			if valTok.Type != lexer.TokenString {

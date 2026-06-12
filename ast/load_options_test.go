@@ -76,10 +76,13 @@ func TestValidateLoadOptionsForFilenameCSVExtension(t *testing.T) {
 }
 
 func TestValidateCSVOnlyOptionsForFormat(t *testing.T) {
-	if err := ValidateCSVOnlyOptionsForFormat(boolPtr(false), "", "dat", ""); err == nil {
+	if err := ValidateCSVOnlyOptionsForFormat(LoadOptions{Header: boolPtr(false)}, "dat", ""); err == nil {
 		t.Fatal("expected error for csv option on unknown format")
 	}
-	if err := ValidateCSVOnlyOptionsForFormat(nil, ";", "csv", ""); err != nil {
+	if err := ValidateCSVOnlyOptionsForFormat(LoadOptions{Delim: ";"}, "csv", ""); err != nil {
 		t.Fatalf("csv format should allow delim: %v", err)
+	}
+	if err := ValidateCSVOnlyOptionsForFormat(LoadOptions{IgnoreUnknownValues: boolPtr(true)}, "json", ""); err == nil {
+		t.Fatal("expected error for ignore_unknown_values on json")
 	}
 }

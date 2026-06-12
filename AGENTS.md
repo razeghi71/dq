@@ -7,7 +7,7 @@ dq 'filename | op [args] | op2 [args] ... [| output_format]'
 ```
 
 * The entire query is passed as a **single-quoted string** to avoid shell interpretation of `|`, `{`, `}`, `>`, `<`, and backticks.
-* Takes a file (csv, avro, json, etc.) as input. Globs are supported (`logs/**/*.csv`, `orders/part-*.csv`) — matched files are concatenated. All matched files are loaded into memory before the pipeline runs. A zero-byte CSV (or BOM-/whitespace-only with no data rows) loads as an empty table (0 columns, 0 rows). Empty glob shards are skipped when establishing the column schema; the first non-empty shard defines the anchor columns. CSV glob shards without a detectable header row are read positionally under the first file's columns; extra cells per row are dropped. Extended headers require shared column names plus new lowercase identifiers (`email`, not `Email`); renamed columns with no anchor overlap are positional.
+* Takes a file (csv, avro, json, etc.) as input. Globs are supported (`logs/**/*.csv`, `orders/part-*.csv`) — matched files are concatenated. All matched files are loaded into memory before the pipeline runs. A zero-byte CSV (or BOM-/whitespace-only with no data rows) loads as an empty table (0 columns, 0 rows). Empty glob shards are skipped when establishing the column schema; the first non-empty shard defines the anchor columns. CSV rows must match the schema width by default (same rules for single files and glob shards); use `with allow_jagged_rows=true` for missing trailing columns (null-filled) and `with ignore_unknown_values=true` to drop extra columns. On glob sources, CSV-only options require `with format=csv` at parse time (e.g. `logs/part-* with format=csv, allow_jagged_rows=true`) — format cannot be inferred from the pattern alone. CSV glob shards without a detectable header row are read positionally under the first file's columns. Extended headers require shared column names plus new lowercase identifiers (`email`, not `Email`); renamed columns with no anchor overlap are positional.
 * Optional **`with key=value, ...`** on the primary source or join file sets load format and CSV options (see Load options below).
 * Optional **output format command** at the end of the query (`table`, `csv`, `json`, `jsonl`, `avro`, `parquet`); omitted means pretty table output.
 * Everything is **pipe-based** — each op takes a table and returns a table.
@@ -40,6 +40,7 @@ Examples:
 ```
 data.dat with format=csv | head 5
 logs/part-* with format=csv | count
+logs/part-* with format=csv, allow_jagged_rows=true, ignore_unknown_values=true | count
 - with format=csv | filter { age > 25 }
 users.csv | join left orders/part-*.dat with format=csv, delim=";" on user_id == customer_id
 ```
@@ -49,8 +50,10 @@ users.csv | join left orders/part-*.dat with format=csv, delim=";" on user_id ==
 | `format` | all | `csv`, `json`, `jsonl`, `avro`, `parquet` | Overrides extension; required when extension missing |
 | `header` | csv | `true`, `false` | Default `true`; `false` uses `col1`, `col2`, … from first row width |
 | `delim` | csv | string, e.g. `delim=";"` | Default `,`; only the first character is used as the separator |
+| `allow_jagged_rows` | csv | `true`, `false` | Default `false`; when `true`, rows with fewer fields than the schema get null-filled trailing columns |
+| `ignore_unknown_values` | csv | `true`, `false` | Default `false`; when `true`, extra fields beyond the schema are dropped |
 
-Format resolution: explicit `format=` → file extension → error (`use with format=...`). Stdin (`-`) requires `with format=...`. Use `with format=...` when a glob matches mixed or missing extensions.
+Format resolution: explicit `format=` → file extension → error (`use with format=...`). Stdin (`-`) requires `with format=...`. Globs and extensionless paths cannot infer format at parse time — use `with format=...` before any CSV-only option (`header`, `delim`, `allow_jagged_rows`, `ignore_unknown_values`), e.g. `part-* with format=csv, allow_jagged_rows=true`. Use `with format=...` when a glob matches mixed or missing extensions at load time.
 
 ---
 

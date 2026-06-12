@@ -31,7 +31,7 @@ func ValidateLoadOptions(opts LoadOptions) error {
 		}
 	}
 	if opts.Format != "" && opts.Format != "csv" {
-		return validateCSVOnlyOptions(opts.Header, opts.Delim, opts.Format, "with: ")
+		return validateCSVOnlyOptions(opts, opts.Format, "with: ")
 	}
 	return nil
 }
@@ -45,16 +45,16 @@ func ValidateLoadOptionsForFilename(filename string, opts LoadOptions) error {
 		return nil
 	}
 	format := EffectiveFormat(filename, "")
-	return validateCSVOnlyOptions(opts.Header, opts.Delim, format, "with: ")
+	return validateCSVOnlyOptions(opts, format, "with: ")
 }
 
-// ValidateCSVOnlyOptionsForFormat checks header/delim against a resolved format (load-time).
-func ValidateCSVOnlyOptionsForFormat(header *bool, delim, format, prefix string) error {
-	return validateCSVOnlyOptions(header, delim, format, prefix)
+// ValidateCSVOnlyOptionsForFormat checks CSV-only load options against a resolved format (load-time).
+func ValidateCSVOnlyOptionsForFormat(opts LoadOptions, format, prefix string) error {
+	return validateCSVOnlyOptions(opts, format, prefix)
 }
 
-func validateCSVOnlyOptions(header *bool, delim, format, prefix string) error {
-	if header == nil && delim == "" {
+func validateCSVOnlyOptions(opts LoadOptions, format, prefix string) error {
+	if opts.Header == nil && opts.Delim == "" && opts.AllowJaggedRows == nil && opts.IgnoreUnknownValues == nil {
 		return nil
 	}
 	if format == "csv" {
@@ -63,8 +63,14 @@ func validateCSVOnlyOptions(header *bool, delim, format, prefix string) error {
 	if format == "" || !IsSupportedLoadFormat(format) {
 		return fmt.Errorf("%scannot determine file format: use with format=... in query (%s)", prefix, LoadFormatsList())
 	}
-	if header != nil {
+	if opts.Header != nil {
 		return fmt.Errorf("%sheader applies only to csv format", prefix)
 	}
-	return fmt.Errorf("%sdelim applies only to csv format", prefix)
+	if opts.Delim != "" {
+		return fmt.Errorf("%sdelim applies only to csv format", prefix)
+	}
+	if opts.AllowJaggedRows != nil {
+		return fmt.Errorf("%sallow_jagged_rows applies only to csv format", prefix)
+	}
+	return fmt.Errorf("%signore_unknown_values applies only to csv format", prefix)
 }

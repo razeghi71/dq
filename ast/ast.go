@@ -66,9 +66,11 @@ type Assignment struct {
 // LoadOptions configures how a source file is loaded.
 // Zero value keeps extension-based inference and CSV defaults (header row, comma delim).
 type LoadOptions struct {
-	Format string // optional override: csv, json, jsonl, avro, parquet
-	Header *bool  // csv only; nil = default (true)
-	Delim  string // csv only; "" = comma
+	Format              string // optional override: csv, json, jsonl, avro, parquet
+	Header              *bool  // csv only; nil = default (true)
+	Delim               string // csv only; "" = comma
+	AllowJaggedRows     *bool  // csv only; nil = default (false)
+	IgnoreUnknownValues *bool  // csv only; nil = default (false)
 }
 
 // --- Operations (pipeline stages) ---

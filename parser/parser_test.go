@@ -1211,6 +1211,19 @@ func TestParseSourceWithLoadOptions(t *testing.T) {
 			t.Errorf("format: expected empty, got %q", q.Source.Load.Format)
 		}
 	})
+
+	t.Run("csv_row_shape_options", func(t *testing.T) {
+		q, err := Parse(`data.csv with allow_jagged_rows=true, ignore_unknown_values=true | count`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if q.Source.Load.AllowJaggedRows == nil || *q.Source.Load.AllowJaggedRows != true {
+			t.Errorf("allow_jagged_rows: got %v", q.Source.Load.AllowJaggedRows)
+		}
+		if q.Source.Load.IgnoreUnknownValues == nil || *q.Source.Load.IgnoreUnknownValues != true {
+			t.Errorf("ignore_unknown_values: got %v", q.Source.Load.IgnoreUnknownValues)
+		}
+	})
 }
 
 func TestParseJoinWithLoadOptions(t *testing.T) {
@@ -1280,6 +1293,8 @@ func TestParseWithLoadOptionsRejected(t *testing.T) {
 		{"with_after_on", "users.csv | join orders.csv on id with format=csv", "with"},
 		{"csv_header_on_json", "data.json with format=json, header=false | head", "header"},
 		{"csv_delim_on_json", "data.json with format=json, delim=\";\" | head", "delim"},
+		{"csv_allow_jagged_on_json", "data.json with format=json, allow_jagged_rows=true | head", "allow_jagged_rows"},
+		{"csv_ignore_unknown_on_json", "data.json with format=json, ignore_unknown_values=true | head", "ignore_unknown_values"},
 		{"inferred_json_header", "data.json with header=false | head", "header"},
 		{"inferred_json_delim", "data.json with delim=\";\" | head", "delim"},
 		{"join_inferred_json_header", "users.csv | join data.json with header=false on id", "header"},

@@ -134,7 +134,7 @@ func loadGlobCSV(pattern string, matches []string, opts Options) (*table.Table, 
 		if len(anchor) == 0 {
 			tbl, err = loadCSV(path, cfg)
 		} else {
-			tbl, err = loadCSVGlobShard(path, anchor, cfg.delim)
+			tbl, err = loadCSVGlobShard(path, anchor, cfg)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("loading glob %q: loading %q: %w", pattern, path, err)
@@ -164,7 +164,7 @@ func loadGlobCSVHeaderless(pattern string, matches []string, cfg csvLoadConfig) 
 				anchor = append([]string(nil), tbl.Columns...)
 			}
 		} else {
-			tbl, err = loadCSVPositional(path, anchor, cfg.delim)
+			tbl, err = loadCSVPositional(path, anchor, cfg)
 			if err != nil {
 				return nil, fmt.Errorf("loading glob %q: loading %q: %w", pattern, path, err)
 			}
@@ -192,9 +192,11 @@ func LoadReader(r io.Reader, opts Options) (*table.Table, error) {
 }
 
 type csvLoadConfig struct {
-	columns []string
-	header  bool
-	delim   rune
+	columns             []string
+	header              bool
+	delim               rune
+	allowJaggedRows     bool
+	ignoreUnknownValues bool
 }
 
 func csvConfigFromOptions(opts Options, columns []string) csvLoadConfig {
@@ -209,6 +211,12 @@ func csvConfigFromOptions(opts Options, columns []string) csvLoadConfig {
 	if opts.Delim != "" {
 		cfg.delim = []rune(opts.Delim)[0]
 	}
+	if opts.AllowJaggedRows != nil {
+		cfg.allowJaggedRows = *opts.AllowJaggedRows
+	}
+	if opts.IgnoreUnknownValues != nil {
+		cfg.ignoreUnknownValues = *opts.IgnoreUnknownValues
+	}
 	return cfg
 }
 
@@ -221,7 +229,12 @@ func synthesizeColumns(n int) []string {
 }
 
 func validateOptionsForFormat(opts Options, format string) error {
-	return ast.ValidateCSVOnlyOptionsForFormat(opts.Header, opts.Delim, format, "")
+	return ast.ValidateCSVOnlyOptionsForFormat(ast.LoadOptions{
+		Header:              opts.Header,
+		Delim:               opts.Delim,
+		AllowJaggedRows:     opts.AllowJaggedRows,
+		IgnoreUnknownValues: opts.IgnoreUnknownValues,
+	}, format, "")
 }
 
 func loadCSV(filename string, cfg csvLoadConfig) (*table.Table, error) {
@@ -233,17 +246,14 @@ func loadCSV(filename string, cfg csvLoadConfig) (*table.Table, error) {
 	return loadCSVReader(f, cfg)
 }
 
-func loadCSVPositional(path string, columns []string, delim rune) (*table.Table, error) {
+func loadCSVPositional(path string, columns []string, cfg csvLoadConfig) (*table.Table, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open %s: %w", path, err)
 	}
 	defer f.Close()
 
-	reader := csv.NewReader(f)
-	reader.TrimLeadingSpace = true
-	reader.Comma = delim
-	return readCSVRows(reader, columns)
+	return readCSVRows(newCSVReader(f, cfg.delim), columns, cfg, 1)
 }
 
 const utf8BOM = "\ufeff"
@@ -283,6 +293,41 @@ func trimmedCSVFields(row []string) []string {
 		out[i] = f
 	}
 	return out
+}
+
+// isPhysicalBlankCSVLine reports a delimiter-free whitespace/BOM-only line (single empty
+// unquoted field). Used only before schema/header is established to skip padding lines.
+// Structured records — including comma-only rows like "," — are never treated as blank.
+func isPhysicalBlankCSVLine(record []string) bool {
+	if len(record) != 1 {
+		return false
+	}
+	for _, col := range trimmedCSVFields(record) {
+		if col != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// readFirstNonBlankCSVRow skips physical blank lines and returns the first structured row.
+// empty is true when only blank lines remain until EOF.
+func readFirstNonBlankCSVRow(reader *csv.Reader, startRow int) (record []string, rowNum int, empty bool, err error) {
+	rowNum = startRow
+	for {
+		record, err = reader.Read()
+		if err == io.EOF {
+			return nil, 0, true, nil
+		}
+		if err != nil {
+			return nil, 0, false, fmt.Errorf("error reading CSV row: %w", err)
+		}
+		if isPhysicalBlankCSVLine(record) {
+			rowNum++
+			continue
+		}
+		return record, rowNum, false, nil
+	}
 }
 
 func csvRowLooksLikeData(cells []string) bool {
@@ -385,17 +430,16 @@ func classifyCSVGlobFirstRow(peek, anchor []string) csvGlobShardKind {
 	return csvGlobShardData
 }
 
-func loadCSVGlobShard(path string, anchor []string, delim rune) (*table.Table, error) {
+func loadCSVGlobShard(path string, anchor []string, cfg csvLoadConfig) (*table.Table, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open %s: %w", path, err)
 	}
 	defer f.Close()
 
-	reader := csv.NewReader(f)
-	reader.TrimLeadingSpace = true
-	reader.Comma = delim
+	reader := newCSVReader(f, cfg.delim)
 
+	peekRowNum := 1
 	peek, err := reader.Read()
 	if err == io.EOF {
 		return table.NewTable(append([]string(nil), anchor...)), nil
@@ -404,16 +448,30 @@ func loadCSVGlobShard(path string, anchor []string, delim rune) (*table.Table, e
 		return nil, fmt.Errorf("error reading CSV row: %w", err)
 	}
 
+	if isPhysicalBlankCSVLine(peek) {
+		var empty bool
+		peek, peekRowNum, empty, err = readFirstNonBlankCSVRow(reader, 2)
+		if err != nil {
+			return nil, err
+		}
+		if empty {
+			return table.NewTable(append([]string(nil), anchor...)), nil
+		}
+	}
+
 	switch classifyCSVGlobFirstRow(peek, anchor) {
 	case csvGlobShardRepeated:
-		return readCSVRows(reader, anchor)
+		return readCSVRows(reader, anchor, cfg, peekRowNum+1)
 	case csvGlobShardNewHeader:
 		columns := trimmedCSVFields(peek)
-		return readCSVRows(reader, columns)
+		return readCSVRows(reader, columns, cfg, peekRowNum+1)
 	default:
+		if err := validateCSVRecord(peek, len(anchor), cfg, peekRowNum); err != nil {
+			return nil, err
+		}
 		t := table.NewTable(append([]string(nil), anchor...))
 		t.AddRow(csvRowValues(peek, anchor))
-		rest, err := readCSVRows(reader, anchor)
+		rest, err := readCSVRows(reader, anchor, cfg, peekRowNum+1)
 		if err != nil {
 			return nil, err
 		}
@@ -428,8 +486,40 @@ func loadCSVGlobShard(path string, anchor []string, delim rune) (*table.Table, e
 	}
 }
 
-func readCSVRows(reader *csv.Reader, columns []string) (*table.Table, error) {
+func newCSVReader(r io.Reader, delim rune) *csv.Reader {
+	reader := csv.NewReader(r)
+	reader.TrimLeadingSpace = true
+	reader.Comma = delim
+	reader.FieldsPerRecord = -1
+	return reader
+}
+
+func validateCSVRecord(record []string, numColumns int, cfg csvLoadConfig, rowNum int) error {
+	n := len(record)
+	if n == numColumns {
+		return nil
+	}
+	if n > numColumns {
+		if cfg.ignoreUnknownValues {
+			return nil
+		}
+		return fmt.Errorf(
+			"csv row %d: expected %d field(s), got %d (%d extra); use with ignore_unknown_values=true to ignore extra columns",
+			rowNum, numColumns, n, n-numColumns,
+		)
+	}
+	if cfg.allowJaggedRows {
+		return nil
+	}
+	return fmt.Errorf(
+		"csv row %d: expected %d field(s), got %d (%d missing); use with allow_jagged_rows=true to treat missing columns as null",
+		rowNum, numColumns, n, numColumns-n,
+	)
+}
+
+func readCSVRows(reader *csv.Reader, columns []string, cfg csvLoadConfig, startRow int) (*table.Table, error) {
 	t := table.NewTable(append([]string(nil), columns...))
+	rowNum := startRow
 	for {
 		record, err := reader.Read()
 		if err == io.EOF {
@@ -438,7 +528,11 @@ func readCSVRows(reader *csv.Reader, columns []string) (*table.Table, error) {
 		if err != nil {
 			return nil, fmt.Errorf("error reading CSV row: %w", err)
 		}
+		if err := validateCSVRecord(record, len(columns), cfg, rowNum); err != nil {
+			return nil, err
+		}
 		t.AddRow(csvRowValues(record, columns))
+		rowNum++
 	}
 	return t, nil
 }
@@ -453,22 +547,23 @@ func hasNonEmptyColumnName(columns []string) bool {
 }
 
 func loadCSVReader(r io.Reader, cfg csvLoadConfig) (*table.Table, error) {
-	reader := csv.NewReader(r)
-	reader.TrimLeadingSpace = true
-	reader.Comma = cfg.delim
+	reader := newCSVReader(r, cfg.delim)
 
 	if len(cfg.columns) == 0 && !cfg.header {
-		first, err := reader.Read()
-		if err == io.EOF {
+		first, firstRowNum, empty, err := readFirstNonBlankCSVRow(reader, 1)
+		if err != nil {
+			return nil, err
+		}
+		if empty {
 			return table.NewTable(nil), nil
 		}
-		if err != nil {
-			return nil, fmt.Errorf("error reading CSV row: %w", err)
-		}
 		cfg.columns = synthesizeColumns(len(first))
+		if err := validateCSVRecord(first, len(cfg.columns), cfg, firstRowNum); err != nil {
+			return nil, err
+		}
 		t := table.NewTable(cfg.columns)
 		t.AddRow(csvRowValues(first, cfg.columns))
-		rest, err := readCSVRows(reader, cfg.columns)
+		rest, err := readCSVRows(reader, cfg.columns, cfg, firstRowNum+1)
 		if err != nil {
 			return nil, err
 		}
@@ -483,42 +578,22 @@ func loadCSVReader(r io.Reader, cfg csvLoadConfig) (*table.Table, error) {
 	}
 
 	if len(cfg.columns) == 0 && cfg.header {
-		header, err := reader.Read()
-		if err == io.EOF {
+		header, headerRowNum, empty, err := readFirstNonBlankCSVRow(reader, 1)
+		if err != nil {
+			return nil, err
+		}
+		if empty {
 			return table.NewTable(nil), nil
 		}
-		if err != nil {
-			return nil, fmt.Errorf("cannot read CSV header: %w", err)
-		}
 		cfg.columns = trimmedCSVFields(header)
-		// BOM-only or whitespace-only first lines parse as a single empty column
-		// name; treat as an empty file when no data rows follow.
-		if len(cfg.columns) == 1 && cfg.columns[0] == "" {
-			record, err := reader.Read()
-			if err == io.EOF {
-				return table.NewTable(nil), nil
-			}
-			if err != nil {
-				return nil, fmt.Errorf("error reading CSV row: %w", err)
-			}
-			t := table.NewTable(cfg.columns)
-			t.AddRow(csvRowValues(record, cfg.columns))
-			rest, err := readCSVRows(reader, cfg.columns)
-			if err != nil {
-				return nil, err
-			}
-			for row := 0; row < rest.NumRows; row++ {
-				vals := make([]table.Value, len(cfg.columns))
-				for i, col := range cfg.columns {
-					vals[i] = rest.Get(row, col)
-				}
-				t.AddRow(vals)
-			}
-			return t, nil
+		t, err := readCSVRows(reader, cfg.columns, cfg, headerRowNum+1)
+		if err != nil {
+			return nil, err
 		}
+		return t, nil
 	}
 
-	return readCSVRows(reader, cfg.columns)
+	return readCSVRows(reader, cfg.columns, cfg, 2)
 }
 
 func csvRowValues(record, columns []string) []table.Value {
