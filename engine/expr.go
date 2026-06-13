@@ -27,11 +27,25 @@ func Eval(expr ast.Expr, ctx *EvalContext) (table.Value, error) {
 		return evalUnary(e, ctx)
 	case *ast.FuncCallExpr:
 		return evalFunc(e, ctx)
+	case *ast.StructExpr:
+		return evalStruct(e, ctx)
 	case *ast.IsNullExpr:
 		return evalIsNull(e, ctx)
 	default:
 		return table.Null(), fmt.Errorf("unknown expression type %T", expr)
 	}
+}
+
+func evalStruct(e *ast.StructExpr, ctx *EvalContext) (table.Value, error) {
+	fields := make([]table.RecordField, len(e.Fields))
+	for i, f := range e.Fields {
+		v, err := Eval(f.Expr, ctx)
+		if err != nil {
+			return table.Null(), err
+		}
+		fields[i] = table.RecordField{Name: f.Name, Value: v}
+	}
+	return table.RecordVal(fields), nil
 }
 
 func evalLiteral(e *ast.LiteralExpr) table.Value {

@@ -941,6 +941,9 @@ func (p *Parser) parsePrimary() (ast.Expr, error) {
 		p.advance()
 		// Check if it's a function call
 		if p.peek().Type == lexer.TokenLParen {
+			if strings.EqualFold(tok.Val, "struct") {
+				return p.parseStructExpr()
+			}
 			return p.parseFuncCall(tok.Val)
 		}
 		path := []string{tok.Val}
@@ -968,6 +971,49 @@ func (p *Parser) parsePrimary() (ast.Expr, error) {
 	default:
 		return nil, fmt.Errorf("unexpected token %s (%q) at position %d in expression", tok.Type, tok.Val, tok.Pos)
 	}
+}
+
+func (p *Parser) parseStructExpr() (ast.Expr, error) {
+	p.advance() // consume (
+
+	var fields []ast.StructField
+	seen := make(map[string]bool)
+	if p.peek().Type != lexer.TokenRParen {
+		for {
+			nameTok := p.advance()
+			if nameTok.Type != lexer.TokenIdent && nameTok.Type != lexer.TokenBacktickIdent {
+				return nil, fmt.Errorf("in struct: expected field name, got %s (%q)", nameTok.Type, nameTok.Val)
+			}
+			if seen[nameTok.Val] {
+				return nil, fmt.Errorf("in struct: duplicate field %q", nameTok.Val)
+			}
+			seen[nameTok.Val] = true
+
+			if _, err := p.expect(lexer.TokenEquals); err != nil {
+				return nil, fmt.Errorf("in struct: expected '=' after field %q: %w", nameTok.Val, err)
+			}
+
+			expr, err := p.parseExpr()
+			if err != nil {
+				return nil, fmt.Errorf("in struct field %q: %w", nameTok.Val, err)
+			}
+			fields = append(fields, ast.StructField{Name: nameTok.Val, Expr: expr})
+
+			if p.peek().Type != lexer.TokenComma {
+				break
+			}
+			p.advance()
+			if p.peek().Type == lexer.TokenRParen {
+				return nil, fmt.Errorf("in struct: expected field name after ',', got %s (%q)", p.peek().Type, p.peek().Val)
+			}
+		}
+	}
+
+	if _, err := p.expect(lexer.TokenRParen); err != nil {
+		return nil, fmt.Errorf("in struct: %w", err)
+	}
+
+	return &ast.StructExpr{Fields: fields}, nil
 }
 
 func (p *Parser) parseFuncCall(name string) (ast.Expr, error) {

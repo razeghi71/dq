@@ -205,7 +205,7 @@ Strings — `upper(s)`, `lower(s)`, `trim(s)`, `substr(s, start, length)`, `str_
 
 Lists — `list_len(xs)`, `list_contains(xs, x)`
 
-General — `coalesce(a, b, ...)`, `if(cond, then, else)`
+General — `coalesce(a, b, ...)`, `if(cond, then, else)`, `struct(field = expr, ...)`
 
 Dates — `year(d)`, `month(d)`, `day(d)`
 
@@ -218,6 +218,7 @@ Indexes are 0-based. `matches()` uses RE2 regex (unanchored by default; use `^..
 dq 'users.csv | transform name = upper(name), name_len = str_len(name)'
 dq 'nested.json | transform n = list_len(orders)'
 dq 'sales.csv | transform total = coalesce(qty, 0) * price, y = year(date)'
+dq 'users.csv | transform profile = struct(name = name, age = age)'
 dq 'logs.csv | filter { str_contains(upper(message), "ERROR") }'
 dq 'logs.csv | filter { starts_with(level, "WARN") }'
 dq 'access.csv | filter { ends_with(path, ".json") }'
@@ -235,7 +236,14 @@ dq 'data.json | select name, address.city'                    # -> column addres
 dq 'data.json | group address.city | reduce n = count() | remove grouped'
 ```
 
-`select` and `group` flatten dot paths to underscore names (`address.city` → `address_city`). Missing sub-fields return null.
+Use `struct(field = expr, ...)` in expressions to build nested records row-by-row:
+
+```bash
+dq 'users.csv | transform profile = struct(name = name, age = age, meta = struct(source = "csv")) | select profile | json'
+dq 'users.csv | transform empty = struct(), nullable = struct(a = null)'
+```
+
+Struct field names are identifiers; use backticks for names with spaces or keywords such as `` `and` ``. `select` and `group` flatten dot paths to underscore names (`address.city` → `address_city`). Missing sub-fields return null. Null fields inside constructed records are preserved; schema-based writers infer their concrete field type from other non-null values, or fall back to nullable string when every value is null.
 
 ## List columns
 

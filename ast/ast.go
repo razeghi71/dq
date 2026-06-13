@@ -49,6 +49,19 @@ type FuncCallExpr struct {
 
 func (e *FuncCallExpr) exprNode() {}
 
+// StructExpr constructs a record value from ordered named fields.
+type StructExpr struct {
+	Fields []StructField
+}
+
+func (e *StructExpr) exprNode() {}
+
+// StructField is one named expression in a StructExpr.
+type StructField struct {
+	Name string
+	Expr Expr
+}
+
 // IsNullExpr represents "col is null" or "col is not null".
 type IsNullExpr struct {
 	Operand Expr

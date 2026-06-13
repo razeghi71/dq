@@ -155,6 +155,77 @@ func TestTransform(t *testing.T) {
 	}
 }
 
+func TestTransformStructConstructsRecord(t *testing.T) {
+	result := runQuery(t, usersTable(), `transform rec = struct(a = 1, name = name, missing = null, nested = struct(city = city))`)
+	rec := result.Get(0, "rec")
+	if rec.Type != table.TypeRecord {
+		t.Fatalf("expected TypeRecord, got %v (%s)", rec.Type, rec.AsString())
+	}
+	fields := map[string]table.Value{}
+	for _, f := range rec.Fields {
+		fields[f.Name] = f.Value
+	}
+	if got := fields["a"]; got.Type != table.TypeInt || got.Int != 1 {
+		t.Fatalf("rec.a: want int 1, got %v", got)
+	}
+	if got := fields["name"]; got.Type != table.TypeString || got.Str != "Alice" {
+		t.Fatalf("rec.name: want Alice, got %v", got)
+	}
+	if got := fields["missing"]; got.Type != table.TypeNull {
+		t.Fatalf("rec.missing: want null, got %v", got)
+	}
+	nested := fields["nested"]
+	if nested.Type != table.TypeRecord {
+		t.Fatalf("rec.nested: want record, got %v", nested)
+	}
+	nestedFields := map[string]table.Value{}
+	for _, f := range nested.Fields {
+		nestedFields[f.Name] = f.Value
+	}
+	if got := nestedFields["city"]; got.Type != table.TypeString || got.Str != "NY" {
+		t.Fatalf("rec.nested.city: want NY, got %v", got)
+	}
+}
+
+func TestTransformStructDotPathAccess(t *testing.T) {
+	result := runQuery(t, usersTable(), `transform rec = struct(name = name, age = age) | select rec.name, rec.age`)
+	assertColumns(t, result, []string{"rec_name", "rec_age"})
+	if got := result.GetAt(0, 0); got.Type != table.TypeString || got.Str != "Alice" {
+		t.Fatalf("rec.name: want Alice, got %v", got)
+	}
+	if got := result.GetAt(0, 1); got.Type != table.TypeInt || got.Int != 30 {
+		t.Fatalf("rec.age: want 30, got %v", got)
+	}
+}
+
+func TestTransformStructPreservesFieldOrder(t *testing.T) {
+	result := runQuery(t, usersTable(), "transform rec = struct(z = 1, a = 2, m = 3)")
+	rec := result.Get(0, "rec")
+	if rec.Type != table.TypeRecord {
+		t.Fatalf("expected TypeRecord, got %v", rec.Type)
+	}
+	if len(rec.Fields) != 3 {
+		t.Fatalf("expected 3 fields, got %#v", rec.Fields)
+	}
+	want := []string{"z", "a", "m"}
+	for i, name := range want {
+		if rec.Fields[i].Name != name {
+			t.Fatalf("field %d: want %q, got %q (full record %#v)", i, name, rec.Fields[i].Name, rec.Fields)
+		}
+	}
+}
+
+func TestTransformStructEmpty(t *testing.T) {
+	result := runQuery(t, usersTable(), "transform rec = struct()")
+	rec := result.Get(0, "rec")
+	if rec.Type != table.TypeRecord {
+		t.Fatalf("expected TypeRecord, got %v", rec.Type)
+	}
+	if len(rec.Fields) != 0 {
+		t.Fatalf("expected empty record, got %#v", rec.Fields)
+	}
+}
+
 func TestGroupReduce(t *testing.T) {
 	result := runQuery(t, usersTable(), "group city | reduce total = sum(age), n = count() | remove grouped")
 	if len(result.Columns) != 3 {

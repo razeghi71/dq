@@ -388,6 +388,7 @@ These are available in `transform` and `reduce` expressions:
 * `trim(s)` — remove whitespace (`TypeString` only)
 * `coalesce(a, b, ...)` — first non-null value
 * `if(cond, then, else)` — conditional; only explicit `true` takes then, `false` and `null` take else
+* `struct(field = expr, ...)` — construct an ordered nested record. Field names are identifiers; use backticks for names with spaces or keywords such as `` `and` ``. `struct()` returns an empty record. Null field values are preserved; schema-based writers infer null-only field types from other rows, or fall back to nullable string when all values are null.
 * `year(date)`, `month(date)`, `day(date)` — extract year, month, or day from a date string (`TypeString` only). Supported formats include `YYYY-MM-DD`, ISO timestamps, `YYYY-MM-DD HH:MM:SS`, and common slash-separated forms (see `engine/functions.go` `dateFormats`). Null input → null. Unparseable strings **error** and fail the query (same strict parse semantics as BigQuery `PARSE_DATE`, Trino `date_parse`, PostgreSQL `::date` — not silent null).
 
 **String predicates (return booleans; usable in `filter` and `transform`; `TypeString` only):**
@@ -416,6 +417,7 @@ dq 'users.csv | transform name_len = str_len(name)'
 dq 'nested.json | transform order_count = list_len(orders)'
 dq 'nested.json | filter { list_len(orders) > 1 } | select name'
 dq 'nested.json | filter { list_contains(tags, "admin") } | select name'
+dq 'users.csv | transform profile = struct(name = name, age = age, meta = struct(source = "csv")) | select profile | json'
 dq 'dates.csv | transform y = year(d)'   # "2024-13-99" → error, not null
 ```
 

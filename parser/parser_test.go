@@ -106,6 +106,88 @@ func TestParseTransform(t *testing.T) {
 	}
 }
 
+func TestParseStructExpr(t *testing.T) {
+	q, err := Parse("users.csv | transform rec = struct(a = 1, b = name, nested = struct(`weird name` = null, `and` = true))")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := q.Ops[0].(*ast.TransformOp)
+	st, ok := tr.Assignments[0].Expr.(*ast.StructExpr)
+	if !ok {
+		t.Fatalf("expected StructExpr, got %T", tr.Assignments[0].Expr)
+	}
+	if len(st.Fields) != 3 {
+		t.Fatalf("expected 3 fields, got %d", len(st.Fields))
+	}
+	if st.Fields[0].Name != "a" || st.Fields[1].Name != "b" || st.Fields[2].Name != "nested" {
+		t.Fatalf("unexpected field names: %#v", st.Fields)
+	}
+	nested, ok := st.Fields[2].Expr.(*ast.StructExpr)
+	if !ok {
+		t.Fatalf("expected nested StructExpr, got %T", st.Fields[2].Expr)
+	}
+	if len(nested.Fields) != 2 || nested.Fields[0].Name != "weird name" || nested.Fields[1].Name != "and" {
+		t.Fatalf("unexpected nested fields: %#v", nested.Fields)
+	}
+}
+
+func TestParseStructExprEmpty(t *testing.T) {
+	q, err := Parse("users.csv | transform rec = struct()")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := q.Ops[0].(*ast.TransformOp)
+	st, ok := tr.Assignments[0].Expr.(*ast.StructExpr)
+	if !ok {
+		t.Fatalf("expected StructExpr, got %T", tr.Assignments[0].Expr)
+	}
+	if len(st.Fields) != 0 {
+		t.Fatalf("expected empty struct, got %#v", st.Fields)
+	}
+}
+
+func TestParseStructExprErrors(t *testing.T) {
+	cases := []struct {
+		name    string
+		query   string
+		wantMsg string
+	}{
+		{"duplicate", "users.csv | transform rec = struct(a = 1, a = 2)", `duplicate field "a"`},
+		{"positional", "users.csv | transform rec = struct(a, b)", "expected '=' after field"},
+		{"trailing_comma", "users.csv | transform rec = struct(a = 1,)", "expected field name after ','"},
+		{"missing_comma", "users.csv | transform rec = struct(a = 1 b = 2)", "expected )"},
+		{"unclosed", "users.csv | transform rec = struct(a = 1", "expected )"},
+		{"missing_field_name", "users.csv | transform rec = struct(= 1)", "expected field name"},
+		{"keyword_field_name", "users.csv | transform rec = struct(and = 1)", "expected field name"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse(tc.query)
+			if err == nil {
+				t.Fatalf("expected parse error for %q", tc.query)
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.wantMsg)
+			}
+		})
+	}
+}
+
+func TestParseStructColumnReferenceStillAllowed(t *testing.T) {
+	q, err := Parse("users.csv | transform x = struct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := q.Ops[0].(*ast.TransformOp)
+	col, ok := tr.Assignments[0].Expr.(*ast.ColumnExpr)
+	if !ok {
+		t.Fatalf("expected ColumnExpr, got %T", tr.Assignments[0].Expr)
+	}
+	if len(col.Path) != 1 || col.Path[0] != "struct" {
+		t.Fatalf("unexpected column path: %v", col.Path)
+	}
+}
+
 func TestParseReduce(t *testing.T) {
 	q, err := Parse("users.csv | group name | reduce max_age = max(age), count = count()")
 	if err != nil {

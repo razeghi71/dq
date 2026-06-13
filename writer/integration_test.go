@@ -2,7 +2,9 @@ package writer
 
 import (
 	"bytes"
+	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +19,25 @@ import (
 )
 
 const testdataDir = "../testdata"
+
+type expectedStructRow struct {
+	name string
+	age  int64
+	city string
+}
+
+var expectedStructRows = []expectedStructRow{
+	{name: "Alice", age: 30, city: "NY"},
+	{name: "Bob", age: 25, city: "LA"},
+}
+
+func expectedProfileString(row expectedStructRow) string {
+	return fmt.Sprintf("{name:%s, age:%d, meta:{city:%s, source:csv}}", row.name, row.age, row.city)
+}
+
+func expectedNullableString(row expectedStructRow) string {
+	return fmt.Sprintf("{label:null, city:%s}", row.city)
+}
 
 // queryAndWriteBytes loads a file, runs a query, then writes the result in the given format.
 func queryAndWriteBytes(t *testing.T, file, query, format string) []byte {
@@ -231,6 +252,219 @@ func TestIntegrationNestedJSONOutput(t *testing.T) {
 	}
 	if addr["city"] != "New York" {
 		t.Errorf("address.city: want 'New York', got %v", addr["city"])
+	}
+}
+
+func TestIntegrationStructConstructionJSONOutput(t *testing.T) {
+	out := queryAndWrite(t, testdataDir+"/users.csv", `head 1 | transform profile = struct(name = name, age = age, meta = struct(source = "csv", missing = null)) | select profile`, "json")
+
+	var rows []map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	profile, ok := rows[0]["profile"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("profile: expected object, got %T", rows[0]["profile"])
+	}
+	if profile["name"] != "Alice" {
+		t.Fatalf("profile.name: want Alice, got %v", profile["name"])
+	}
+	if profile["age"].(float64) != 30 {
+		t.Fatalf("profile.age: want 30, got %v", profile["age"])
+	}
+	meta, ok := profile["meta"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("profile.meta: expected object, got %T", profile["meta"])
+	}
+	if meta["source"] != "csv" {
+		t.Fatalf("profile.meta.source: want csv, got %v", meta["source"])
+	}
+	if _, ok := meta["missing"]; !ok || meta["missing"] != nil {
+		t.Fatalf("profile.meta.missing: want explicit null, got %v present=%v", meta["missing"], ok)
+	}
+}
+
+func TestIntegrationStructConstructionAllOutputFormats(t *testing.T) {
+	query := `head 2 | transform profile = struct(name = name, age = age, meta = struct(city = city, source = "csv")), nullable = struct(label = null, city = city), empty = struct() | select name, profile, nullable, empty`
+
+	t.Run("table", func(t *testing.T) {
+		out := queryAndWrite(t, testdataDir+"/users.csv", query, "table")
+		wants := []string{"name", "profile", "nullable", "empty", "{}"}
+		for _, row := range expectedStructRows {
+			wants = append(wants, expectedProfileString(row), expectedNullableString(row))
+		}
+		for _, want := range wants {
+			if !strings.Contains(out, want) {
+				t.Fatalf("table output missing %q:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("csv", func(t *testing.T) {
+		out := queryAndWrite(t, testdataDir+"/users.csv", query, "csv")
+		rows, err := csv.NewReader(strings.NewReader(out)).ReadAll()
+		if err != nil {
+			t.Fatalf("read csv: %v\n%s", err, out)
+		}
+		if len(rows) != 3 {
+			t.Fatalf("expected header + 2 rows, got %d: %#v", len(rows), rows)
+		}
+		wantHeader := []string{"name", "profile", "nullable", "empty"}
+		for i := range wantHeader {
+			if rows[0][i] != wantHeader[i] {
+				t.Fatalf("header[%d]: want %q, got %q", i, wantHeader[i], rows[0][i])
+			}
+		}
+		for i, want := range expectedStructRows {
+			row := rows[i+1]
+			if row[0] != want.name || row[1] != expectedProfileString(want) || row[2] != expectedNullableString(want) || row[3] != "{}" {
+				t.Fatalf("unexpected csv row %d: %#v", i+1, row)
+			}
+		}
+	})
+
+	t.Run("json", func(t *testing.T) {
+		out := queryAndWrite(t, testdataDir+"/users.csv", query, "json")
+		var rows []map[string]any
+		if err := json.Unmarshal([]byte(out), &rows); err != nil {
+			t.Fatalf("invalid JSON: %v\n%s", err, out)
+		}
+		assertStructRowsJSON(t, rows)
+	})
+
+	t.Run("jsonl", func(t *testing.T) {
+		out := queryAndWrite(t, testdataDir+"/users.csv", query, "jsonl")
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		if len(lines) != 2 {
+			t.Fatalf("expected 2 JSONL lines, got %d:\n%s", len(lines), out)
+		}
+		rows := make([]map[string]any, len(lines))
+		for i, line := range lines {
+			if err := json.Unmarshal([]byte(line), &rows[i]); err != nil {
+				t.Fatalf("line %d invalid JSON: %v\n%s", i, err, line)
+			}
+		}
+		assertStructRowsJSON(t, rows)
+	})
+
+	for _, format := range []string{"avro", "parquet"} {
+		t.Run(format, func(t *testing.T) {
+			out := queryAndWriteBytes(t, testdataDir+"/users.csv", query, format)
+			path := writeTempOutput(t, out, "structs."+format)
+			got, err := loader.Load(path, loader.Options{Format: format})
+			if err != nil {
+				t.Fatalf("reload %s: %v", format, err)
+			}
+			assertStructRowsTable(t, got)
+		})
+	}
+}
+
+func assertStructRowsJSON(t *testing.T, rows []map[string]any) {
+	t.Helper()
+	if len(rows) != len(expectedStructRows) {
+		t.Fatalf("expected %d rows, got %d", len(expectedStructRows), len(rows))
+	}
+	for i, want := range expectedStructRows {
+		if rows[i]["name"] != want.name {
+			t.Fatalf("row %d name: want %s, got %v", i, want.name, rows[i]["name"])
+		}
+		profile, ok := rows[i]["profile"].(map[string]any)
+		if !ok {
+			t.Fatalf("row %d profile: expected object, got %T", i, rows[i]["profile"])
+		}
+		if profile["name"] != want.name {
+			t.Fatalf("row %d profile.name: want %s, got %v", i, want.name, profile["name"])
+		}
+		if profile["age"] != float64(want.age) {
+			t.Fatalf("row %d profile.age: want %d, got %v", i, want.age, profile["age"])
+		}
+		meta, ok := profile["meta"].(map[string]any)
+		if !ok {
+			t.Fatalf("row %d profile.meta: expected object, got %T", i, profile["meta"])
+		}
+		if meta["city"] != want.city || meta["source"] != "csv" {
+			t.Fatalf("row %d profile.meta: unexpected values %#v", i, meta)
+		}
+		nullable, ok := rows[i]["nullable"].(map[string]any)
+		if !ok {
+			t.Fatalf("row %d nullable: expected object, got %T", i, rows[i]["nullable"])
+		}
+		if _, ok := nullable["label"]; !ok || nullable["label"] != nil {
+			t.Fatalf("row %d nullable.label: want explicit null, got %v present=%v", i, nullable["label"], ok)
+		}
+		if nullable["city"] != want.city {
+			t.Fatalf("row %d nullable.city: want %s, got %v", i, want.city, nullable["city"])
+		}
+		empty, ok := rows[i]["empty"].(map[string]any)
+		if !ok {
+			t.Fatalf("row %d empty: expected object, got %T", i, rows[i]["empty"])
+		}
+		if len(empty) != 0 {
+			t.Fatalf("row %d empty: want empty object, got %#v", i, empty)
+		}
+	}
+}
+
+func assertStructRowsTable(t *testing.T, got *table.Table) {
+	t.Helper()
+	if got.NumRows != len(expectedStructRows) {
+		t.Fatalf("expected %d rows, got %d", len(expectedStructRows), got.NumRows)
+	}
+	for _, col := range []string{"name", "profile", "nullable", "empty"} {
+		if got.ColIndex(col) < 0 {
+			t.Fatalf("missing column %q in %v", col, got.Columns)
+		}
+	}
+	for i, want := range expectedStructRows {
+		if v := got.Get(i, "name"); v.Type != table.TypeString || v.Str != want.name {
+			t.Fatalf("row %d name: want %s, got %v", i, want.name, v)
+		}
+		profile := got.Get(i, "profile")
+		if profile.Type != table.TypeRecord {
+			t.Fatalf("row %d profile: want record, got %v", i, profile)
+		}
+		profileFields := recordValues(profile)
+		if v := profileFields["name"]; v.Type != table.TypeString || v.Str != want.name {
+			t.Fatalf("row %d profile.name: want %s, got %v", i, want.name, v)
+		}
+		if v := profileFields["age"]; v.Type != table.TypeInt || v.Int != want.age {
+			t.Fatalf("row %d profile.age: want %d, got %v", i, want.age, v)
+		}
+		meta := profileFields["meta"]
+		if meta.Type != table.TypeRecord {
+			t.Fatalf("row %d profile.meta: want record, got %v", i, meta)
+		}
+		metaFields := recordValues(meta)
+		if v := metaFields["city"]; v.Type != table.TypeString || v.Str != want.city {
+			t.Fatalf("row %d profile.meta.city: want %s, got %v", i, want.city, v)
+		}
+		if v := metaFields["source"]; v.Type != table.TypeString || v.Str != "csv" {
+			t.Fatalf("row %d profile.meta.source: want csv, got %v", i, v)
+		}
+
+		nullable := got.Get(i, "nullable")
+		if nullable.Type != table.TypeRecord {
+			t.Fatalf("row %d nullable: want record, got %v", i, nullable)
+		}
+		nullableFields := recordValues(nullable)
+		if v := nullableFields["label"]; v.Type != table.TypeNull {
+			t.Fatalf("row %d nullable.label: want null, got %v", i, v)
+		}
+		if v := nullableFields["city"]; v.Type != table.TypeString || v.Str != want.city {
+			t.Fatalf("row %d nullable.city: want %s, got %v", i, want.city, v)
+		}
+
+		empty := got.Get(i, "empty")
+		if empty.Type != table.TypeRecord {
+			t.Fatalf("row %d empty: want record, got %v", i, empty)
+		}
+		if len(empty.Fields) != 0 {
+			t.Fatalf("row %d empty: want no fields, got %#v", i, empty.Fields)
+		}
 	}
 }
 
