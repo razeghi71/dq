@@ -188,6 +188,108 @@ func TestParseStructColumnReferenceStillAllowed(t *testing.T) {
 	}
 }
 
+func TestParseListExpr(t *testing.T) {
+	q, err := Parse(`users.csv | transform xs = list(1, null, name, upper(city), struct(a = age))`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := q.Ops[0].(*ast.TransformOp)
+	ls, ok := tr.Assignments[0].Expr.(*ast.ListExpr)
+	if !ok {
+		t.Fatalf("expected ListExpr, got %T", tr.Assignments[0].Expr)
+	}
+	if len(ls.Elements) != 5 {
+		t.Fatalf("expected 5 list elements, got %d", len(ls.Elements))
+	}
+	if lit, ok := ls.Elements[0].(*ast.LiteralExpr); !ok || lit.Kind != "int" || lit.Int != 1 {
+		t.Fatalf("element 0: expected int literal 1, got %#v", ls.Elements[0])
+	}
+	if lit, ok := ls.Elements[1].(*ast.LiteralExpr); !ok || lit.Kind != "null" {
+		t.Fatalf("element 1: expected null literal, got %#v", ls.Elements[1])
+	}
+	if col, ok := ls.Elements[2].(*ast.ColumnExpr); !ok || len(col.Path) != 1 || col.Path[0] != "name" {
+		t.Fatalf("element 2: expected name column, got %#v", ls.Elements[2])
+	}
+	if fn, ok := ls.Elements[3].(*ast.FuncCallExpr); !ok || fn.Name != "upper" || len(fn.Args) != 1 {
+		t.Fatalf("element 3: expected upper(city), got %#v", ls.Elements[3])
+	}
+	st, ok := ls.Elements[4].(*ast.StructExpr)
+	if !ok {
+		t.Fatalf("element 4: expected StructExpr, got %T", ls.Elements[4])
+	}
+	if len(st.Fields) != 1 || st.Fields[0].Name != "a" {
+		t.Fatalf("element 4: unexpected struct fields %#v", st.Fields)
+	}
+}
+
+func TestParseListExprEmpty(t *testing.T) {
+	q, err := Parse("users.csv | transform xs = list()")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := q.Ops[0].(*ast.TransformOp)
+	ls, ok := tr.Assignments[0].Expr.(*ast.ListExpr)
+	if !ok {
+		t.Fatalf("expected ListExpr, got %T", tr.Assignments[0].Expr)
+	}
+	if len(ls.Elements) != 0 {
+		t.Fatalf("expected empty list, got %#v", ls.Elements)
+	}
+}
+
+func TestParseListExprCaseInsensitiveConstructor(t *testing.T) {
+	q, err := Parse("users.csv | transform xs = LIST(1, 2)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := q.Ops[0].(*ast.TransformOp)
+	ls, ok := tr.Assignments[0].Expr.(*ast.ListExpr)
+	if !ok {
+		t.Fatalf("expected ListExpr, got %T", tr.Assignments[0].Expr)
+	}
+	if len(ls.Elements) != 2 {
+		t.Fatalf("expected 2 elements, got %d", len(ls.Elements))
+	}
+}
+
+func TestParseListColumnReferenceStillAllowed(t *testing.T) {
+	q, err := Parse("users.csv | transform x = list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := q.Ops[0].(*ast.TransformOp)
+	col, ok := tr.Assignments[0].Expr.(*ast.ColumnExpr)
+	if !ok {
+		t.Fatalf("expected ColumnExpr, got %T", tr.Assignments[0].Expr)
+	}
+	if len(col.Path) != 1 || col.Path[0] != "list" {
+		t.Fatalf("unexpected column path: %v", col.Path)
+	}
+}
+
+func TestParseListExprErrors(t *testing.T) {
+	cases := []struct {
+		name    string
+		query   string
+		wantMsg string
+	}{
+		{"trailing_comma", "users.csv | transform xs = list(1,)", "expected expression after ','"},
+		{"unclosed", "users.csv | transform xs = list(1, 2", "expected )"},
+		{"missing_comma", "users.csv | transform xs = list(1 2)", "expected )"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse(tc.query)
+			if err == nil {
+				t.Fatalf("expected parse error for %q", tc.query)
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.wantMsg)
+			}
+		})
+	}
+}
+
 func TestParseReduce(t *testing.T) {
 	q, err := Parse("users.csv | group name | reduce max_age = max(age), count = count()")
 	if err != nil {

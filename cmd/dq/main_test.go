@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -187,6 +188,60 @@ func TestCLIOutputFormatJSON(t *testing.T) {
 	s := strings.TrimSpace(string(out))
 	if !strings.HasPrefix(s, "[") || !strings.Contains(s, `"name"`) {
 		t.Fatalf("expected JSON array output, got:\n%s", s)
+	}
+}
+
+func TestCLIListConstructionJSONFromStdin(t *testing.T) {
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, `- with format=csv | transform tags = list("user", city, null), pair = list(name, upper(city)), empty = list() | select name, tags, pair, empty | json`)
+	cmd.Stdin = strings.NewReader("name,city\nAlice,NY\nBob,LA\n")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli: %v\n%s", err, out)
+	}
+
+	var rows []map[string]any
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	tags, ok := rows[0]["tags"].([]any)
+	if !ok {
+		t.Fatalf("tags: expected array, got %T", rows[0]["tags"])
+	}
+	if len(tags) != 3 || tags[0] != "user" || tags[1] != "NY" || tags[2] != nil {
+		t.Fatalf("unexpected tags: %#v", tags)
+	}
+	pair, ok := rows[0]["pair"].([]any)
+	if !ok {
+		t.Fatalf("pair: expected array, got %T", rows[0]["pair"])
+	}
+	if len(pair) != 2 || pair[0] != "Alice" || pair[1] != "NY" {
+		t.Fatalf("unexpected pair: %#v", pair)
+	}
+	empty, ok := rows[0]["empty"].([]any)
+	if !ok || len(empty) != 0 {
+		t.Fatalf("empty: expected empty array, got %#v", rows[0]["empty"])
+	}
+}
+
+func TestCLIListConstructionWithListContains(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rows.csv")
+	if err := os.WriteFile(path, []byte("name,city\nAlice,NY\nBob,LA\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, path+` | filter { list_contains(list(city, lower(city)), "la") } | select name | csv`)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "name\nBob" {
+		t.Fatalf("expected Bob only, got:\n%s", got)
 	}
 }
 

@@ -203,7 +203,7 @@ Notes:
 
 Strings — `upper(s)`, `lower(s)`, `trim(s)`, `substr(s, start, length)`, `str_len(s)`, `str_contains(s, sub)`, `starts_with(s, prefix)`, `ends_with(s, suffix)`, `matches(s, regex)`
 
-Lists — `list_len(xs)`, `list_contains(xs, x)`
+Lists — `list(expr, ...)`, `list_len(xs)`, `list_contains(xs, x)`
 
 General — `coalesce(a, b, ...)`, `if(cond, then, else)`, `struct(field = expr, ...)`
 
@@ -219,6 +219,7 @@ dq 'users.csv | transform name = upper(name), name_len = str_len(name)'
 dq 'nested.json | transform n = list_len(orders)'
 dq 'sales.csv | transform total = coalesce(qty, 0) * price, y = year(date)'
 dq 'users.csv | transform profile = struct(name = name, age = age)'
+dq 'users.csv | transform tags = list("user", city, null)'
 dq 'logs.csv | filter { str_contains(upper(message), "ERROR") }'
 dq 'logs.csv | filter { starts_with(level, "WARN") }'
 dq 'access.csv | filter { ends_with(path, ".json") }'
@@ -250,13 +251,15 @@ Struct field names are identifiers; use backticks for names with spaces or keywo
 JSON/Avro/Parquet arrays load as **lists**.
 
 ```bash
+dq 'users.csv | transform tags = list("user", city, null)'
+dq 'users.csv | transform bundle = list(struct(name = name, age = age)) | select bundle | json'
 dq 'nested.json | transform n = list_len(orders) | select name, n'
 dq 'nested.json | filter { list_len(tags) >= 2 } | select name'
 dq 'nested.json | filter { list_contains(tags, "admin") } | select name'
 dq 'nested.json | reduce orders total = sum(amount) | select name, total'
 ```
 
-Lists and records use exact structural equality. Use `list_contains(xs, x)` for membership and `list_len(xs)` for size checks; `tags == "admin"` and `tags == 1` error on type mismatch, and `filter { tags }` is an error.
+Use `list(expr, ...)` to construct list values row-by-row. `list()` returns an empty list and null elements are preserved. Lists and records use exact structural equality. Use `list_contains(xs, x)` for membership and `list_len(xs)` for size checks; `tags == "admin"` and `tags == 1` error on type mismatch, and `filter { tags }` is an error.
 
 ## Output Formats
 

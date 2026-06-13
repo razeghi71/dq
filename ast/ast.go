@@ -56,6 +56,13 @@ type StructExpr struct {
 
 func (e *StructExpr) exprNode() {}
 
+// ListExpr constructs a list value from ordered element expressions.
+type ListExpr struct {
+	Elements []Expr
+}
+
+func (e *ListExpr) exprNode() {}
+
 // StructField is one named expression in a StructExpr.
 type StructField struct {
 	Name string

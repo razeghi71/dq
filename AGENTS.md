@@ -382,8 +382,9 @@ These are available in `transform` and `reduce` expressions:
 **Transformations (for `transform` only):**
 * `upper(s)`, `lower(s)` — case conversion (`TypeString` only)
 * `str_len(s)` — string length in Unicode code points, 0-based indexing companion (`TypeString` only)
+* `list(expr, ...)` — construct an ordered list value row-by-row. `list()` returns an empty list. Elements are positional, evaluated left-to-right, and null elements are preserved. Lists may contain mixed element types, including records from `struct(...)`.
 * `list_len(xs)` — list element count (`TypeList` only)
-* `list_contains(xs, x)` — true if list `xs` contains `x`, using value-representation equality (`TypeList` only for `xs`)
+* `list_contains(xs, x)` — true if list `xs` contains `x`, using strict structural equality (`TypeList` only for `xs`)
 * `substr(s, start, length)` — substring by **0-based code point** index and length (`TypeString` only for `s`; `start` and `length` must be `TypeInt`); negative `start` counts from the end (Python-style); `length` must be non-negative
 * `trim(s)` — remove whitespace (`TypeString` only)
 * `coalesce(a, b, ...)` — first non-null value
@@ -418,6 +419,7 @@ dq 'nested.json | transform order_count = list_len(orders)'
 dq 'nested.json | filter { list_len(orders) > 1 } | select name'
 dq 'nested.json | filter { list_contains(tags, "admin") } | select name'
 dq 'users.csv | transform profile = struct(name = name, age = age, meta = struct(source = "csv")) | select profile | json'
+dq 'users.csv | transform tags = list("user", city, null), bundle = list(struct(name = name, age = age)) | select tags, bundle | json'
 dq 'dates.csv | transform y = year(d)'   # "2024-13-99" → error, not null
 ```
 

@@ -29,6 +29,8 @@ func Eval(expr ast.Expr, ctx *EvalContext) (table.Value, error) {
 		return evalFunc(e, ctx)
 	case *ast.StructExpr:
 		return evalStruct(e, ctx)
+	case *ast.ListExpr:
+		return evalList(e, ctx)
 	case *ast.IsNullExpr:
 		return evalIsNull(e, ctx)
 	default:
@@ -46,6 +48,18 @@ func evalStruct(e *ast.StructExpr, ctx *EvalContext) (table.Value, error) {
 		fields[i] = table.RecordField{Name: f.Name, Value: v}
 	}
 	return table.RecordVal(fields), nil
+}
+
+func evalList(e *ast.ListExpr, ctx *EvalContext) (table.Value, error) {
+	elements := make([]table.Value, len(e.Elements))
+	for i, elem := range e.Elements {
+		v, err := Eval(elem, ctx)
+		if err != nil {
+			return table.Null(), err
+		}
+		elements[i] = v
+	}
+	return table.ListVal(elements), nil
 }
 
 func evalLiteral(e *ast.LiteralExpr) table.Value {

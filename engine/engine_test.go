@@ -34,6 +34,18 @@ func runQuery(t *testing.T, input *table.Table, query string) *table.Table {
 	return result
 }
 
+func recordValuesForTest(t *testing.T, v table.Value) map[string]table.Value {
+	t.Helper()
+	if v.Type != table.TypeRecord {
+		t.Fatalf("expected TypeRecord, got %v (%s)", v.Type, v.AsString())
+	}
+	out := make(map[string]table.Value, len(v.Fields))
+	for _, f := range v.Fields {
+		out[f.Name] = f.Value
+	}
+	return out
+}
+
 func TestHead(t *testing.T) {
 	result := runQuery(t, usersTable(), "head 3")
 	if result.NumRows != 3 {
@@ -223,6 +235,128 @@ func TestTransformStructEmpty(t *testing.T) {
 	}
 	if len(rec.Fields) != 0 {
 		t.Fatalf("expected empty record, got %#v", rec.Fields)
+	}
+}
+
+func TestTransformListConstructsList(t *testing.T) {
+	result := runQuery(t, usersTable(), `transform xs = list(1, null, name, upper(city))`)
+	xs := result.Get(0, "xs")
+	if xs.Type != table.TypeList {
+		t.Fatalf("expected TypeList, got %v (%s)", xs.Type, xs.AsString())
+	}
+	if len(xs.List) != 4 {
+		t.Fatalf("expected 4 elements, got %#v", xs.List)
+	}
+	if xs.List[0].Type != table.TypeInt || xs.List[0].Int != 1 {
+		t.Fatalf("xs[0]: want int 1, got %v", xs.List[0])
+	}
+	if xs.List[1].Type != table.TypeNull {
+		t.Fatalf("xs[1]: want null, got %v", xs.List[1])
+	}
+	if xs.List[2].Type != table.TypeString || xs.List[2].Str != "Alice" {
+		t.Fatalf("xs[2]: want Alice, got %v", xs.List[2])
+	}
+	if xs.List[3].Type != table.TypeString || xs.List[3].Str != "NY" {
+		t.Fatalf("xs[3]: want NY, got %v", xs.List[3])
+	}
+}
+
+func TestTransformListEmpty(t *testing.T) {
+	result := runQuery(t, usersTable(), `transform xs = list()`)
+	xs := result.Get(0, "xs")
+	if xs.Type != table.TypeList {
+		t.Fatalf("expected TypeList, got %v (%s)", xs.Type, xs.AsString())
+	}
+	if len(xs.List) != 0 {
+		t.Fatalf("expected empty list, got %#v", xs.List)
+	}
+}
+
+func TestTransformListOfStructs(t *testing.T) {
+	result := runQuery(t, usersTable(), `transform bundle = list(struct(name = name, age = age), struct(name = upper(name), age = age + 1))`)
+	bundle := result.Get(0, "bundle")
+	if bundle.Type != table.TypeList {
+		t.Fatalf("expected TypeList, got %v (%s)", bundle.Type, bundle.AsString())
+	}
+	if len(bundle.List) != 2 {
+		t.Fatalf("expected 2 records, got %#v", bundle.List)
+	}
+	for i, elem := range bundle.List {
+		if elem.Type != table.TypeRecord {
+			t.Fatalf("element %d: expected TypeRecord, got %v", i, elem)
+		}
+	}
+	first := recordValuesForTest(t, bundle.List[0])
+	if v := first["name"]; v.Type != table.TypeString || v.Str != "Alice" {
+		t.Fatalf("first.name: want Alice, got %v", v)
+	}
+	second := recordValuesForTest(t, bundle.List[1])
+	if v := second["name"]; v.Type != table.TypeString || v.Str != "ALICE" {
+		t.Fatalf("second.name: want ALICE, got %v", v)
+	}
+	if v := second["age"]; v.Type != table.TypeInt || v.Int != 31 {
+		t.Fatalf("second.age: want 31, got %v", v)
+	}
+}
+
+func TestListConstructorWithListContainsUsesStrictElementTypes(t *testing.T) {
+	result := runQuery(t, usersTable(), `filter { list_contains(list(1, "1"), 1) } | count`)
+	if got := result.Get(0, "count"); got.Type != table.TypeInt || got.Int != int64(usersTable().NumRows) {
+		t.Fatalf("expected all rows to match int element, got %v", got)
+	}
+
+	result = runQuery(t, usersTable(), `filter { list_contains(list(1, "1"), "1") } | count`)
+	if got := result.Get(0, "count"); got.Type != table.TypeInt || got.Int != int64(usersTable().NumRows) {
+		t.Fatalf("expected all rows to match string element, got %v", got)
+	}
+
+	result = runQuery(t, usersTable(), `filter { list_contains(list(1), "1") } | count`)
+	if got := result.Get(0, "count"); got.Type != table.TypeInt || got.Int != 0 {
+		t.Fatalf("expected no rows for string needle in int list, got %v", got)
+	}
+}
+
+func TestFilterBareListConstructorErrorsAsNonBoolean(t *testing.T) {
+	err := runQueryExpectErr(t, usersTable(), `filter { list(1) }`)
+	if err == nil {
+		t.Fatal("expected non-boolean filter error")
+	}
+	if !strings.Contains(err.Error(), "did not return boolean") || !strings.Contains(err.Error(), "[1]") {
+		t.Fatalf("expected non-boolean list filter error, got: %v", err)
+	}
+}
+
+func TestReduceListConstructorUnsupported(t *testing.T) {
+	err := runQueryExpectErr(t, usersTable(), `group city | reduce xs = list(first(age))`)
+	if err == nil {
+		t.Fatal("expected reduce error for list constructor")
+	}
+	if !strings.Contains(err.Error(), "list constructor is not supported in reduce") {
+		t.Fatalf("expected reduce/list error, got: %v", err)
+	}
+}
+
+func TestReduceStructConstructorUnsupported(t *testing.T) {
+	err := runQueryExpectErr(t, usersTable(), `group city | reduce rec = struct(age = first(age))`)
+	if err == nil {
+		t.Fatal("expected reduce error for struct constructor")
+	}
+	if !strings.Contains(err.Error(), "struct constructor is not supported in reduce") {
+		t.Fatalf("expected reduce/struct error, got: %v", err)
+	}
+}
+
+func TestTransformListScalarMixedColumnWidensToString(t *testing.T) {
+	tbl := table.NewTable([]string{"name", "active"})
+	tbl.AddRow([]table.Value{table.StrVal("a"), table.BoolVal(true)})
+	tbl.AddRow([]table.Value{table.StrVal("b"), table.BoolVal(false)})
+
+	result := runQuery(t, tbl, `transform xs = if(active, list(1, 2), "off") | select xs`)
+	if got := result.GetAt(0, 0); got.Type != table.TypeString || got.Str != "[1, 2]" {
+		t.Fatalf("row 0: expected widened string [1, 2], got %v (%s)", got.Type, got.AsString())
+	}
+	if got := result.GetAt(1, 0); got.Type != table.TypeString || got.Str != "off" {
+		t.Fatalf("row 1: expected string off, got %v (%s)", got.Type, got.AsString())
 	}
 }
 

@@ -363,6 +363,202 @@ func TestIntegrationStructConstructionAllOutputFormats(t *testing.T) {
 	}
 }
 
+func TestIntegrationListConstructionJSONOutput(t *testing.T) {
+	out := queryAndWrite(t, testdataDir+"/users.csv", `head 1 | transform tags = list("user", city, null), bundle = list(struct(name = name, age = age), struct(name = upper(name), age = age + 1)), empty = list() | select tags, bundle, empty`, "json")
+
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	tags, ok := rows[0]["tags"].([]any)
+	if !ok {
+		t.Fatalf("tags: expected array, got %T", rows[0]["tags"])
+	}
+	if len(tags) != 3 || tags[0] != "user" || tags[1] != "NY" || tags[2] != nil {
+		t.Fatalf("unexpected tags: %#v", tags)
+	}
+	bundle, ok := rows[0]["bundle"].([]any)
+	if !ok {
+		t.Fatalf("bundle: expected array, got %T", rows[0]["bundle"])
+	}
+	if len(bundle) != 2 {
+		t.Fatalf("expected 2 bundle records, got %#v", bundle)
+	}
+	first, ok := bundle[0].(map[string]any)
+	if !ok {
+		t.Fatalf("bundle[0]: expected object, got %T", bundle[0])
+	}
+	if first["name"] != "Alice" || first["age"] != float64(30) {
+		t.Fatalf("unexpected bundle[0]: %#v", first)
+	}
+	second, ok := bundle[1].(map[string]any)
+	if !ok {
+		t.Fatalf("bundle[1]: expected object, got %T", bundle[1])
+	}
+	if second["name"] != "ALICE" || second["age"] != float64(31) {
+		t.Fatalf("unexpected bundle[1]: %#v", second)
+	}
+	empty, ok := rows[0]["empty"].([]any)
+	if !ok {
+		t.Fatalf("empty: expected array, got %T", rows[0]["empty"])
+	}
+	if len(empty) != 0 {
+		t.Fatalf("expected empty array, got %#v", empty)
+	}
+}
+
+func TestIntegrationListConstructionAllOutputFormats(t *testing.T) {
+	query := `head 2 | transform tags = list("user", city, null), bundle = list(struct(name = name, age = age), struct(name = upper(name), age = age + 1)), empty = list(), nulls = list(null) | select name, tags, bundle, empty, nulls`
+
+	t.Run("table", func(t *testing.T) {
+		out := queryAndWrite(t, testdataDir+"/users.csv", query, "table")
+		for _, want := range []string{
+			"name", "tags", "bundle", "empty", "nulls",
+			"[user, NY, null]", "[{name:Alice, age:30}, {name:ALICE, age:31}]", "[]", "[null]",
+			"[user, LA, null]", "[{name:Bob, age:25}, {name:BOB, age:26}]",
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("table output missing %q:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("csv", func(t *testing.T) {
+		out := queryAndWrite(t, testdataDir+"/users.csv", query, "csv")
+		rows, err := csv.NewReader(strings.NewReader(out)).ReadAll()
+		if err != nil {
+			t.Fatalf("read csv: %v\n%s", err, out)
+		}
+		if len(rows) != 3 {
+			t.Fatalf("expected header + 2 rows, got %d: %#v", len(rows), rows)
+		}
+		if got := rows[0]; strings.Join(got, ",") != "name,tags,bundle,empty,nulls" {
+			t.Fatalf("unexpected header: %#v", got)
+		}
+		if rows[1][0] != "Alice" || rows[1][1] != "[user, NY, null]" || rows[1][2] != "[{name:Alice, age:30}, {name:ALICE, age:31}]" || rows[1][3] != "[]" || rows[1][4] != "[null]" {
+			t.Fatalf("unexpected first csv row: %#v", rows[1])
+		}
+	})
+
+	t.Run("json", func(t *testing.T) {
+		out := queryAndWrite(t, testdataDir+"/users.csv", query, "json")
+		var rows []map[string]any
+		if err := json.Unmarshal([]byte(out), &rows); err != nil {
+			t.Fatalf("invalid JSON: %v\n%s", err, out)
+		}
+		assertListRowsJSON(t, rows)
+	})
+
+	t.Run("jsonl", func(t *testing.T) {
+		out := queryAndWrite(t, testdataDir+"/users.csv", query, "jsonl")
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		if len(lines) != 2 {
+			t.Fatalf("expected 2 JSONL lines, got %d:\n%s", len(lines), out)
+		}
+		rows := make([]map[string]any, len(lines))
+		for i, line := range lines {
+			if err := json.Unmarshal([]byte(line), &rows[i]); err != nil {
+				t.Fatalf("line %d invalid JSON: %v\n%s", i, err, line)
+			}
+		}
+		assertListRowsJSON(t, rows)
+	})
+
+	for _, format := range []string{"avro", "parquet"} {
+		t.Run(format, func(t *testing.T) {
+			out := queryAndWriteBytes(t, testdataDir+"/users.csv", query, format)
+			path := writeTempOutput(t, out, "lists."+format)
+			got, err := loader.Load(path, loader.Options{Format: format})
+			if err != nil {
+				t.Fatalf("reload %s: %v", format, err)
+			}
+			assertListRowsTable(t, got)
+		})
+	}
+}
+
+func assertListRowsJSON(t *testing.T, rows []map[string]any) {
+	t.Helper()
+	if len(rows) != len(expectedStructRows) {
+		t.Fatalf("expected %d rows, got %d", len(expectedStructRows), len(rows))
+	}
+	for i, want := range expectedStructRows {
+		if rows[i]["name"] != want.name {
+			t.Fatalf("row %d name: want %s, got %v", i, want.name, rows[i]["name"])
+		}
+		tags, ok := rows[i]["tags"].([]any)
+		if !ok {
+			t.Fatalf("row %d tags: expected array, got %T", i, rows[i]["tags"])
+		}
+		if len(tags) != 3 || tags[0] != "user" || tags[1] != want.city || tags[2] != nil {
+			t.Fatalf("row %d unexpected tags: %#v", i, tags)
+		}
+		bundle, ok := rows[i]["bundle"].([]any)
+		if !ok || len(bundle) != 2 {
+			t.Fatalf("row %d bundle: expected 2-element array, got %#v", i, rows[i]["bundle"])
+		}
+		first, ok := bundle[0].(map[string]any)
+		if !ok {
+			t.Fatalf("row %d bundle[0]: expected object, got %T", i, bundle[0])
+		}
+		if first["name"] != want.name || first["age"] != float64(want.age) {
+			t.Fatalf("row %d unexpected bundle[0]: %#v", i, first)
+		}
+		empty, ok := rows[i]["empty"].([]any)
+		if !ok || len(empty) != 0 {
+			t.Fatalf("row %d empty: expected empty array, got %#v", i, rows[i]["empty"])
+		}
+		nulls, ok := rows[i]["nulls"].([]any)
+		if !ok || len(nulls) != 1 || nulls[0] != nil {
+			t.Fatalf("row %d nulls: expected [null], got %#v", i, rows[i]["nulls"])
+		}
+	}
+}
+
+func assertListRowsTable(t *testing.T, got *table.Table) {
+	t.Helper()
+	if got.NumRows != len(expectedStructRows) {
+		t.Fatalf("expected %d rows, got %d", len(expectedStructRows), got.NumRows)
+	}
+	for _, col := range []string{"name", "tags", "bundle", "empty", "nulls"} {
+		if got.ColIndex(col) < 0 {
+			t.Fatalf("missing column %q in %v", col, got.Columns)
+		}
+	}
+	for i, want := range expectedStructRows {
+		if v := got.Get(i, "name"); v.Type != table.TypeString || v.Str != want.name {
+			t.Fatalf("row %d name: want %s, got %v", i, want.name, v)
+		}
+		tags := got.Get(i, "tags")
+		if tags.Type != table.TypeList || len(tags.List) != 3 {
+			t.Fatalf("row %d tags: want 3-element list, got %v", i, tags)
+		}
+		if tags.List[0].Type != table.TypeString || tags.List[0].Str != "user" || tags.List[1].Type != table.TypeString || tags.List[1].Str != want.city || tags.List[2].Type != table.TypeNull {
+			t.Fatalf("row %d unexpected tags: %#v", i, tags.List)
+		}
+		bundle := got.Get(i, "bundle")
+		if bundle.Type != table.TypeList || len(bundle.List) != 2 {
+			t.Fatalf("row %d bundle: want 2-record list, got %v", i, bundle)
+		}
+		first := recordValues(bundle.List[0])
+		if v := first["name"]; v.Type != table.TypeString || v.Str != want.name {
+			t.Fatalf("row %d bundle[0].name: want %s, got %v", i, want.name, v)
+		}
+		if v := first["age"]; v.Type != table.TypeInt || v.Int != want.age {
+			t.Fatalf("row %d bundle[0].age: want %d, got %v", i, want.age, v)
+		}
+		if empty := got.Get(i, "empty"); empty.Type != table.TypeList || len(empty.List) != 0 {
+			t.Fatalf("row %d empty: want empty list, got %v", i, empty)
+		}
+		if nulls := got.Get(i, "nulls"); nulls.Type != table.TypeList || len(nulls.List) != 1 || nulls.List[0].Type != table.TypeNull {
+			t.Fatalf("row %d nulls: want [null], got %v", i, nulls)
+		}
+	}
+}
+
 func assertStructRowsJSON(t *testing.T, rows []map[string]any) {
 	t.Helper()
 	if len(rows) != len(expectedStructRows) {

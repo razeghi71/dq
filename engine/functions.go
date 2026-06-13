@@ -511,6 +511,10 @@ func EvalAggregate(expr ast.Expr, nested *table.Table) (table.Value, error) {
 		return evalArith(e.Op, left, right)
 	case *ast.LiteralExpr:
 		return evalLiteral(e), nil
+	case *ast.StructExpr:
+		return table.Null(), fmt.Errorf("struct constructor is not supported in reduce")
+	case *ast.ListExpr:
+		return table.Null(), fmt.Errorf("list constructor is not supported in reduce")
 	default:
 		return table.Null(), fmt.Errorf("unsupported expression type %T in reduce", expr)
 	}

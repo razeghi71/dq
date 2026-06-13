@@ -944,6 +944,9 @@ func (p *Parser) parsePrimary() (ast.Expr, error) {
 			if strings.EqualFold(tok.Val, "struct") {
 				return p.parseStructExpr()
 			}
+			if strings.EqualFold(tok.Val, "list") {
+				return p.parseListExpr()
+			}
 			return p.parseFuncCall(tok.Val)
 		}
 		path := []string{tok.Val}
@@ -1014,6 +1017,35 @@ func (p *Parser) parseStructExpr() (ast.Expr, error) {
 	}
 
 	return &ast.StructExpr{Fields: fields}, nil
+}
+
+func (p *Parser) parseListExpr() (ast.Expr, error) {
+	p.advance() // consume (
+
+	var elements []ast.Expr
+	if p.peek().Type != lexer.TokenRParen {
+		for {
+			expr, err := p.parseExpr()
+			if err != nil {
+				return nil, fmt.Errorf("in list: %w", err)
+			}
+			elements = append(elements, expr)
+
+			if p.peek().Type != lexer.TokenComma {
+				break
+			}
+			p.advance()
+			if p.peek().Type == lexer.TokenRParen {
+				return nil, fmt.Errorf("in list: expected expression after ',', got %s (%q)", p.peek().Type, p.peek().Val)
+			}
+		}
+	}
+
+	if _, err := p.expect(lexer.TokenRParen); err != nil {
+		return nil, fmt.Errorf("in list: %w", err)
+	}
+
+	return &ast.ListExpr{Elements: elements}, nil
 }
 
 func (p *Parser) parseFuncCall(name string) (ast.Expr, error) {
