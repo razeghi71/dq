@@ -3,8 +3,6 @@ package engine
 import (
 	"fmt"
 	"math"
-	"strconv"
-	"strings"
 
 	"github.com/razeghi71/dq/ast"
 	"github.com/razeghi71/dq/table"
@@ -148,80 +146,26 @@ func evalComparison(op string, left, right table.Value) (table.Value, error) {
 		}
 	}
 
-	// Lists and records have no meaningful scalar comparison: error clearly
-	// (e.g. string vs record), as before.
-	if !isComparableScalar(left) || !isComparableScalar(right) {
-		return table.Null(), fmt.Errorf("cannot compare %v with %v", left.AsString(), right.AsString())
-	}
-
-	// Bool comparison
-	if left.Type == table.TypeBool && right.Type == table.TypeBool {
-		switch op {
-		case "==":
-			return table.BoolVal(left.Bool == right.Bool), nil
-		case "!=":
-			return table.BoolVal(left.Bool != right.Bool), nil
-		default:
-			return table.Null(), fmt.Errorf("cannot use %s on booleans", op)
-		}
-	}
-
-	// Numeric comparison: applies when both sides are numeric, including
-	// strings that parse as numbers. This lets widened CSV string columns
-	// (e.g. "1", "2.5") compare against numeric literals, consistent with how
-	// join/group/distinct match int 1 with string "1". Unlike a pure
-	// string-key normalization, parsing to a number keeps ordering (<, >)
-	// correct (e.g. "10" > "9").
-	if lf, lok := cmpFloat(left); lok {
-		if rf, rok := cmpFloat(right); rok {
-			diff := lf - rf
-			var cmp int
-			if diff < 0 {
-				cmp = -1
-			} else if diff > 0 {
-				cmp = 1
-			}
-			return table.BoolVal(cmpResult(op, cmp)), nil
-		}
-	}
-
-	// Fallback for the remaining scalar combinations (e.g. val == "something",
-	// or numeric vs non-numeric string): compare by value representation, the
-	// same normalization used by join/group/distinct.
-	cmp := strings.Compare(left.AsString(), right.AsString())
-	return table.BoolVal(cmpResult(op, cmp)), nil
-}
-
-// isComparableScalar reports whether a value can take part in a scalar
-// comparison. Lists and records cannot and produce a clear error instead.
-func isComparableScalar(v table.Value) bool {
-	switch v.Type {
-	case table.TypeInt, table.TypeFloat, table.TypeString, table.TypeBool:
-		return true
-	default:
-		return false
-	}
-}
-
-// cmpFloat coerces a value to float64 for comparison. Unlike Value.AsFloat
-// (used for arithmetic), it also parses numeric strings so that widened CSV
-// columns can be compared against numeric literals. It is intentionally local
-// to comparison to avoid changing arithmetic/string-concat semantics.
-func cmpFloat(v table.Value) (float64, bool) {
-	switch v.Type {
-	case table.TypeInt:
-		return float64(v.Int), true
-	case table.TypeFloat:
-		return v.Float, true
-	case table.TypeString:
-		f, err := strconv.ParseFloat(strings.TrimSpace(v.Str), 64)
+	switch op {
+	case "==":
+		eq, err := table.EqualStrict(left, right)
 		if err != nil {
-			return 0, false
+			return table.Null(), fmt.Errorf("cannot compare %s with %s", table.TypeName(left.Type), table.TypeName(right.Type))
 		}
-		return f, true
-	default:
-		return 0, false
+		return table.BoolVal(eq), nil
+	case "!=":
+		eq, err := table.EqualStrict(left, right)
+		if err != nil {
+			return table.Null(), fmt.Errorf("cannot compare %s with %s", table.TypeName(left.Type), table.TypeName(right.Type))
+		}
+		return table.BoolVal(!eq), nil
 	}
+
+	cmp, err := table.CompareStrict(left, right)
+	if err != nil {
+		return table.Null(), fmt.Errorf("cannot compare %s with %s", table.TypeName(left.Type), table.TypeName(right.Type))
+	}
+	return table.BoolVal(cmpResult(op, cmp)), nil
 }
 
 func cmpResult(op string, cmp int) bool {

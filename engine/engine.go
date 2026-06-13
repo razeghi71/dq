@@ -188,21 +188,14 @@ func compareValues(a, b table.Value) int {
 		return -1
 	}
 
-	// Numeric comparison
-	af, aok := a.AsFloat()
-	bf, bok := b.AsFloat()
-	if aok && bok {
-		if af < bf {
-			return -1
-		}
-		if af > bf {
-			return 1
-		}
-		return 0
+	if cmp, err := table.CompareStrict(a, b); err == nil {
+		return cmp
 	}
 
-	// String comparison
-	return strings.Compare(a.AsString(), b.AsString())
+	if a.Type != b.Type {
+		return strings.Compare(table.TypeName(a.Type), table.TypeName(b.Type))
+	}
+	return strings.Compare(table.CanonicalKey(a), table.CanonicalKey(b))
 }
 
 func execSelect(o *ast.SelectOp, t *table.Table) (*table.Table, error) {
@@ -274,7 +267,7 @@ func execGroup(o *ast.GroupOp, t *table.Table) (*table.Table, error) {
 				return nil, fmt.Errorf("group: %w", err)
 			}
 			keyVals[j] = v
-			keyParts[j] = v.AsString()
+			keyParts[j] = table.CanonicalKey(v)
 		}
 		keyStr := strings.Join(keyParts, "\x00")
 
@@ -425,13 +418,13 @@ func execDistinct(o *ast.DistinctOp, t *table.Table) (*table.Table, error) {
 				if err != nil {
 					return nil, fmt.Errorf("distinct %q: %w", strings.Join(path, "."), err)
 				}
-				parts[j] = v.AsString()
+				parts[j] = table.CanonicalKey(v)
 			}
 			key = strings.Join(parts, "\x00")
 		} else {
 			parts := make([]string, len(t.Columns))
 			for j := range t.Columns {
-				parts[j] = t.Col(j).Get(i).AsString()
+				parts[j] = table.CanonicalKey(t.Col(j).Get(i))
 			}
 			key = strings.Join(parts, "\x00")
 		}

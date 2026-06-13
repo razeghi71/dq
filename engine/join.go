@@ -276,7 +276,7 @@ func joinKeyAt(t *table.Table, keys []resolvedJoinKey, row int) (string, bool, e
 		if v.IsNull() {
 			return "", false, nil
 		}
-		parts[i] = v.AsString()
+		parts[i] = table.CanonicalKey(v)
 	}
 	return strings.Join(parts, "\x00"), true, nil
 }

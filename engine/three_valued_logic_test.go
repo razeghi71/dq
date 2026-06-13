@@ -290,7 +290,7 @@ func TestThreeValuedLogicFilterSemantics(t *testing.T) {
 		tbl := table.NewTable([]string{"name", "message"})
 		tbl.AddRow([]table.Value{table.StrVal("Alice"), table.StrVal("ERROR: timeout")})
 		tbl.AddRow([]table.Value{table.StrVal("Bob"), table.Null()})
-		result := runQuery(t, tbl, `filter { not contains(message, "ERROR") } | count`)
+		result := runQuery(t, tbl, `filter { not str_contains(message, "ERROR") } | count`)
 		if result.GetAt(0, 0).Int != 0 {
 			t.Errorf("expected 0 rows, got %d", result.GetAt(0, 0).Int)
 		}

@@ -32,6 +32,20 @@ func loadAndQuery(t *testing.T, source, query string) *table.Table {
 	return result
 }
 
+func loadAndQueryExpectErr(t *testing.T, source, query string) error {
+	t.Helper()
+	q, err := parser.Parse(source + " | " + query)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	tbl, err := loader.Load(q.Source.Filename, loader.FromAST(q.Source.Load))
+	if err != nil {
+		t.Fatalf("load %s: %v", q.Source.Filename, err)
+	}
+	_, err = Execute(q, tbl, nil)
+	return err
+}
+
 // ============================================================
 // Flat files (users.{csv,json,jsonl,avro,parquet})
 // ============================================================
@@ -614,7 +628,7 @@ func TestIntegrationColumnTypeWidening(t *testing.T) {
 	}
 
 	t.Run("filter_on_widened_column", func(t *testing.T) {
-		// filter treats the widened string column as strings; only "something" != "1"/"2.5"
+		// filter compares the widened string column against exact string values.
 		result := loadAndQuery(t, testdataDir+"/mixed_types.csv", `filter { val == "something" }`)
 		if result.NumRows != 1 {
 			t.Fatalf("expected 1 row, got %d", result.NumRows)
@@ -625,24 +639,34 @@ func TestIntegrationColumnTypeWidening(t *testing.T) {
 	})
 }
 
-// TestIntegrationFilterCrossTypeComparison covers cross-type comparisons in
-// filter match by value, so widened string columns compare against numeric
-// literals consistently with join/group/distinct.
-func TestIntegrationFilterCrossTypeComparison(t *testing.T) {
+// TestIntegrationFilterTypeSafety covers the stricter comparison contract.
+func TestIntegrationFilterTypeSafety(t *testing.T) {
 	cases := []struct {
-		query string
-		want  int
+		name    string
+		query   string
+		want    int
+		wantErr string
 	}{
-		{`filter { val == 1 }`, 1},           // string "1" matches int literal 1
-		{`filter { val == 2.5 }`, 1},         // string "2.5" matches float literal 2.5
-		{`filter { val == "1" }`, 1},         // string literal still works
-		{`filter { val == "something" }`, 1}, // non-numeric string compare
-		{`filter { val != 1 }`, 2},           // 2.5 and "something"
-		{`filter { val > 1 }`, 2},            // numeric 2.5 plus lexical "something" > "1"
-		{`filter { val > 9 }`, 1},            // "something"; numeric 2.5 < 9 (not lexical)
+		{name: "eq_int_literal", query: `filter { val == 1 }`, wantErr: "cannot compare string with int"},
+		{name: "eq_float_literal", query: `filter { val == 2.5 }`, wantErr: "cannot compare string with float"},
+		{name: "eq_string_literal", query: `filter { val == "1" }`, want: 1},
+		{name: "eq_string_literal2", query: `filter { val == "something" }`, want: 1},
+		{name: "neq_int_literal", query: `filter { val != 1 }`, wantErr: "cannot compare string with int"},
+		{name: "gt_int_literal", query: `filter { val > 1 }`, wantErr: "cannot compare string with int"},
+		{name: "gt_int_literal2", query: `filter { val > 9 }`, wantErr: "cannot compare string with int"},
 	}
 	for _, c := range cases {
-		t.Run(c.query, func(t *testing.T) {
+		t.Run(c.name, func(t *testing.T) {
+			if c.wantErr != "" {
+				err := loadAndQueryExpectErr(t, testdataDir+"/mixed_types.csv", c.query)
+				if err == nil {
+					t.Fatalf("expected error containing %q", c.wantErr)
+				}
+				if !strings.Contains(err.Error(), c.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", c.wantErr, err)
+				}
+				return
+			}
 			result := loadAndQuery(t, testdataDir+"/mixed_types.csv", c.query)
 			if result.NumRows != c.want {
 				t.Fatalf("%s: expected %d rows, got %d", c.query, c.want, result.NumRows)
@@ -710,8 +734,8 @@ func TestIntegrationStdinPipeline(t *testing.T) {
 func TestIntegrationStringPredicates(t *testing.T) {
 	file := testdataDir + "/users.csv"
 
-	t.Run("contains_filter", func(t *testing.T) {
-		result := loadAndQuery(t, file, `filter { contains(city, "NY") } | select name | sort name`)
+	t.Run("str_contains_filter", func(t *testing.T) {
+		result := loadAndQuery(t, file, `filter { str_contains(city, "NY") } | select name | sort name`)
 		want := []string{"Alice", "Charlie", "Frank"}
 		if result.NumRows != len(want) {
 			t.Fatalf("expected %d rows, got %d", len(want), result.NumRows)
@@ -799,6 +823,53 @@ func TestIntegrationGlobJoin(t *testing.T) {
 	}
 	if result.Get(1, "name").Str != "Bob" || result.Get(1, "status").Str != "pending" {
 		t.Errorf("row 1: got %s", result.String())
+	}
+}
+
+func TestIntegrationJoinExactTypeMismatchOnWidenedCSV(t *testing.T) {
+	dir := t.TempDir()
+	leftFile := filepath.Join(dir, "left.csv")
+	rightFile := filepath.Join(dir, "right.csv")
+
+	leftData := "id,name\n1,Alice\n"
+	rightData := "id,note\n1,string-key\nx,other\n"
+
+	if err := os.WriteFile(leftFile, []byte(leftData), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rightFile, []byte(rightData), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rightTbl, err := loader.Load(rightFile, loader.Options{})
+	if err != nil {
+		t.Fatalf("load right: %v", err)
+	}
+	if rightTbl.Col(0).ColType() != table.TypeString {
+		t.Fatalf("expected widened string column on right, got %v", rightTbl.Col(0).ColType())
+	}
+	if got := rightTbl.Get(0, "id"); got.Type != table.TypeString || got.Str != "1" {
+		t.Fatalf("expected right id to be string \"1\", got %v", got)
+	}
+
+	leftTbl, err := loader.Load(leftFile, loader.Options{})
+	if err != nil {
+		t.Fatalf("load left: %v", err)
+	}
+
+	q, err := parser.Parse(leftFile + ` | join ` + rightFile + ` on id | sort name`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	load := func(filename string, opts ast.LoadOptions) (*table.Table, error) {
+		return loader.Load(filename, loader.FromAST(opts))
+	}
+	result, err := Execute(q, leftTbl, load)
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if result.NumRows != 0 {
+		t.Fatalf("expected no join matches for int vs widened string keys, got %d rows: %s", result.NumRows, result.String())
 	}
 }
 

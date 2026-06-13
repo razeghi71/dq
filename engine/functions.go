@@ -29,8 +29,10 @@ func evalFunc(e *ast.FuncCallExpr, ctx *EvalContext) (table.Value, error) {
 		return callSubstr(e.Args, ctx)
 	case "trim":
 		return callTrim(e.Args, ctx)
-	case "contains":
-		return callContains(e.Args, ctx)
+	case "str_contains":
+		return callStrContains(e.Args, ctx)
+	case "list_contains":
+		return callListContains(e.Args, ctx)
 	case "starts_with":
 		return callStartsWith(e.Args, ctx)
 	case "ends_with":
@@ -290,8 +292,8 @@ func strPredicateArgs(name, secondArgLabel string, args []ast.Expr, ctx *EvalCon
 	return sv.Str, subv.Str, true, nil
 }
 
-func callContains(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
-	s, sub, ok, err := strPredicateArgs("contains", "substring", args, ctx)
+func callStrContains(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
+	s, sub, ok, err := strPredicateArgs("str_contains", "substring", args, ctx)
 	if err != nil {
 		return table.Null(), err
 	}
@@ -299,6 +301,32 @@ func callContains(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
 		return table.Null(), nil
 	}
 	return table.BoolVal(strings.Contains(s, sub)), nil
+}
+
+func callListContains(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
+	if len(args) != 2 {
+		return table.Null(), fmt.Errorf("list_contains() takes 2 arguments (list, element), got %d", len(args))
+	}
+	listV, err := Eval(args[0], ctx)
+	if err != nil {
+		return table.Null(), err
+	}
+	elemV, err := Eval(args[1], ctx)
+	if err != nil {
+		return table.Null(), err
+	}
+	if listV.IsNull() || elemV.IsNull() {
+		return table.Null(), nil
+	}
+	if listV.Type != table.TypeList {
+		return table.Null(), fmt.Errorf("list_contains() requires a list, got %s", valueTypeName(listV))
+	}
+	for _, elem := range listV.List {
+		if table.Equal(elem, elemV) {
+			return table.BoolVal(true), nil
+		}
+	}
+	return table.BoolVal(false), nil
 }
 
 func callStartsWith(args []ast.Expr, ctx *EvalContext) (table.Value, error) {

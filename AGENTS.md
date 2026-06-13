@@ -383,6 +383,7 @@ These are available in `transform` and `reduce` expressions:
 * `upper(s)`, `lower(s)` — case conversion (`TypeString` only)
 * `str_len(s)` — string length in Unicode code points, 0-based indexing companion (`TypeString` only)
 * `list_len(xs)` — list element count (`TypeList` only)
+* `list_contains(xs, x)` — true if list `xs` contains `x`, using value-representation equality (`TypeList` only for `xs`)
 * `substr(s, start, length)` — substring by **0-based code point** index and length (`TypeString` only for `s`; `start` and `length` must be `TypeInt`); negative `start` counts from the end (Python-style); `length` must be non-negative
 * `trim(s)` — remove whitespace (`TypeString` only)
 * `coalesce(a, b, ...)` — first non-null value
@@ -390,7 +391,7 @@ These are available in `transform` and `reduce` expressions:
 * `year(date)`, `month(date)`, `day(date)` — extract year, month, or day from a date string (`TypeString` only). Supported formats include `YYYY-MM-DD`, ISO timestamps, `YYYY-MM-DD HH:MM:SS`, and common slash-separated forms (see `engine/functions.go` `dateFormats`). Null input → null. Unparseable strings **error** and fail the query (same strict parse semantics as BigQuery `PARSE_DATE`, Trino `date_parse`, PostgreSQL `::date` — not silent null).
 
 **String predicates (return booleans; usable in `filter` and `transform`; `TypeString` only):**
-* `contains(s, sub)` — true if `s` contains substring `sub`
+* `str_contains(s, sub)` — true if `s` contains substring `sub`
 * `starts_with(s, prefix)` — true if `s` starts with `prefix`
 * `ends_with(s, suffix)` — true if `s` ends with `suffix`
 * `matches(s, regex)` — true if `s` contains a match for the (RE2) regular expression `regex` (unanchored; use `^...$` for full-string match)
@@ -414,11 +415,12 @@ Wrong *type* (e.g. `year(quantity)`, `matches(age, "x")`) also errors. For messy
 dq 'users.csv | transform name_len = str_len(name)'
 dq 'nested.json | transform order_count = list_len(orders)'
 dq 'nested.json | filter { list_len(orders) > 1 } | select name'
+dq 'nested.json | filter { list_contains(tags, "admin") } | select name'
 dq 'dates.csv | transform y = year(d)'   # "2024-13-99" → error, not null
 ```
 
 ```
-dq 'logs.csv | filter { contains(upper(message), "ERROR") }'
+dq 'logs.csv | filter { str_contains(upper(message), "ERROR") }'
 dq 'logs.csv | filter { starts_with(level, "WARN") }'
 dq 'access.log.csv | filter { matches(message, "timeout|refused") }'
 ```

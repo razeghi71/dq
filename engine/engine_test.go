@@ -517,15 +517,15 @@ func TestStringPredicatesFilter(t *testing.T) {
 		query string
 		want  []string
 	}{
-		{"contains", `filter { contains(name, "a") }`, []string{"Charlie", "Diana", "Frank"}},
+		{"str_contains", `filter { str_contains(name, "a") }`, []string{"Charlie", "Diana", "Frank"}},
 		{"starts_with", `filter { starts_with(name, "C") }`, []string{"Charlie"}},
 		{"ends_with", `filter { ends_with(name, "e") }`, []string{"Alice", "Charlie", "Eve"}},
 		{"matches", `filter { matches(name, "^[AB]") }`, []string{"Alice", "Bob"}},
 		{"matches_unanchored", `filter { matches(name, "li") }`, []string{"Alice", "Charlie"}},
 		{"matches_anchored_full", `filter { matches(name, "^Alice$") }`, []string{"Alice"}},
-		{"negative", `filter { contains(name, "zzz") }`, nil},
-		{"not_contains", `filter { not contains(name, "a") }`, []string{"Alice", "Bob", "Eve"}},
-		{"combined", `filter { contains(name, "a") and city == "NY" }`, []string{"Charlie", "Frank"}},
+		{"negative", `filter { str_contains(name, "zzz") }`, nil},
+		{"not_str_contains", `filter { not str_contains(name, "a") }`, []string{"Alice", "Bob", "Eve"}},
+		{"combined", `filter { str_contains(name, "a") and city == "NY" }`, []string{"Charlie", "Frank"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -541,7 +541,7 @@ func TestStringPredicatesTransform(t *testing.T) {
 		query string
 		want  bool
 	}{
-		{"contains", `transform hit = contains(city, "Y")`, true},
+		{"str_contains", `transform hit = str_contains(city, "Y")`, true},
 		{"starts_with", `transform hit = starts_with(name, "Al")`, true},
 		{"ends_with", `transform hit = ends_with(name, "ce")`, true},
 		{"matches", `transform hit = matches(name, "^Al")`, true},
@@ -564,8 +564,8 @@ func TestStringPredicatesWrongTypeErrors(t *testing.T) {
 		query   string
 		wantErr string
 	}{
-		{"contains_int_haystack", `transform hit = contains(age, "3")`, "contains() requires a string, got int"},
-		{"contains_int_needle", `transform hit = contains(name, age)`, "contains() requires a string substring, got int"},
+		{"str_contains_int_haystack", `transform hit = str_contains(age, "3")`, "str_contains() requires a string, got int"},
+		{"str_contains_int_needle", `transform hit = str_contains(name, age)`, "str_contains() requires a string substring, got int"},
 		{"starts_with_int_needle", `transform hit = starts_with(name, age)`, "starts_with() requires a string prefix, got int"},
 		{"ends_with_int_needle", `transform hit = ends_with(name, age)`, "ends_with() requires a string suffix, got int"},
 		{"matches_int_haystack", `transform hit = matches(age, "3")`, "matches() requires a string, got int"},
@@ -582,7 +582,7 @@ func TestStringPredicatesNullPropagation(t *testing.T) {
 	tbl := table.NewTable([]string{"s", "needle"})
 	tbl.AddRow([]table.Value{table.Null(), table.StrVal("a")})
 	tbl.AddRow([]table.Value{table.StrVal("abc"), table.Null()})
-	for _, fn := range []string{"contains", "starts_with", "ends_with", "matches"} {
+	for _, fn := range []string{"str_contains", "starts_with", "ends_with", "matches"} {
 		t.Run(fn+"_null_haystack", func(t *testing.T) {
 			result := runQuery(t, tbl, "transform x = "+fn+`(s, "a") | head 1`)
 			idx := result.ColIndex("x")
@@ -604,7 +604,7 @@ func TestStringPredicatesFilterNullDropsRow(t *testing.T) {
 	tbl := table.NewTable([]string{"name", "message"})
 	tbl.AddRow([]table.Value{table.StrVal("Alice"), table.StrVal("ERROR: timeout")})
 	tbl.AddRow([]table.Value{table.StrVal("Bob"), table.Null()})
-	result := runQuery(t, tbl, `filter { contains(message, "ERROR") } | select name`)
+	result := runQuery(t, tbl, `filter { str_contains(message, "ERROR") } | select name`)
 	if result.NumRows != 1 {
 		t.Fatalf("expected 1 row, got %d", result.NumRows)
 	}
@@ -641,8 +641,8 @@ func TestStringPredicatesArity(t *testing.T) {
 		name  string
 		query string
 	}{
-		{"contains_1_arg", `filter { contains(name) }`},
-		{"contains_3_args", `filter { contains(name, "a", "b") }`},
+		{"str_contains_1_arg", `filter { str_contains(name) }`},
+		{"str_contains_3_args", `filter { str_contains(name, "a", "b") }`},
 		{"starts_with_1_arg", `filter { starts_with(name) }`},
 		{"starts_with_3_args", `filter { starts_with(name, "A", "B") }`},
 		{"ends_with_1_arg", `filter { ends_with(name) }`},
@@ -657,6 +657,168 @@ func TestStringPredicatesArity(t *testing.T) {
 				t.Fatal("expected arity error")
 			}
 		})
+	}
+}
+
+func TestContainsRemoved(t *testing.T) {
+	err := runQueryExpectErr(t, usersTable(), `filter { contains(name, "a") }`)
+	if err == nil {
+		t.Fatal("expected contains() to be removed")
+	}
+	if !strings.Contains(err.Error(), `unknown function "contains"`) {
+		t.Fatalf("expected unknown function error, got %v", err)
+	}
+}
+
+func TestListContains(t *testing.T) {
+	tbl := table.NewTable([]string{"name", "tags", "nums", "empty", "nilcol"})
+	tbl.AddRow([]table.Value{
+		table.StrVal("Alice"),
+		table.ListVal([]table.Value{table.StrVal("admin"), table.StrVal("user")}),
+		table.ListVal([]table.Value{table.IntVal(1), table.FloatVal(2.5)}),
+		table.ListVal(nil),
+		table.Null(),
+	})
+	tbl.AddRow([]table.Value{
+		table.StrVal("Bob"),
+		table.ListVal([]table.Value{table.StrVal("user")}),
+		table.ListVal([]table.Value{table.StrVal("1"), table.IntVal(3)}),
+		table.ListVal(nil),
+		table.Null(),
+	})
+
+	cases := []struct {
+		name  string
+		query string
+		want  []string
+	}{
+		{"string_hit", `filter { list_contains(tags, "admin") }`, []string{"Alice"}},
+		{"string_exact_type", `filter { list_contains(nums, "1") }`, []string{"Bob"}},
+		{"int_exact_type", `filter { list_contains(nums, 1) }`, []string{"Alice"}},
+		{"string_miss", `filter { list_contains(tags, "missing") }`, nil},
+		{"empty_list", `filter { list_contains(empty, "x") }`, nil},
+		{"null_list_drops", `filter { list_contains(nilcol, "x") }`, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := runQuery(t, tbl, tc.query+" | select name | sort name")
+			assertSortedNames(t, result, tc.want)
+		})
+	}
+}
+
+func TestListContainsTransformNullPropagation(t *testing.T) {
+	tbl := table.NewTable([]string{"xs", "needle"})
+	tbl.AddRow([]table.Value{table.Null(), table.StrVal("a")})
+	tbl.AddRow([]table.Value{table.ListVal([]table.Value{table.StrVal("a")}), table.Null()})
+
+	result := runQuery(t, tbl, `transform hit = list_contains(xs, needle) | select hit`)
+	for i := 0; i < result.NumRows; i++ {
+		if !result.GetAt(i, 0).IsNull() {
+			t.Fatalf("row %d: expected null, got %v", i, result.GetAt(i, 0).AsString())
+		}
+	}
+}
+
+func TestListContainsWrongTypeErrors(t *testing.T) {
+	cases := []struct {
+		name    string
+		query   string
+		wantErr string
+	}{
+		{"string_first_arg", `transform hit = list_contains(name, "a")`, "list_contains() requires a list, got string"},
+		{"int_first_arg", `transform hit = list_contains(age, 1)`, "list_contains() requires a list, got int"},
+		{"too_few_args", `transform hit = list_contains(name)`, "list_contains() takes 2 arguments"},
+		{"too_many_args", `transform hit = list_contains(name, "a", "b")`, "list_contains() takes 2 arguments"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			expectQueryErrContains(t, usersTable(), tc.query, tc.wantErr)
+		})
+	}
+}
+
+func TestListAndRecordEqualityAndTypeSafety(t *testing.T) {
+	tbl := table.NewTable([]string{"name", "tags", "profile"})
+	tbl.AddRow([]table.Value{
+		table.StrVal("Alice"),
+		table.ListVal([]table.Value{table.StrVal("admin"), table.StrVal("user")}),
+		table.RecordVal([]table.RecordField{{Name: "role", Value: table.StrVal("admin")}}),
+	})
+
+	cases := []struct {
+		name    string
+		query   string
+		want    []string
+		wantErr string
+	}{
+		{"list_self_eq", `filter { tags == tags } | select name`, []string{"Alice"}, ""},
+		{"list_different_type_eq", `filter { tags == "admin" } | select name`, nil, "cannot compare list with string"},
+		{"list_different_type_neq", `filter { tags != "admin" } | select name`, nil, "cannot compare list with string"},
+		{"record_self_eq", `filter { profile == profile } | select name`, []string{"Alice"}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.wantErr != "" {
+				expectQueryErrContains(t, tbl, tc.query, tc.wantErr)
+				return
+			}
+			result := runQuery(t, tbl, tc.query)
+			assertSortedNames(t, result, tc.want)
+		})
+	}
+}
+
+func TestListAndRecordOrderingErrors(t *testing.T) {
+	tbl := table.NewTable([]string{"name", "tags", "profile"})
+	tbl.AddRow([]table.Value{
+		table.StrVal("Alice"),
+		table.ListVal([]table.Value{table.StrVal("admin"), table.StrVal("user")}),
+		table.RecordVal([]table.RecordField{{Name: "role", Value: table.StrVal("admin")}}),
+	})
+
+	cases := []struct {
+		name    string
+		query   string
+		wantErr string
+	}{
+		{"list_order_string", `filter { tags > "admin" }`, "cannot compare list with string"},
+		{"record_order_record", `filter { profile > profile }`, "cannot compare record with record"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			expectQueryErrContains(t, tbl, tc.query, tc.wantErr)
+		})
+	}
+}
+
+func TestDistinctUsesExactStructuralKeys(t *testing.T) {
+	tbl := table.NewTable([]string{"v"})
+	tbl.AddRow([]table.Value{
+		table.ListVal([]table.Value{table.StrVal("1"), table.IntVal(2)}),
+	})
+	tbl.AddRow([]table.Value{
+		table.ListVal([]table.Value{table.IntVal(1), table.StrVal("2")}),
+	})
+
+	distinct := runQuery(t, tbl, "distinct v")
+	if distinct.NumRows != 2 {
+		t.Fatalf("expected distinct to keep both rows, got %d", distinct.NumRows)
+	}
+}
+
+func TestGroupUsesExactStructuralKeys(t *testing.T) {
+	tbl := table.NewTable([]string{"v"})
+	tbl.AddRow([]table.Value{
+		table.ListVal([]table.Value{table.StrVal("1"), table.IntVal(2)}),
+	})
+	tbl.AddRow([]table.Value{
+		table.ListVal([]table.Value{table.IntVal(1), table.StrVal("2")}),
+	})
+
+	grouped := runQuery(t, tbl, "group v | reduce n = count() | remove grouped")
+	if grouped.NumRows != 2 {
+		t.Fatalf("expected group to keep both rows, got %d", grouped.NumRows)
 	}
 }
 
@@ -1221,6 +1383,27 @@ func TestJoinMultiKey(t *testing.T) {
 	}
 	if result.Get(0, "lead").Str != "Alice" || result.Get(0, "budget").Int != 100 {
 		t.Errorf("wrong joined row: %s", result.String())
+	}
+}
+
+func TestJoinUsesExactStructuralKeys(t *testing.T) {
+	left := table.NewTable([]string{"id", "name"})
+	left.AddRow([]table.Value{table.IntVal(1), table.StrVal("Alice")})
+
+	right := table.NewTable([]string{"user_id", "note"})
+	right.AddRow([]table.Value{table.StrVal("1"), table.StrVal("string-key")})
+
+	q, err := parser.Parse("left.csv | join right.csv on id == user_id")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	load := func(string, ast.LoadOptions) (*table.Table, error) { return right, nil }
+	result, err := Execute(q, left, load)
+	if err != nil {
+		t.Fatalf("exec error: %v", err)
+	}
+	if result.NumRows != 0 {
+		t.Fatalf("expected no join match for int vs string key, got %d rows: %s", result.NumRows, result.String())
 	}
 }
 

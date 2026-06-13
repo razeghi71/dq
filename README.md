@@ -192,7 +192,7 @@ Join keys can use dot paths for nested fields; a dot-path key gets its own flatt
 Notes:
 
 - Null keys never match (rows with null keys still appear in left/right/full joins, with the other side null).
-- Keys match by value representation, consistent with `group` and `distinct` -- e.g. integer `1` matches string `"1"` across files of different formats.
+- Keys match by exact type and structural value, consistent with `group` and `distinct` -- e.g. integer `1` does not match string `"1"` across files of different formats.
 
 ## Functions
 
@@ -201,9 +201,9 @@ Notes:
 
 **`transform`** — per-row values:
 
-Strings — `upper(s)`, `lower(s)`, `trim(s)`, `substr(s, start, length)`, `str_len(s)`, `contains(s, sub)`, `starts_with(s, prefix)`, `ends_with(s, suffix)`, `matches(s, regex)`
+Strings — `upper(s)`, `lower(s)`, `trim(s)`, `substr(s, start, length)`, `str_len(s)`, `str_contains(s, sub)`, `starts_with(s, prefix)`, `ends_with(s, suffix)`, `matches(s, regex)`
 
-Lists — `list_len(xs)`
+Lists — `list_len(xs)`, `list_contains(xs, x)`
 
 General — `coalesce(a, b, ...)`, `if(cond, then, else)`
 
@@ -218,7 +218,7 @@ Indexes are 0-based. `matches()` uses RE2 regex (unanchored by default; use `^..
 dq 'users.csv | transform name = upper(name), name_len = str_len(name)'
 dq 'nested.json | transform n = list_len(orders)'
 dq 'sales.csv | transform total = coalesce(qty, 0) * price, y = year(date)'
-dq 'logs.csv | filter { contains(upper(message), "ERROR") }'
+dq 'logs.csv | filter { str_contains(upper(message), "ERROR") }'
 dq 'logs.csv | filter { starts_with(level, "WARN") }'
 dq 'access.csv | filter { ends_with(path, ".json") }'
 dq 'logs.csv | filter { matches(message, "timeout|refused") }'
@@ -244,8 +244,11 @@ JSON/Avro/Parquet arrays load as **lists**.
 ```bash
 dq 'nested.json | transform n = list_len(orders) | select name, n'
 dq 'nested.json | filter { list_len(tags) >= 2 } | select name'
+dq 'nested.json | filter { list_contains(tags, "admin") } | select name'
 dq 'nested.json | reduce orders total = sum(amount) | select name, total'
 ```
+
+Lists and records use exact structural equality. Use `list_contains(xs, x)` for membership and `list_len(xs)` for size checks; `tags == "admin"` and `tags == 1` error on type mismatch, and `filter { tags }` is an error.
 
 ## Output Formats
 
