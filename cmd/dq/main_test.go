@@ -447,6 +447,102 @@ func TestCLIOutputFormatAfterCount(t *testing.T) {
 	}
 }
 
+func TestCLIDescribeDefaultTable(t *testing.T) {
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, "../../testdata/users.csv | describe")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli: %v\n%s", err, out)
+	}
+	s := string(out)
+	for _, want := range []string{"column", "type", "row_count", "name", "string", "age", "int", "6"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("describe table output missing %q:\n%s", want, s)
+		}
+	}
+	if !strings.Contains(s, " | ") {
+		t.Fatalf("expected table separators, got:\n%s", s)
+	}
+}
+
+func TestCLIDescribeJSONCanBeFiltered(t *testing.T) {
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, `../../testdata/users.csv | describe | filter { type == "string" } | sort column | json`)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli: %v\n%s", err, out)
+	}
+
+	var rows []map[string]any
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 string columns, got %d: %#v", len(rows), rows)
+	}
+	if rows[0]["column"] != "city" || rows[1]["column"] != "name" {
+		t.Fatalf("unexpected string columns: %#v", rows)
+	}
+	for _, row := range rows {
+		if row["type"] != "string" || row["row_count"] != float64(6) {
+			t.Fatalf("unexpected describe row: %#v", row)
+		}
+	}
+}
+
+func TestCLIDescribeAfterFilterCSV(t *testing.T) {
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, `../../testdata/users.csv | filter { city == "NY" } | describe | csv`)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli: %v\n%s", err, out)
+	}
+	got := strings.TrimSpace(string(out))
+	wantLines := []string{
+		"column,type,row_count",
+		"name,string,3",
+		"age,int,3",
+		"city,string,3",
+	}
+	for _, want := range wantLines {
+		if !strings.Contains(got, want) {
+			t.Fatalf("CSV describe output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestCLIDescribeStdinJSONL(t *testing.T) {
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, `- with format=csv | describe | jsonl`)
+	cmd.Stdin = strings.NewReader("name,active\nAlice,true\nBob,false\n")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli: %v\n%s", err, out)
+	}
+	s := strings.TrimSpace(string(out))
+	if !strings.Contains(s, `"column":"name"`) || !strings.Contains(s, `"type":"string"`) {
+		t.Fatalf("expected name string metadata, got:\n%s", s)
+	}
+	if !strings.Contains(s, `"column":"active"`) || !strings.Contains(s, `"type":"bool"`) {
+		t.Fatalf("expected active bool metadata, got:\n%s", s)
+	}
+	if !strings.Contains(s, `"row_count":2`) {
+		t.Fatalf("expected row_count 2, got:\n%s", s)
+	}
+}
+
+func TestCLIDescribeRejectsArguments(t *testing.T) {
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, "../../testdata/users.csv | describe stats")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected parse error, got output:\n%s", out)
+	}
+	if !strings.Contains(string(out), "parse error") || !strings.Contains(string(out), "unexpected token") {
+		t.Fatalf("expected unexpected-token parse error, got:\n%s", out)
+	}
+}
+
 func TestCLIOutputFormatAvro(t *testing.T) {
 	bin := buildCLI(t)
 	cmd := exec.Command(bin, "../../testdata/users.csv | select name, age | head 2 | avro")

@@ -144,6 +144,34 @@ func assertFlatQueries(t *testing.T, file string) {
 	})
 
 	assertFlatLengthQueries(t, file)
+	assertFlatDescribeQueries(t, file, 6)
+}
+
+func assertFlatDescribeQueries(t *testing.T, file string, rows int64) {
+	t.Helper()
+
+	t.Run("describe", func(t *testing.T) {
+		result := loadAndQuery(t, file, "describe")
+		assertDescribeRows(t, result, map[string]describeMeta{
+			"name": {typ: "string", rows: rows},
+			"age":  {typ: "int", rows: rows},
+			"city": {typ: "string", rows: rows},
+		})
+	})
+
+	t.Run("describe_after_filter_and_output_shape", func(t *testing.T) {
+		result := loadAndQuery(t, file, `filter { city == "NY" } | describe | filter { type == "string" } | select column, row_count | sort column`)
+		if result.NumRows != 2 {
+			t.Fatalf("expected two string metadata rows, got %d: %s", result.NumRows, result.String())
+		}
+		assertNameSet(t, result, "column", "city", "name")
+		for i := 0; i < result.NumRows; i++ {
+			got := result.GetAt(i, result.ColIndex("row_count")).Int
+			if got < 1 {
+				t.Fatalf("expected positive post-filter row_count, got %d", got)
+			}
+		}
+	})
 }
 
 // assertFlatLengthQueries exercises str_len and substr on flat user files.
@@ -214,6 +242,8 @@ func assertFlatQueriesSmall(t *testing.T, file string) {
 			t.Errorf("youngest should be Bob, got %q", result.GetAt(0, nameIdx).Str)
 		}
 	})
+
+	assertFlatDescribeQueries(t, file, 3)
 }
 
 func TestIntegrationFlatJSON(t *testing.T) {
@@ -318,6 +348,31 @@ func assertNestedQueries(t *testing.T, file string) {
 	})
 
 	assertNestedLengthQueries(t, file)
+	assertNestedDescribeQueries(t, file)
+}
+
+func assertNestedDescribeQueries(t *testing.T, file string) {
+	t.Helper()
+
+	t.Run("describe_nested_top_level_types", func(t *testing.T) {
+		result := loadAndQuery(t, file, "describe")
+		assertDescribeRows(t, result, map[string]describeMeta{
+			"id":      {typ: "int", rows: 3},
+			"name":    {typ: "string", rows: 3},
+			"address": {typ: "record", rows: 3},
+			"tags":    {typ: "list", rows: 3},
+			"orders":  {typ: "list", rows: 3},
+			"profile": {typ: "record", rows: 3},
+		})
+	})
+
+	t.Run("describe_after_nested_transform", func(t *testing.T) {
+		result := loadAndQuery(t, file, "transform city = address.city, order_count = list_len(orders) | select city, order_count | describe")
+		assertDescribeRows(t, result, map[string]describeMeta{
+			"city":        {typ: "string", rows: 3},
+			"order_count": {typ: "int", rows: 3},
+		})
+	})
 }
 
 // assertNestedLengthQueries exercises str_len, list_len, and substr on nested files.
@@ -652,6 +707,22 @@ func TestIntegrationColumnTypeWidening(t *testing.T) {
 			t.Errorf("unexpected val: %q", result.GetAt(0, result.ColIndex("val")).Str)
 		}
 	})
+
+	t.Run("describe_preserves_widened_type_with_surviving_rows", func(t *testing.T) {
+		result := loadAndQuery(t, testdataDir+"/mixed_types.csv", `filter { val == "something" } | describe`)
+		assertDescribeRows(t, result, map[string]describeMeta{
+			"id":  {typ: "int", rows: 1},
+			"val": {typ: "string", rows: 1},
+		})
+	})
+
+	t.Run("describe_zero_surviving_rows_reports_null_types", func(t *testing.T) {
+		result := loadAndQuery(t, testdataDir+"/mixed_types.csv", `filter { false } | describe`)
+		assertDescribeRows(t, result, map[string]describeMeta{
+			"id":  {typ: "null", rows: 0},
+			"val": {typ: "null", rows: 0},
+		})
+	})
 }
 
 // TestIntegrationFilterTypeSafety covers the stricter comparison contract.
@@ -802,6 +873,23 @@ func TestJoinIntegration(t *testing.T) {
 	if result.ColIndex("product") < 0 {
 		t.Fatal("expected product column from orders")
 	}
+
+	q, err = parser.Parse(usersFile + ` | join ` + ordersFile + ` on name == user_name | describe`)
+	if err != nil {
+		t.Fatalf("parse describe: %v", err)
+	}
+	result, err = Execute(q, tbl, load)
+	if err != nil {
+		t.Fatalf("exec describe: %v", err)
+	}
+	assertDescribeRows(t, result, map[string]describeMeta{
+		"name":     {typ: "string", rows: 4},
+		"age":      {typ: "int", rows: 4},
+		"city":     {typ: "string", rows: 4},
+		"order_id": {typ: "int", rows: 4},
+		"product":  {typ: "string", rows: 4},
+		"amount":   {typ: "int", rows: 4},
+	})
 }
 
 func TestIntegrationGlobPrimarySource(t *testing.T) {
@@ -809,6 +897,13 @@ func TestIntegrationGlobPrimarySource(t *testing.T) {
 	if result.NumRows != 1 || result.Get(0, "count").Int != 2 {
 		t.Fatalf("expected count 2, got %s", result.String())
 	}
+
+	result = loadAndQuery(t, testdataDir+"/glob/users-*.csv", "describe")
+	assertDescribeRows(t, result, map[string]describeMeta{
+		"name": {typ: "string", rows: 2},
+		"age":  {typ: "int", rows: 2},
+		"city": {typ: "string", rows: 2},
+	})
 }
 
 func TestIntegrationGlobJoin(t *testing.T) {
@@ -1163,5 +1258,17 @@ func TestIntegrationEmptyCSV(t *testing.T) {
 		if result.NumRows != 0 || len(result.Columns) != 1 || result.Columns[0] != "name" {
 			t.Fatalf("expected empty projected table, got %s", result.String())
 		}
+	})
+
+	t.Run("describe_zero_column_source", func(t *testing.T) {
+		result := loadAndQuery(t, path, "describe")
+		assertDescribeRows(t, result, map[string]describeMeta{})
+	})
+
+	t.Run("describe_after_select_on_empty_source", func(t *testing.T) {
+		result := loadAndQuery(t, path, "select name | describe")
+		assertDescribeRows(t, result, map[string]describeMeta{
+			"name": {typ: "null", rows: 0},
+		})
 	})
 }

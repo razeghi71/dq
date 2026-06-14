@@ -381,6 +381,8 @@ func (p *Parser) parseOp() (ast.Op, error) {
 		return p.parseReduce()
 	case "count":
 		return p.parseCount()
+	case "describe":
+		return p.parseDescribe()
 	case "distinct":
 		return p.parseDistinct()
 	case "rename":
@@ -546,6 +548,11 @@ func (p *Parser) parseReduce() (ast.Op, error) {
 func (p *Parser) parseCount() (ast.Op, error) {
 	p.advance() // consume "count"
 	return &ast.CountOp{}, nil
+}
+
+func (p *Parser) parseDescribe() (ast.Op, error) {
+	p.advance() // consume "describe"
+	return &ast.DescribeOp{}, nil
 }
 
 func (p *Parser) parseDistinct() (ast.Op, error) {

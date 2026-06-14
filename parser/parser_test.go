@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -561,6 +562,44 @@ func TestParseDistinct(t *testing.T) {
 	d := q.Ops[0].(*ast.DistinctOp)
 	if len(d.Columns) != 2 {
 		t.Fatalf("expected 2 columns, got %d", len(d.Columns))
+	}
+}
+
+func TestParseDescribe(t *testing.T) {
+	q, err := Parse(`users.csv | describe | filter { type == "string" } | json`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(q.Ops) != 2 {
+		t.Fatalf("expected 2 ops, got %d", len(q.Ops))
+	}
+	if got := fmt.Sprintf("%T", q.Ops[0]); got != "*ast.DescribeOp" {
+		t.Fatalf("op[0]: expected *ast.DescribeOp, got %s", got)
+	}
+	if _, ok := q.Ops[1].(*ast.FilterOp); !ok {
+		t.Fatalf("op[1]: expected *ast.FilterOp, got %T", q.Ops[1])
+	}
+	if q.Output.Format != "json" {
+		t.Fatalf("expected json output, got %q", q.Output.Format)
+	}
+}
+
+func TestParseDescribeRejectsArguments(t *testing.T) {
+	cases := []string{
+		"users.csv | describe foo",
+		"users.csv | describe with nested=true",
+		"users.csv | describe to out.csv",
+	}
+	for _, query := range cases {
+		t.Run(query, func(t *testing.T) {
+			_, err := Parse(query)
+			if err == nil {
+				t.Fatalf("expected parse error for %q", query)
+			}
+			if !strings.Contains(err.Error(), "unexpected token") {
+				t.Fatalf("expected unexpected-token parse error, got %q", err.Error())
+			}
+		})
 	}
 }
 

@@ -42,6 +42,16 @@ Wrap queries in single quotes so your shell doesn't interpret `|`, `{`, `}`, or 
 
 ## Operations
 
+### `describe` - Show columns, types, and row count
+
+Returns one metadata row per column: `column`, `type`, and `row_count`.
+
+```bash
+dq 'users.csv | describe'
+dq 'users.csv | filter { city == "NY" } | describe | json'
+dq 'users.csv | describe | filter { type == "string" }'
+```
+
 ### `head` / `tail` - Get rows from the start or end
 
 ```bash

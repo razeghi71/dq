@@ -43,6 +43,8 @@ func execOp(op ast.Op, t *table.Table, load LoadFunc) (*table.Table, error) {
 		return execReduce(o, t)
 	case *ast.CountOp:
 		return execCount(t), nil
+	case *ast.DescribeOp:
+		return execDescribe(t), nil
 	case *ast.DistinctOp:
 		return execDistinct(o, t)
 	case *ast.RenameOp:
@@ -403,6 +405,18 @@ func execReduce(o *ast.ReduceOp, t *table.Table) (*table.Table, error) {
 func execCount(t *table.Table) *table.Table {
 	result := table.NewTable([]string{"count"})
 	result.AddRow([]table.Value{table.IntVal(int64(t.NumRows))})
+	return result
+}
+
+func execDescribe(t *table.Table) *table.Table {
+	result := table.NewTable([]string{"column", "type", "row_count"})
+	for i, name := range t.Columns {
+		result.AddRow([]table.Value{
+			table.StrVal(name),
+			table.StrVal(table.TypeName(t.Col(i).ColType())),
+			table.IntVal(int64(t.NumRows)),
+		})
+	}
 	return result
 }
 

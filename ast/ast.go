@@ -178,6 +178,11 @@ type CountOp struct{}
 
 func (o *CountOp) opNode() {}
 
+// DescribeOp returns table metadata: column name, storage type, and row count.
+type DescribeOp struct{}
+
+func (o *DescribeOp) opNode() {}
+
 // DistinctOp deduplicates rows.
 type DistinctOp struct {
 	Columns [][]string // empty = all columns

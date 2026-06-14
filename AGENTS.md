@@ -159,7 +159,38 @@ In `filter`, a row is kept only when the expression is explicitly `true`; `false
 
 ## Operations
 
-### 1. `head n`
+### 1. `describe`
+
+Return cheap metadata for the current materialized table. The output has one row per input column and three columns: `column`, `type`, and `row_count`.
+
+```
+dq 'users.csv | describe'
+dq 'users.csv | filter { city == "NY" } | describe | json'
+dq 'users.csv | describe | filter { type == "string" }'
+```
+
+Output:
+
+```
+column | type   | row_count
+------ | ------ | ---------
+name   | string | 6
+age    | int    | 6
+city   | string | 6
+```
+
+Rules:
+* `describe` is a normal pipeline operation, not an output format command. It can be followed by `filter`, `select`, `sort`, output formats, etc.
+* It takes no arguments.
+* `row_count` repeats the current table row count on every metadata row.
+* Type names are `null`, `int`, `float`, `string`, `bool`, `list`, and `record`.
+* Types are current table storage types after preceding pipeline stages, not source-declared types and not historical types from earlier stages.
+* If a column widened to `string` and rows survive a later rebuilding operation, copied values remain `string`.
+* If no rows survive a rebuilding operation such as `filter { false }`, the rebuilt columns have no non-null values and report `null`.
+* A zero-column table returns zero metadata rows. Use `count` if row cardinality must be visible for a zero-column table.
+* Nested values are reported only at the top level as `list` or `record`; `describe` does not recursively expand nested schemas.
+
+### 2. `head n`
 
 Return the first `n` rows.
 
@@ -167,7 +198,7 @@ Return the first `n` rows.
 dq 'users.csv | head 10'
 ```
 
-### 2. `tail n`
+### 3. `tail n`
 
 Return the last `n` rows.
 
@@ -175,7 +206,7 @@ Return the last `n` rows.
 dq 'users.csv | tail 5'
 ```
 
-### 3. `sort [-]col1, [-]col2, ...`
+### 4. `sort [-]col1, [-]col2, ...`
 
 Sort by columns (comma-separated). Ascending by default; prefix a column with `-` to sort it descending. Directions can be mixed per column.
 
@@ -184,7 +215,7 @@ dq 'users.csv | sort age, name'         // both ascending
 dq 'users.csv | sort -created_at, id'   // created_at descending, id ascending
 ```
 
-### 4. `select col1, col2, ...`
+### 5. `select col1, col2, ...`
 
 Project specific columns. All columns selected by default.
 
@@ -192,7 +223,7 @@ Project specific columns. All columns selected by default.
 dq 'users.csv | select name, age'
 ```
 
-### 5. `filter { expression }`
+### 6. `filter { expression }`
 
 Filter rows by expression. Expression is wrapped in braces `{ }` for clear boundaries.
 
@@ -213,7 +244,7 @@ dq 'users.csv | filter { null and true }'       // null → drops row
 dq 'users.csv | filter { null or true }'        // true → keeps row
 ```
 
-### 6. `group col1, col2, ... [as nested_name]`
+### 7. `group col1, col2, ... [as nested_name]`
 
 Group rows by columns; nested rows stored under a nested column. The `as nested_name` part is optional -- if omitted, defaults to `grouped`.
 
@@ -252,7 +283,7 @@ NY   | engineering| [ {name:c,age:25} ]
 LA   | sales      | [ {name:d,age:30} ]
 ```
 
-### 7. `transform col = expr, col2 = expr2, ...`
+### 8. `transform col = expr, col2 = expr2, ...`
 
 Row-wise transformation — create or overwrite columns with computed values.
 
@@ -270,7 +301,7 @@ Use `coalesce` for defaults:
 dq 'sales.csv | transform total = coalesce(quantity, 0) * coalesce(price, 0)'
 ```
 
-### 8. `reduce [nested_name] col = expr, col2 = expr2, ...`
+### 9. `reduce [nested_name] col = expr, col2 = expr2, ...`
 
 Apply aggregations over nested table. The nested name is optional -- if omitted, defaults to `grouped`. Nested field is **kept** after reduction.
 
@@ -299,7 +330,7 @@ To drop the nested field, use `remove`:
 dq 'users.csv | group name | reduce max_age = max(age), count = count() | remove grouped'
 ```
 
-### 9. `count`
+### 10. `count`
 
 Return the number of rows as a single-row, single-column table.
 
@@ -308,7 +339,7 @@ dq 'users.csv | count'
 dq 'users.csv | filter { age > 20 } | count'
 ```
 
-### 10. `distinct [col1, col2, ...]`
+### 11. `distinct [col1, col2, ...]`
 
 Return unique rows. If columns are specified, deduplicates by those columns. If no columns are given, deduplicates by the entire row.
 
@@ -318,7 +349,7 @@ dq 'users.csv | distinct city'           // unique cities
 dq 'users.csv | distinct city, age'      // unique combinations
 ```
 
-### 11. `rename old=new [, old2=new2 ...]`
+### 12. `rename old=new [, old2=new2 ...]`
 
 Rename one or more columns. Comma-separated `old=new` bindings.
 
@@ -327,7 +358,7 @@ dq 'users.csv | rename name=first_name'
 dq 'users.csv | rename `first name`=first_name, `last name`=last_name'
 ```
 
-### 12. `remove col1, col2, ...`
+### 13. `remove col1, col2, ...`
 
 Remove columns from output.
 
@@ -336,7 +367,7 @@ dq 'users.csv | remove password, ssn'
 dq 'users.csv | group name | reduce total = sum(amount) | remove grouped'
 ```
 
-### 13. `join [kind] file on key [and key ...]`
+### 14. `join [kind] file on key [and key ...]`
 
 Join with another file. Kind is optional: `inner` (default), `left`, `right`, `full`.
 

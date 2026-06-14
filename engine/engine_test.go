@@ -139,6 +139,170 @@ func TestCount(t *testing.T) {
 	}
 }
 
+func TestDescribeTypedValues(t *testing.T) {
+	result := runQuery(t, typedValuesTable(), "describe")
+	assertDescribeRows(t, result, map[string]describeMeta{
+		"s":      {typ: "string", rows: 1},
+		"xs":     {typ: "list", rows: 1},
+		"n":      {typ: "int", rows: 1},
+		"price":  {typ: "float", rows: 1},
+		"rec":    {typ: "record", rows: 1},
+		"flag":   {typ: "bool", rows: 1},
+		"nilcol": {typ: "null", rows: 1},
+	})
+
+	wantOrder := []string{"s", "xs", "n", "price", "rec", "flag", "nilcol"}
+	for i, want := range wantOrder {
+		if got := result.GetAt(i, 0).Str; got != want {
+			t.Errorf("describe row %d column order: got %q, want %q", i, got, want)
+		}
+	}
+}
+
+func TestDescribeAfterFilterFalseReportsNullTypes(t *testing.T) {
+	result := runQuery(t, usersTable(), "filter { false } | describe")
+	assertDescribeRows(t, result, map[string]describeMeta{
+		"name": {typ: "null", rows: 0},
+		"age":  {typ: "null", rows: 0},
+		"city": {typ: "null", rows: 0},
+	})
+}
+
+func TestDescribeEmptyAndZeroColumnTables(t *testing.T) {
+	t.Run("empty_with_columns", func(t *testing.T) {
+		result := runQuery(t, table.NewTable([]string{"name", "age"}), "describe")
+		assertDescribeRows(t, result, map[string]describeMeta{
+			"name": {typ: "null", rows: 0},
+			"age":  {typ: "null", rows: 0},
+		})
+	})
+
+	t.Run("zero_columns", func(t *testing.T) {
+		result := runQuery(t, table.NewTable(nil), "describe")
+		assertDescribeRows(t, result, map[string]describeMeta{})
+	})
+}
+
+func TestDescribeAfterShapeChangingOps(t *testing.T) {
+	t.Run("head", func(t *testing.T) {
+		result := runQuery(t, usersTable(), "head 3 | describe")
+		assertDescribeRows(t, result, map[string]describeMeta{
+			"name": {typ: "string", rows: 3},
+			"age":  {typ: "int", rows: 3},
+			"city": {typ: "string", rows: 3},
+		})
+	})
+
+	t.Run("tail", func(t *testing.T) {
+		result := runQuery(t, usersTable(), "tail 2 | describe")
+		assertDescribeRows(t, result, map[string]describeMeta{
+			"name": {typ: "string", rows: 2},
+			"age":  {typ: "int", rows: 2},
+			"city": {typ: "string", rows: 2},
+		})
+	})
+
+	t.Run("sort", func(t *testing.T) {
+		result := runQuery(t, usersTable(), "sort -age | describe")
+		assertDescribeRows(t, result, map[string]describeMeta{
+			"name": {typ: "string", rows: 6},
+			"age":  {typ: "int", rows: 6},
+			"city": {typ: "string", rows: 6},
+		})
+	})
+
+	t.Run("select", func(t *testing.T) {
+		result := runQuery(t, usersTable(), "select name, age | describe")
+		assertDescribeRows(t, result, map[string]describeMeta{
+			"name": {typ: "string", rows: 6},
+			"age":  {typ: "int", rows: 6},
+		})
+	})
+
+	t.Run("remove", func(t *testing.T) {
+		result := runQuery(t, usersTable(), "remove city | describe")
+		assertDescribeRows(t, result, map[string]describeMeta{
+			"name": {typ: "string", rows: 6},
+			"age":  {typ: "int", rows: 6},
+		})
+	})
+
+	t.Run("rename", func(t *testing.T) {
+		result := runQuery(t, usersTable(), "rename name=first_name | describe")
+		assertDescribeRows(t, result, map[string]describeMeta{
+			"first_name": {typ: "string", rows: 6},
+			"age":        {typ: "int", rows: 6},
+			"city":       {typ: "string", rows: 6},
+		})
+	})
+
+	t.Run("transform_new_and_overwritten", func(t *testing.T) {
+		result := runQuery(t, usersTable(), `transform age = age / 2, missing = null, profile = struct(name = name), tags = list(city) | describe`)
+		assertDescribeRows(t, result, map[string]describeMeta{
+			"name":    {typ: "string", rows: 6},
+			"age":     {typ: "float", rows: 6},
+			"city":    {typ: "string", rows: 6},
+			"missing": {typ: "null", rows: 6},
+			"profile": {typ: "record", rows: 6},
+			"tags":    {typ: "list", rows: 6},
+		})
+	})
+
+	t.Run("group_custom_nested_name", func(t *testing.T) {
+		result := runQuery(t, usersTable(), "group city as entries | describe")
+		assertDescribeRows(t, result, map[string]describeMeta{
+			"city":    {typ: "string", rows: 3},
+			"entries": {typ: "list", rows: 3},
+		})
+	})
+
+	t.Run("reduce", func(t *testing.T) {
+		result := runQuery(t, usersTable(), "group city | reduce n = count(), total = sum(age) | remove grouped | describe")
+		assertDescribeRows(t, result, map[string]describeMeta{
+			"city":  {typ: "string", rows: 3},
+			"n":     {typ: "int", rows: 3},
+			"total": {typ: "int", rows: 3},
+		})
+	})
+
+	t.Run("count", func(t *testing.T) {
+		result := runQuery(t, usersTable(), "count | describe")
+		assertDescribeRows(t, result, map[string]describeMeta{
+			"count": {typ: "int", rows: 1},
+		})
+	})
+
+	t.Run("distinct", func(t *testing.T) {
+		result := runQuery(t, usersTable(), "distinct city | describe")
+		assertDescribeRows(t, result, map[string]describeMeta{
+			"name": {typ: "string", rows: 3},
+			"age":  {typ: "int", rows: 3},
+			"city": {typ: "string", rows: 3},
+		})
+	})
+}
+
+func TestDescribeCanBeFilteredAndSelected(t *testing.T) {
+	result := runQuery(t, typedValuesTable(), `describe | filter { type == "string" or type == "list" } | select column, type | sort column`)
+	assertDescribeRows(t, runQuery(t, result, "describe"), map[string]describeMeta{
+		"column": {typ: "string", rows: 2},
+		"type":   {typ: "string", rows: 2},
+	})
+	assertNameSet(t, result, "column", "s", "xs")
+}
+
+func TestDescribeAfterJoin(t *testing.T) {
+	result := runJoinQuery(t, usersTable(), `orders.csv on name == user_name | describe`)
+	assertDescribeRows(t, result, map[string]describeMeta{
+		"name":     {typ: "string", rows: 4},
+		"age":      {typ: "int", rows: 4},
+		"city":     {typ: "string", rows: 4},
+		"order_id": {typ: "int", rows: 4},
+		"product":  {typ: "string", rows: 4},
+		"amount":   {typ: "int", rows: 4},
+	})
+}
+
 func TestDistinct(t *testing.T) {
 	result := runQuery(t, usersTable(), "distinct city")
 	if result.NumRows != 3 {
