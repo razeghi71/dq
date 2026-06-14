@@ -220,11 +220,23 @@ type JoinOp struct {
 
 func (o *JoinOp) opNode() {}
 
+// OutputOptions configures a terminal output format command.
+// Zero value keeps writer defaults.
+type OutputOptions struct {
+	SplitRows int // 0 = single file; >0 writes row-bounded output parts
+	Overwrite bool
+}
+
+// OutputSpec represents the terminal output format stage.
+type OutputSpec struct {
+	Format  string        // "" = implicit table; table, csv, json, jsonl, avro, parquet
+	Path    string        // empty = stdout
+	Options OutputOptions // zero value = defaults
+}
+
 // Query represents a full parsed query: source + pipeline of operations.
 type Query struct {
 	Source *SourceOp
 	Ops    []Op
-	// Output is the terminal format command: "" = implicit table;
-	// table, csv, json, jsonl, avro, parquet when explicitly requested.
-	Output string
+	Output OutputSpec
 }

@@ -30,10 +30,13 @@ type inferredField struct {
 const parquetColumnOrderMetadataKey = "dq.column_order"
 
 func writeAvro(w io.Writer, t *table.Table) error {
+	return writeAvroWithTypes(w, t, inferTableTypes(t))
+}
+
+func writeAvroWithTypes(w io.Writer, t *table.Table, types []*inferredType) error {
 	if len(t.Columns) == 0 {
 		return fmt.Errorf("Avro output requires at least one column")
 	}
-	types := inferTableTypes(t)
 	if err := validateAvroFieldNames(t.Columns, types); err != nil {
 		return err
 	}
@@ -74,10 +77,13 @@ func writeAvro(w io.Writer, t *table.Table) error {
 }
 
 func writeParquet(w io.Writer, t *table.Table) error {
+	return writeParquetWithTypes(w, t, inferTableTypes(t))
+}
+
+func writeParquetWithTypes(w io.Writer, t *table.Table, types []*inferredType) error {
 	if len(t.Columns) == 0 {
 		return fmt.Errorf("Parquet output requires at least one column")
 	}
-	types := inferTableTypes(t)
 	rowType := buildParquetRowStruct(t.Columns, types)
 	schema := parquet.SchemaOf(reflect.New(rowType).Interface())
 	pw := parquet.NewGenericWriter[any](w, schema)
@@ -107,32 +113,68 @@ func writeParquet(w io.Writer, t *table.Table) error {
 }
 
 func buildParquetRowStruct(columns []string, types []*inferredType) reflect.Type {
-	fields := make([]reflect.StructField, len(columns))
-	for i, col := range columns {
-		fields[i] = parquetStructField(col, types[i])
+	return parquetStructType(columns, types)
+}
+
+func parquetStructType(names []string, types []*inferredType) reflect.Type {
+	fields := make([]reflect.StructField, len(names))
+	used := map[string]bool{}
+	for i, name := range names {
+		fields[i] = parquetStructField(name, types[i], uniqueExportedFieldName(name, used))
 	}
 	return reflect.StructOf(fields)
 }
 
-func parquetStructField(name string, typ *inferredType) reflect.StructField {
+func parquetStructField(name string, typ *inferredType, fieldName string) reflect.StructField {
 	tag := fmt.Sprintf(`parquet:"%s"`, name)
 	if typ.typ == table.TypeList {
 		tag = fmt.Sprintf(`parquet:"%s,list"`, name)
 	}
 	return reflect.StructField{
-		Name: exportedFieldName(name),
+		Name: fieldName,
 		Type: parquetReflectType(typ),
 		Tag:  reflect.StructTag(tag),
 	}
+}
+
+func uniqueExportedFieldName(name string, used map[string]bool) string {
+	base := exportedFieldName(name)
+	candidate := base
+	for i := 2; used[candidate]; i++ {
+		candidate = fmt.Sprintf("%s_%d", base, i)
+	}
+	used[candidate] = true
+	return candidate
 }
 
 func exportedFieldName(name string) string {
 	if name == "" {
 		return "Field"
 	}
-	runes := []rune(name)
-	runes[0] = unicode.ToUpper(runes[0])
-	return string(runes)
+	var b strings.Builder
+	for _, r := range name {
+		valid := r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
+		if !valid {
+			r = '_'
+		}
+		if b.Len() == 0 {
+			if unicode.IsLetter(r) {
+				b.WriteRune(unicode.ToUpper(r))
+			} else {
+				b.WriteString("Field")
+				if unicode.IsDigit(r) {
+					b.WriteRune('_')
+					b.WriteRune(r)
+				}
+			}
+			continue
+		}
+		b.WriteRune(r)
+	}
+	if b.Len() == 0 {
+		return "Field"
+	}
+	return b.String()
 }
 
 func parquetReflectType(typ *inferredType) reflect.Type {
@@ -140,11 +182,7 @@ func parquetReflectType(typ *inferredType) reflect.Type {
 	case table.TypeList:
 		return reflect.SliceOf(parquetListElemReflectType(typ.elem))
 	case table.TypeRecord:
-		fields := make([]reflect.StructField, len(typ.fields))
-		for i, f := range typ.fields {
-			fields[i] = parquetStructField(f.name, f.typ)
-		}
-		base := reflect.StructOf(fields)
+		base := parquetRecordStructType(typ.fields)
 		if typ.nullable {
 			return reflect.PointerTo(base)
 		}
@@ -174,14 +212,20 @@ func parquetReflectBaseType(typ *inferredType) reflect.Type {
 	case table.TypeList:
 		return reflect.SliceOf(parquetListElemReflectType(typ.elem))
 	case table.TypeRecord:
-		fields := make([]reflect.StructField, len(typ.fields))
-		for i, f := range typ.fields {
-			fields[i] = parquetStructField(f.name, f.typ)
-		}
-		return reflect.StructOf(fields)
+		return parquetRecordStructType(typ.fields)
 	default:
 		return reflect.TypeOf("")
 	}
+}
+
+func parquetRecordStructType(fields []inferredField) reflect.Type {
+	names := make([]string, len(fields))
+	types := make([]*inferredType, len(fields))
+	for i, f := range fields {
+		names[i] = f.name
+		types[i] = f.typ
+	}
+	return parquetStructType(names, types)
 }
 
 func setParquetStructField(field reflect.Value, v table.Value, typ *inferredType) error {

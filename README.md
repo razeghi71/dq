@@ -35,7 +35,7 @@ go build -ldflags="-s -w" -o dq ./cmd/dq
 Every query starts with a file or stdin and pipes it through operations. Each operation takes a table in and returns a table out.
 
 ```
-dq 'data.dat [with format=..., delim=..., ...] | operation1 | operation2 | ... [| output_format]'
+dq 'data.dat [with format=..., delim=..., ...] | operation1 | operation2 | ... [| output_format [with ...] [to path]]'
 ```
 
 Wrap queries in single quotes so your shell doesn't interpret `|`, `{`, `}`, or `>`.
@@ -273,6 +273,26 @@ dq 'users.csv | select name, age | json' > out.json        # JSON array of objec
 dq 'users.csv | select name, age | jsonl' > out.jsonl      # one JSON object per line
 dq 'users.csv | select name, age | avro' > out.avro        # Avro object container file
 dq 'users.csv | select name, age | parquet' > out.parquet  # Parquet file
+```
+
+Use `to` to write files from inside the query. Parent directories are created, and existing files are not overwritten unless you opt in:
+
+```bash
+dq 'users.csv | select name, age | csv to out/users.csv'
+dq 'users.csv | select name, age | csv with overwrite=true to out/users.csv'
+dq 'users.csv | group city | reduce n = count() | remove grouped | parquet to reports/by-city.parquet'
+dq 'users.csv | json to out/'              # writes out/output.json
+dq 'users.csv | table to out/'             # writes out/output.txt
+dq 'users.csv | csv to out/users'          # writes out/users.csv
+```
+
+A destination is treated as a directory only when it ends with `/` or the platform path separator. Directory output uses `output.<ext>`; table output uses `.txt`.
+
+Use `split_rows` for multiple output files. A directory destination uses `output-1.ext`, `output-2.ext`, ...; use `{n}` in the path for custom names:
+
+```bash
+dq 'big.csv | csv with split_rows=50000 to out/'                  # out/output-1.csv, ...
+dq 'big.csv | parquet with split_rows=100000 to out/part-{n}.parquet'
 ```
 
 Output format commands (`table`, `csv`, `json`, `jsonl`, `avro`, `parquet`) must be the last stage in the query — nothing may follow except end of query.

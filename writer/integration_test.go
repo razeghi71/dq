@@ -96,6 +96,20 @@ func writeAndReloadTable(t *testing.T, tbl *table.Table, format string) *table.T
 	return reloaded
 }
 
+func assertNoOutputTempFiles(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read output dir: %v", err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.Contains(name, ".tmp") || strings.Contains(name, ".partial") {
+			t.Fatalf("unexpected temporary output file left behind: %s", filepath.Join(dir, name))
+		}
+	}
+}
+
 func avroRecordNames(t *testing.T, data []byte) []string {
 	t.Helper()
 	reader, err := goavro.NewOCFReader(bytes.NewReader(data))
@@ -1001,6 +1015,59 @@ func TestIntegrationParquetColumnOrderRoundTrip(t *testing.T) {
 	}
 }
 
+func TestIntegrationParquetCollidingGoFieldNamesRoundTrip(t *testing.T) {
+	tbl := table.NewTable([]string{"field", "Field", "Field_2"})
+	tbl.AddRow([]table.Value{
+		table.IntVal(1),
+		table.IntVal(2),
+		table.IntVal(3),
+	})
+
+	got := writeAndReloadTable(t, tbl, "parquet")
+	if got.NumRows != 1 {
+		t.Fatalf("expected 1 row, got %d", got.NumRows)
+	}
+	if want := "field,Field,Field_2"; strings.Join(got.Columns, ",") != want {
+		t.Fatalf("columns: want %q, got %v", want, got.Columns)
+	}
+	if v := got.Get(0, "field"); v.Type != table.TypeInt || v.Int != 1 {
+		t.Fatalf("field: want 1, got %v", v)
+	}
+	if v := got.Get(0, "Field"); v.Type != table.TypeInt || v.Int != 2 {
+		t.Fatalf("Field: want 2, got %v", v)
+	}
+	if v := got.Get(0, "Field_2"); v.Type != table.TypeInt || v.Int != 3 {
+		t.Fatalf("Field_2: want 3, got %v", v)
+	}
+}
+
+func TestIntegrationParquetNestedCollidingGoFieldNamesRoundTrip(t *testing.T) {
+	tbl := table.NewTable([]string{"obj"})
+	tbl.AddRow([]table.Value{
+		table.RecordVal([]table.RecordField{
+			{Name: "field", Value: table.IntVal(1)},
+			{Name: "Field", Value: table.IntVal(2)},
+			{Name: "Field_2", Value: table.IntVal(3)},
+		}),
+	})
+
+	got := writeAndReloadTable(t, tbl, "parquet")
+	obj := got.Get(0, "obj")
+	if obj.Type != table.TypeRecord {
+		t.Fatalf("obj: want record, got %v", obj)
+	}
+	fields := recordValues(obj)
+	if v := fields["field"]; v.Type != table.TypeInt || v.Int != 1 {
+		t.Fatalf("obj.field: want 1, got %v", v)
+	}
+	if v := fields["Field"]; v.Type != table.TypeInt || v.Int != 2 {
+		t.Fatalf("obj.Field: want 2, got %v", v)
+	}
+	if v := fields["Field_2"]; v.Type != table.TypeInt || v.Int != 3 {
+		t.Fatalf("obj.Field_2: want 3, got %v", v)
+	}
+}
+
 func TestIntegrationParquetEmptyResultRoundTrip(t *testing.T) {
 	out := queryAndWriteBytes(t, testdataDir+"/users.csv", "filter { age > 100 } | select name, age", "parquet")
 	path := writeTempOutput(t, out, "empty.parquet")
@@ -1085,8 +1152,8 @@ func TestIntegrationQueryOutputEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if q.Output != "csv" {
-		t.Fatalf("Output: got %q, want csv", q.Output)
+	if q.Output.Format != "csv" {
+		t.Fatalf("Output.Format: got %q, want csv", q.Output.Format)
 	}
 
 	result, err := engine.Execute(q, tbl, nil)
@@ -1095,7 +1162,7 @@ func TestIntegrationQueryOutputEndToEnd(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := Write(&buf, result, q.Output); err != nil {
+	if err := Write(&buf, result, q.Output.Format); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
@@ -1105,6 +1172,101 @@ func TestIntegrationQueryOutputEndToEnd(t *testing.T) {
 	}
 	if strings.Contains(out, " | ") {
 		t.Fatalf("expected CSV not table, got:\n%s", out)
+	}
+}
+
+func TestWriteOutputSingleFileErrorRemovesPartial(t *testing.T) {
+	tbl := table.NewTable([]string{"bad name"})
+	tbl.AddRow([]table.Value{table.StrVal("Alice")})
+	path := filepath.Join(t.TempDir(), "bad.avro")
+
+	err := WriteOutput(tbl, ast.OutputSpec{
+		Format: "avro",
+		Path:   path,
+	})
+	if err == nil {
+		t.Fatal("expected invalid Avro field name error")
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("expected failed single-file write to remove partial %s, stat err=%v", path, statErr)
+	}
+	assertNoOutputTempFiles(t, filepath.Dir(path))
+
+	good := table.NewTable([]string{"name"})
+	good.AddRow([]table.Value{table.StrVal("Alice")})
+	if err := WriteOutput(good, ast.OutputSpec{Format: "avro", Path: path}); err != nil {
+		t.Fatalf("retry after failed write should succeed: %v", err)
+	}
+	if _, err := loader.Load(path, loader.Options{}); err != nil {
+		t.Fatalf("reload retry output: %v", err)
+	}
+}
+
+func TestWriteOutputSplitErrorRemovesPartsFromFailedRun(t *testing.T) {
+	tbl := table.NewTable([]string{"name"})
+	for _, name := range []string{"Alice", "Bob", "Cara", "Dan"} {
+		tbl.AddRow([]table.Value{table.StrVal(name)})
+	}
+	dir := t.TempDir()
+	preexisting := filepath.Join(dir, "output-2.csv")
+	if err := os.WriteFile(preexisting, []byte("preexisting\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := WriteOutput(tbl, ast.OutputSpec{
+		Format: "csv",
+		Path:   dir + string(os.PathSeparator),
+		Options: ast.OutputOptions{
+			SplitRows: 2,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected split write to fail on pre-existing part")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "output-1.csv")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected failed split write to remove newly-created output-1.csv, stat err=%v", statErr)
+	}
+	assertNoOutputTempFiles(t, dir)
+	got, err := os.ReadFile(preexisting)
+	if err != nil {
+		t.Fatalf("pre-existing part should remain: %v", err)
+	}
+	if string(got) != "preexisting\n" {
+		t.Fatalf("pre-existing part changed: %q", got)
+	}
+}
+
+func TestWriteOutputSplitErrorRemovesBinaryPartsFromFailedRun(t *testing.T) {
+	tbl := table.NewTable([]string{"name"})
+	for _, name := range []string{"Alice", "Bob", "Cara", "Dan"} {
+		tbl.AddRow([]table.Value{table.StrVal(name)})
+	}
+	dir := t.TempDir()
+	preexisting := filepath.Join(dir, "part-2.parquet")
+	if err := os.WriteFile(preexisting, []byte("preexisting"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := WriteOutput(tbl, ast.OutputSpec{
+		Format: "parquet",
+		Path:   filepath.Join(dir, "part-{n}.parquet"),
+		Options: ast.OutputOptions{
+			SplitRows: 2,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected split write to fail on pre-existing parquet part")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "part-1.parquet")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected failed split write to remove newly-created part-1.parquet, stat err=%v", statErr)
+	}
+	assertNoOutputTempFiles(t, dir)
+	got, err := os.ReadFile(preexisting)
+	if err != nil {
+		t.Fatalf("pre-existing parquet part should remain: %v", err)
+	}
+	if string(got) != "preexisting" {
+		t.Fatalf("pre-existing parquet part changed: %q", got)
 	}
 }
 

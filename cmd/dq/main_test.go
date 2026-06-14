@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	dq "github.com/razeghi71/dq"
+	"github.com/razeghi71/dq/loader"
 )
 
 func gzipCLIBytes(t *testing.T, content string) []byte {
@@ -34,6 +35,54 @@ func buildCLI(t *testing.T) string {
 		t.Fatalf("build cli: %v\n%s", err, out)
 	}
 	return bin
+}
+
+func runCLIQuery(t *testing.T, bin, query string) []byte {
+	t.Helper()
+	cmd := exec.Command(bin, query)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli %q: %v\n%s", query, err, out)
+	}
+	return out
+}
+
+func runCLIQueryExpectError(t *testing.T, bin, query string) []byte {
+	t.Helper()
+	cmd := exec.Command(bin, query)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected cli failure for %q, got output:\n%s", query, out)
+	}
+	return out
+}
+
+func writeCLIUsersCSV(t *testing.T, dir string) string {
+	t.Helper()
+	path := filepath.Join(dir, "users.csv")
+	data := "name,age,city\nAlice,30,NY\nBob,25,LA\nCara,27,SF\nDan,41,NY\n"
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func assertNoCLIStdout(t *testing.T, out []byte) {
+	t.Helper()
+	if len(bytes.TrimSpace(out)) != 0 {
+		t.Fatalf("expected no stdout when output destination is set, got:\n%s", out)
+	}
+}
+
+func assertLoadedRowCount(t *testing.T, path string, want int) {
+	t.Helper()
+	tbl, err := loader.Load(path, loader.Options{})
+	if err != nil {
+		t.Fatalf("reload %s: %v", path, err)
+	}
+	if tbl.NumRows != want {
+		t.Fatalf("%s row count: got %d, want %d", path, tbl.NumRows, want)
+	}
 }
 
 func TestCLIStdinWithFormat(t *testing.T) {
@@ -450,5 +499,290 @@ func TestCLILengthFunctionsSmoke(t *testing.T) {
 	s := strings.TrimSpace(string(out))
 	if s != "count\n1" {
 		t.Fatalf("expected count\\n1, got:\n%s", s)
+	}
+}
+
+func TestCLIOutputToFileAllFormats(t *testing.T) {
+	bin := buildCLI(t)
+	dir := t.TempDir()
+	input := writeCLIUsersCSV(t, dir)
+
+	cases := []struct {
+		format string
+		ext    string
+		reload bool
+	}{
+		{"table", ".txt", false},
+		{"csv", ".csv", true},
+		{"json", ".json", true},
+		{"jsonl", ".jsonl", true},
+		{"avro", ".avro", true},
+		{"parquet", ".parquet", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.format, func(t *testing.T) {
+			outPath := filepath.Join(dir, "out-"+tc.format+tc.ext)
+			stdout := runCLIQuery(t, bin, input+" | select name, age | head 2 | "+tc.format+" to "+outPath)
+			assertNoCLIStdout(t, stdout)
+			info, err := os.Stat(outPath)
+			if err != nil {
+				t.Fatalf("expected output file %s: %v", outPath, err)
+			}
+			if info.Size() == 0 {
+				t.Fatalf("expected non-empty output file %s", outPath)
+			}
+			if tc.reload {
+				assertLoadedRowCount(t, outPath, 2)
+			}
+		})
+	}
+}
+
+func TestCLIOutputToDirectoryDefaultBasenameAllFormats(t *testing.T) {
+	bin := buildCLI(t)
+	dir := t.TempDir()
+	input := writeCLIUsersCSV(t, dir)
+
+	cases := []struct {
+		format string
+		ext    string
+		reload bool
+	}{
+		{"table", ".txt", false},
+		{"csv", ".csv", true},
+		{"json", ".json", true},
+		{"jsonl", ".jsonl", true},
+		{"avro", ".avro", true},
+		{"parquet", ".parquet", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.format, func(t *testing.T) {
+			outDir := filepath.Join(dir, "dir-"+tc.format)
+			stdout := runCLIQuery(t, bin, input+" | head 3 | "+tc.format+" to "+outDir+"/")
+			assertNoCLIStdout(t, stdout)
+			outPath := filepath.Join(outDir, "output"+tc.ext)
+			if _, err := os.Stat(outPath); err != nil {
+				t.Fatalf("expected default output file %s: %v", outPath, err)
+			}
+			if tc.reload {
+				assertLoadedRowCount(t, outPath, 3)
+			}
+		})
+	}
+}
+
+func TestCLIOutputAppendsMissingExtensionAndRejectsWrongExtension(t *testing.T) {
+	bin := buildCLI(t)
+	dir := t.TempDir()
+	input := writeCLIUsersCSV(t, dir)
+
+	noExt := filepath.Join(dir, "users-export")
+	stdout := runCLIQuery(t, bin, input+" | select name | csv to "+noExt)
+	assertNoCLIStdout(t, stdout)
+	assertLoadedRowCount(t, noExt+".csv", 4)
+
+	out := runCLIQueryExpectError(t, bin, input+" | csv to "+filepath.Join(dir, "wrong.json"))
+	if !strings.Contains(strings.ToLower(string(out)), "extension") {
+		t.Fatalf("expected extension mismatch error, got:\n%s", out)
+	}
+}
+
+func TestCLIOutputAcceptsUppercaseExtension(t *testing.T) {
+	bin := buildCLI(t)
+	dir := t.TempDir()
+	input := writeCLIUsersCSV(t, dir)
+
+	csvPath := filepath.Join(dir, "up.CSV")
+	stdout := runCLIQuery(t, bin, input+" | select name | CSV to "+csvPath)
+	assertNoCLIStdout(t, stdout)
+	assertLoadedRowCount(t, csvPath, 4)
+
+	jsonPath := filepath.Join(dir, "data.JSON")
+	stdout = runCLIQuery(t, bin, input+" | select name | json to "+jsonPath)
+	assertNoCLIStdout(t, stdout)
+	assertLoadedRowCount(t, jsonPath, 4)
+}
+
+func TestCLIOutputPathWithoutTrailingSlashIgnoresExistingDirectory(t *testing.T) {
+	bin := buildCLI(t)
+	dir := t.TempDir()
+	input := writeCLIUsersCSV(t, dir)
+	outBase := filepath.Join(dir, "out")
+	if err := os.Mkdir(outBase, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout := runCLIQuery(t, bin, input+" | select name | csv to "+outBase)
+	assertNoCLIStdout(t, stdout)
+	assertLoadedRowCount(t, outBase+".csv", 4)
+	if _, err := os.Stat(filepath.Join(outBase, "output.csv")); !os.IsNotExist(err) {
+		t.Fatalf("expected no directory-style output file, stat err=%v", err)
+	}
+}
+
+func TestCLIOutputCreatesParentDirectoriesAndRefusesExistingFile(t *testing.T) {
+	bin := buildCLI(t)
+	dir := t.TempDir()
+	input := writeCLIUsersCSV(t, dir)
+	outPath := filepath.Join(dir, "new", "nested", "users.csv")
+
+	stdout := runCLIQuery(t, bin, input+" | select name | csv to "+outPath)
+	assertNoCLIStdout(t, stdout)
+	assertLoadedRowCount(t, outPath, 4)
+
+	out := runCLIQueryExpectError(t, bin, input+" | select name | csv to "+outPath)
+	if !strings.Contains(strings.ToLower(string(out)), "exist") {
+		t.Fatalf("expected existing-file error, got:\n%s", out)
+	}
+}
+
+func TestCLIOutputOverwriteOptionOverwritesExistingFileAllFormats(t *testing.T) {
+	bin := buildCLI(t)
+	dir := t.TempDir()
+	input := writeCLIUsersCSV(t, dir)
+
+	cases := []struct {
+		format string
+		ext    string
+		reload bool
+	}{
+		{"table", ".txt", false},
+		{"csv", ".csv", true},
+		{"json", ".json", true},
+		{"jsonl", ".jsonl", true},
+		{"avro", ".avro", true},
+		{"parquet", ".parquet", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.format, func(t *testing.T) {
+			outPath := filepath.Join(dir, "overwrite-"+tc.format+tc.ext)
+			if err := os.WriteFile(outPath, []byte("old\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			stdout := runCLIQuery(t, bin, input+" | select name | "+tc.format+" with overwrite=true to "+outPath)
+			assertNoCLIStdout(t, stdout)
+			if tc.reload {
+				assertLoadedRowCount(t, outPath, 4)
+			}
+			data, err := os.ReadFile(outPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), "old") {
+				t.Fatalf("expected overwrite=true to replace existing file, got:\n%s", data)
+			}
+		})
+	}
+}
+
+func TestCLIOutputOverwriteOptionOverwritesExistingSplitParts(t *testing.T) {
+	bin := buildCLI(t)
+	dir := t.TempDir()
+	input := writeCLIUsersCSV(t, dir)
+	outDir := filepath.Join(dir, "split")
+	if err := os.Mkdir(outDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"output-1.csv", "output-2.csv"} {
+		if err := os.WriteFile(filepath.Join(outDir, name), []byte("old\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stdout := runCLIQuery(t, bin, input+" | csv with split_rows=2, overwrite=true to "+outDir+"/")
+	assertNoCLIStdout(t, stdout)
+	assertLoadedRowCount(t, filepath.Join(outDir, "output-1.csv"), 2)
+	assertLoadedRowCount(t, filepath.Join(outDir, "output-2.csv"), 2)
+	for _, name := range []string{"output-1.csv", "output-2.csv"} {
+		data, err := os.ReadFile(filepath.Join(outDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "old") {
+			t.Fatalf("expected overwrite=true to replace %s, got:\n%s", name, data)
+		}
+	}
+}
+
+func TestCLIOutputSplitRowsAllStructuredFormats(t *testing.T) {
+	bin := buildCLI(t)
+	dir := t.TempDir()
+	input := writeCLIUsersCSV(t, dir)
+
+	cases := []struct {
+		format string
+		ext    string
+	}{
+		{"csv", ".csv"},
+		{"json", ".json"},
+		{"jsonl", ".jsonl"},
+		{"avro", ".avro"},
+		{"parquet", ".parquet"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.format, func(t *testing.T) {
+			outDir := filepath.Join(dir, "split-"+tc.format)
+			stdout := runCLIQuery(t, bin, input+" | "+tc.format+" with split_rows=2 to "+outDir+"/")
+			assertNoCLIStdout(t, stdout)
+
+			part1 := filepath.Join(outDir, "output-1"+tc.ext)
+			part2 := filepath.Join(outDir, "output-2"+tc.ext)
+			assertLoadedRowCount(t, part1, 2)
+			assertLoadedRowCount(t, part2, 2)
+			if _, err := os.Stat(filepath.Join(outDir, "output-3"+tc.ext)); !os.IsNotExist(err) {
+				t.Fatalf("unexpected third split part, stat err=%v", err)
+			}
+		})
+	}
+}
+
+func TestCLIOutputSplitRowsExplicitTemplate(t *testing.T) {
+	bin := buildCLI(t)
+	dir := t.TempDir()
+	input := writeCLIUsersCSV(t, dir)
+	template := filepath.Join(dir, "chunks", "users-{n}.csv")
+
+	stdout := runCLIQuery(t, bin, input+" | csv with split_rows=3 to "+template)
+	assertNoCLIStdout(t, stdout)
+	assertLoadedRowCount(t, filepath.Join(dir, "chunks", "users-1.csv"), 3)
+	assertLoadedRowCount(t, filepath.Join(dir, "chunks", "users-2.csv"), 1)
+}
+
+func TestCLIOutputSplitRowsEmptyResultWritesOneValidPart(t *testing.T) {
+	bin := buildCLI(t)
+	dir := t.TempDir()
+	input := writeCLIUsersCSV(t, dir)
+	outDir := filepath.Join(dir, "empty")
+
+	stdout := runCLIQuery(t, bin, input+` | filter { age > 1000 } | csv with split_rows=2 to `+outDir+"/")
+	assertNoCLIStdout(t, stdout)
+	assertLoadedRowCount(t, filepath.Join(outDir, "output-1.csv"), 0)
+}
+
+func TestCLIOutputToPathParseErrors(t *testing.T) {
+	bin := buildCLI(t)
+	dir := t.TempDir()
+	input := writeCLIUsersCSV(t, dir)
+
+	cases := []struct {
+		name    string
+		query   string
+		wantMsg string
+	}{
+		{"missing_path", input + " | csv to", "path"},
+		{"overwrite_without_to", input + " | csv with overwrite=true", "to"},
+		{"split_without_to", input + " | csv with split_rows=2", "to"},
+		{"unknown_option", input + " | csv with basename=report to " + filepath.Join(dir, "out") + "/", "unknown"},
+		{"split_file_without_template", input + " | csv with split_rows=2 to " + filepath.Join(dir, "out.csv"), "{n}"},
+		{"output_not_last", input + " | csv to " + filepath.Join(dir, "out.csv") + " | head 1", "last"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := runCLIQueryExpectError(t, bin, tc.query)
+			if !strings.Contains(strings.ToLower(string(out)), strings.ToLower(tc.wantMsg)) {
+				t.Fatalf("expected error containing %q, got:\n%s", tc.wantMsg, out)
+			}
+		})
 	}
 }

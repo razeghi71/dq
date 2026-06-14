@@ -77,15 +77,15 @@ func (p *Parser) parseQuery() (*ast.Query, error) {
 	}
 
 	var ops []ast.Op
-	var output string
+	var output ast.OutputSpec
 	for p.peek().Type == lexer.TokenPipe {
 		p.advance() // consume |
-		format, ok, err := p.tryParseOutputCommand()
+		spec, ok, err := p.tryParseOutputStage()
 		if err != nil {
 			return nil, err
 		}
 		if ok {
-			output = format
+			output = spec
 			break
 		}
 		op, err := p.parseOp()
@@ -102,23 +102,129 @@ func (p *Parser) parseQuery() (*ast.Query, error) {
 	return &ast.Query{Source: source, Ops: ops, Output: output}, nil
 }
 
-func (p *Parser) tryParseOutputCommand() (string, bool, error) {
+func (p *Parser) tryParseOutputStage() (ast.OutputSpec, bool, error) {
 	tok := p.peek()
 	if tok.Type != lexer.TokenIdent {
-		return "", false, nil
+		return ast.OutputSpec{}, false, nil
 	}
 	format, err := ast.CanonicalOutputFormat(tok.Val)
 	if err != nil {
-		return "", false, nil
+		return ast.OutputSpec{}, false, nil
 	}
 	p.advance()
+
+	spec := ast.OutputSpec{Format: format}
+	if p.peek().Type == lexer.TokenWith {
+		opts, err := p.parseOutputWithClause()
+		if err != nil {
+			return ast.OutputSpec{}, false, err
+		}
+		spec.Options = opts
+	}
+
+	if p.peek().Type == lexer.TokenIdent && p.peek().Val == "to" {
+		p.advance()
+		path, err := p.scanOutputPath()
+		if err != nil {
+			return ast.OutputSpec{}, false, err
+		}
+		spec.Path = path
+	}
+
 	if p.peek().Type == lexer.TokenPipe {
-		return "", false, fmt.Errorf("output format command %q must be the last pipeline stage", format)
+		return ast.OutputSpec{}, false, fmt.Errorf("output format command %q must be the last pipeline stage", format)
 	}
 	if p.peek().Type != lexer.TokenEOF {
-		return "", false, fmt.Errorf("unexpected token %s (%q) after output format %q at position %d", p.peek().Type, p.peek().Val, format, p.peek().Pos)
+		return ast.OutputSpec{}, false, fmt.Errorf("output format command %q must be the last pipeline stage; unexpected token %s (%q) at position %d", format, p.peek().Type, p.peek().Val, p.peek().Pos)
 	}
-	return format, true, nil
+	if err := ast.ValidateOutputSpec(spec); err != nil {
+		return ast.OutputSpec{}, false, err
+	}
+	return spec, true, nil
+}
+
+var outputOptionKeys = map[string]bool{
+	"overwrite":  true,
+	"split_rows": true,
+}
+
+func (p *Parser) parseOutputWithClause() (ast.OutputOptions, error) {
+	if _, err := p.expect(lexer.TokenWith); err != nil {
+		return ast.OutputOptions{}, err
+	}
+
+	if p.peek().Type != lexer.TokenIdent {
+		return ast.OutputOptions{}, fmt.Errorf("with: expected output option name, got %s (%q) at position %d", p.peek().Type, p.peek().Val, p.peek().Pos)
+	}
+
+	var opts ast.OutputOptions
+	seen := make(map[string]bool)
+	for {
+		keyTok, err := p.expect(lexer.TokenIdent)
+		if err != nil {
+			return ast.OutputOptions{}, fmt.Errorf("with: expected output option name: %w", err)
+		}
+		if !outputOptionKeys[keyTok.Val] {
+			return ast.OutputOptions{}, fmt.Errorf("with: unknown output option %q", keyTok.Val)
+		}
+		if seen[keyTok.Val] {
+			return ast.OutputOptions{}, fmt.Errorf("with: duplicate output option %q", keyTok.Val)
+		}
+		seen[keyTok.Val] = true
+
+		if _, err := p.expect(lexer.TokenEquals); err != nil {
+			return ast.OutputOptions{}, fmt.Errorf("with: expected '=' after %q: %w", keyTok.Val, err)
+		}
+
+		valTok := p.advance()
+		switch keyTok.Val {
+		case "overwrite":
+			switch valTok.Type {
+			case lexer.TokenTrue:
+				opts.Overwrite = true
+			case lexer.TokenFalse:
+				opts.Overwrite = false
+			default:
+				return ast.OutputOptions{}, fmt.Errorf("with: overwrite value must be true or false, got %s", valTok.Type)
+			}
+		case "split_rows":
+			if valTok.Type != lexer.TokenInt {
+				return ast.OutputOptions{}, fmt.Errorf("with: split_rows value must be an integer, got %s", valTok.Type)
+			}
+			n, err := strconv.Atoi(valTok.Val)
+			if err != nil {
+				return ast.OutputOptions{}, fmt.Errorf("with: invalid split_rows value %q", valTok.Val)
+			}
+			if n <= 0 {
+				return ast.OutputOptions{}, fmt.Errorf("with: split_rows must be greater than 0")
+			}
+			opts.SplitRows = n
+		}
+
+		if p.peek().Type != lexer.TokenComma {
+			break
+		}
+		p.advance()
+	}
+	return opts, nil
+}
+
+func (p *Parser) scanOutputPath() (string, error) {
+	// ScanSource reads directly from the lexer; any buffered lookahead token
+	// has already been consumed from the input and would be silently lost.
+	// The output parser consumes "to" before this call, so a non-empty buffer
+	// means a parser bug -- fail loudly instead of mis-scanning the path.
+	if len(p.buf) != 0 {
+		return "", fmt.Errorf("to: internal error: lookahead buffer not empty before output path")
+	}
+	tok, err := p.lexer.ScanSource()
+	if err != nil {
+		return "", err
+	}
+	if tok.Type != lexer.TokenIdent || tok.Val == "" {
+		return "", fmt.Errorf("to: expected output path at position %d", tok.Pos)
+	}
+	return tok.Val, nil
 }
 
 func (p *Parser) parseSource() (*ast.SourceOp, error) {

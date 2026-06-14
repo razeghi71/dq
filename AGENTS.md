@@ -9,7 +9,7 @@ dq 'filename | op [args] | op2 [args] ... [| output_format]'
 * The entire query is passed as a **single-quoted string** to avoid shell interpretation of `|`, `{`, `}`, `>`, `<`, and backticks.
 * Takes a file (csv, avro, json, etc.) as input. Gzip-compressed CSV/JSON/JSONL text files are supported via double extensions such as `.csv.gz` or explicit `with compression=gzip`. Globs are supported (`logs/**/*.csv`, `orders/part-*.csv`) — matched files are concatenated. All matched files are loaded into memory before the pipeline runs. A zero-byte CSV (or BOM-/whitespace-only with no data rows) loads as an empty table (0 columns, 0 rows). Empty glob shards are skipped when establishing the column schema; the first non-empty shard defines the anchor columns. CSV rows must match the schema width by default (same rules for single files and glob shards); use `with allow_jagged_rows=true` for missing trailing columns (null-filled) and `with ignore_unknown_values=true` to drop extra columns. On glob sources, CSV-only options require `with format=csv` at parse time (e.g. `logs/part-* with format=csv, allow_jagged_rows=true`) — format cannot be inferred from the pattern alone. CSV glob shards without a detectable header row are read positionally under the first file's columns. Extended headers require shared column names plus new lowercase identifiers (`email`, not `Email`); renamed columns with no anchor overlap are positional.
 * Optional **`with key=value, ...`** on the primary source or join file sets load format, compression, and CSV options (see Load options below).
-* Optional **output format command** at the end of the query (`table`, `csv`, `json`, `jsonl`, `avro`, `parquet`); omitted means pretty table output.
+* Optional **output format command** at the end of the query (`table`, `csv`, `json`, `jsonl`, `avro`, `parquet`); omitted means pretty table output. Output commands can write to a path with `to`, and can split files with `with split_rows=N`.
 * Everything is **pipe-based** — each op takes a table and returns a table.
 * **Column lists** (`select`, `sort`, `group`, `distinct`, `remove`) and **assignment lists** (`transform`, `reduce`, `rename`) are **comma-separated**. A single item needs no comma (see Syntax rules below).
 * Default state: all columns are selected unless explicitly changed.
@@ -357,7 +357,10 @@ The join file's format comes from its extension unless overridden with `with for
 Optional terminal stage after the pipeline. At most one per query; must be last (reject `| csv | head`).
 
 ```
-output_cmd ::= "table" | "csv" | "json" | "jsonl" | "avro" | "parquet"
+output_cmd  ::= format [ "with" output_opts ] [ "to" path ]
+format      ::= "table" | "csv" | "json" | "jsonl" | "avro" | "parquet"
+output_opts ::= output_opt ( "," output_opt )*
+output_opt  ::= ident "=" value
 ```
 
 Omitted `output_cmd` → pretty **table** (same as `| table` for rendering).
@@ -367,9 +370,40 @@ dq 'users.csv | select name, age'
 dq 'users.csv | select name, age | csv'
 dq 'users.csv | count | json'
 cat data.csv | dq '- with format=csv | count | jsonl'
+dq 'users.csv | select name, age | csv to out/users.csv'
+dq 'users.csv | json to out/'                           # out/output.json
+dq 'users.csv | table to out/'                          # out/output.txt
+dq 'big.csv | csv with split_rows=50000 to out/'         # out/output-1.csv, out/output-2.csv, ...
+dq 'big.csv | parquet with split_rows=100000 to out/part-{n}.parquet'
 ```
 
-Not lexer keywords — only recognized as the final `|`-stage. Column names like `csv` in `{ csv == "x" }` are unaffected.
+Output stage rules:
+
+* At most one output command per query; it must be last (reject `| csv | head` and `| csv to out.csv | head`).
+* `to path` writes to a file or directory instead of stdout. When `to` is set, nothing is printed to stdout.
+* Parent directories are created. Existing output files fail rather than being overwritten.
+* If a file path has no extension, the format extension is appended (`| csv to out/users` → `out/users.csv`). `table` file output uses `.txt`.
+* If a file path extension disagrees with the format command, the query fails (`| csv to out/users.json`).
+* A destination is a directory only when the path ends with `/` or the platform path separator. Directory detection does not depend on whether a path already exists. A directory destination writes `output.<ext>` (`| parquet to out/` → `out/output.parquet`, `| table to out/` → `out/output.txt`).
+* `with split_rows=N` writes row-bounded output parts. `N` must be a positive integer and requires `to`.
+* `with overwrite=true` replaces existing output files. `overwrite` is optional, defaults to `false`, and requires `to path` because stdout output has nothing to overwrite.
+* Split directory destinations write `output-1.<ext>`, `output-2.<ext>`, ...
+* Split directory output owns the full `output-N.<ext>` sequence for that directory and format. A later run that produces fewer parts treats higher-numbered matching files as stale output: without `overwrite=true` they cause the write to fail; with `overwrite=true` they are removed as part of the staged commit and restored on rollback.
+* Split file destinations must contain `{n}` as the part-number placeholder (`part-{n}.csv`, `chunk-{n}.jsonl`, etc.). `{n}` works for all split-capable formats.
+* `table` output can be written to a single file, but `table with split_rows=...` is rejected by the writer after parsing/execution. Parser-level split validation checks generic output-shape rules (`to` is required, `N > 0`, and non-directory split file paths must contain `{n}`); the writer owns format-specific split support.
+* File outputs are staged through temporary files in the destination directory and then committed with rename/link operations. Failed serialization should not leave corrupt final files or temporary files behind. Split output stages all parts before committing final paths.
+
+Format-specific split behavior:
+
+| Format | Split behavior |
+|--------|----------------|
+| `csv` | Header row is written in every part file |
+| `json` | Each part is a standalone JSON array |
+| `jsonl` | Each part is standalone JSONL |
+| `avro` | Each part is a standalone Avro OCF file |
+| `parquet` | Each part is a standalone Parquet file |
+
+Output format names are not lexer keywords — only recognized as the final `|`-stage. Column names like `csv` in `{ csv == "x" }` are unaffected.
 
 ---
 

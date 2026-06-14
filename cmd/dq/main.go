@@ -64,7 +64,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := writer.Write(os.Stdout, result, q.Output); err != nil {
+	if q.Output.Path != "" {
+		if err := writer.WriteOutput(result, q.Output); err != nil {
+			fmt.Fprintf(os.Stderr, "output error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if err := writer.Write(os.Stdout, result, q.Output.Format); err != nil {
 		fmt.Fprintf(os.Stderr, "output error: %v\n", err)
 		os.Exit(1)
 	}
