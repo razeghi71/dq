@@ -1291,6 +1291,98 @@ func TestParseInvalidCommaSyntaxRejected(t *testing.T) {
 	}
 }
 
+func TestParseMutationBoundarySyntaxCases(t *testing.T) {
+	t.Run("sort_backtick_column", func(t *testing.T) {
+		q, err := Parse("users.csv | sort `first name`")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := q.Ops[0].(*ast.SortOp)
+		if len(s.Keys) != 1 || len(s.Keys[0].Path) != 1 || s.Keys[0].Path[0] != "first name" {
+			t.Fatalf("unexpected sort keys: %#v", s.Keys)
+		}
+	})
+
+	t.Run("group_requires_valid_nested_name", func(t *testing.T) {
+		_, err := Parse("users.csv | group city as 1")
+		if err == nil {
+			t.Fatal("expected invalid nested name error")
+		}
+		if !strings.Contains(err.Error(), "expected nested name") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("reduce_with_backtick_assignment", func(t *testing.T) {
+		q, err := Parse("users.csv | group city | reduce `total count` = count()")
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := q.Ops[1].(*ast.ReduceOp)
+		if r.NestedName != "grouped" {
+			t.Fatalf("nested name: want grouped, got %q", r.NestedName)
+		}
+		if len(r.Assignments) != 1 || r.Assignments[0].Column != "total count" {
+			t.Fatalf("unexpected assignments: %#v", r.Assignments)
+		}
+	})
+
+	t.Run("reduce_nested_name_with_backtick_assignment", func(t *testing.T) {
+		q, err := Parse("users.csv | group city as entries | reduce entries `total count` = count()")
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := q.Ops[1].(*ast.ReduceOp)
+		if r.NestedName != "entries" {
+			t.Fatalf("nested name: want entries, got %q", r.NestedName)
+		}
+		if len(r.Assignments) != 1 || r.Assignments[0].Column != "total count" {
+			t.Fatalf("unexpected assignments: %#v", r.Assignments)
+		}
+	})
+
+	t.Run("rename_accepts_backtick_new_name", func(t *testing.T) {
+		q, err := Parse("users.csv | rename first=`first name`")
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := q.Ops[0].(*ast.RenameOp)
+		if len(r.Pairs) != 1 || r.Pairs[0].Old != "first" || r.Pairs[0].New != "first name" {
+			t.Fatalf("unexpected rename pairs: %#v", r.Pairs)
+		}
+	})
+
+	t.Run("column_path_rejects_numeric_segment", func(t *testing.T) {
+		_, err := Parse("users.csv | select address.1")
+		if err == nil {
+			t.Fatal("expected invalid dot-path segment error")
+		}
+		if !strings.Contains(err.Error(), "expected field name after '.'") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("expression_path_rejects_numeric_segment", func(t *testing.T) {
+		_, err := Parse("users.csv | filter { address.1 == \"NY\" }")
+		if err == nil {
+			t.Fatal("expected invalid expression dot-path segment error")
+		}
+		if !strings.Contains(err.Error(), "expected field name after '.'") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("assignment_requires_identifier", func(t *testing.T) {
+		_, err := Parse("users.csv | transform 1 = age")
+		if err == nil {
+			t.Fatal("expected invalid assignment target error")
+		}
+		if !strings.Contains(err.Error(), "expected column name in assignment") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}
+
 func TestParseTrailingCommaInColumnListsRejected(t *testing.T) {
 	cases := []struct {
 		name  string

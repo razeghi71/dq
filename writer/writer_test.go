@@ -66,6 +66,27 @@ func TestWriteTable(t *testing.T) {
 	}
 }
 
+func TestWriteTablePadsCellsToColumnWidths(t *testing.T) {
+	tbl := table.NewTable([]string{"short", "long"})
+	tbl.AddRow([]table.Value{table.StrVal("xx"), table.StrVal("y")})
+	tbl.AddRow([]table.Value{table.StrVal("longer"), table.StrVal("zz")})
+
+	var buf bytes.Buffer
+	if err := Write(&buf, tbl, "table"); err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{
+		"short  | long",
+		"-------+-----",
+		"xx     | y   ",
+		"longer | zz  ",
+		"",
+	}, "\n")
+	if buf.String() != want {
+		t.Fatalf("table output mismatch:\nwant:\n%q\ngot:\n%q", want, buf.String())
+	}
+}
+
 func TestWriteTableEmpty(t *testing.T) {
 	var buf bytes.Buffer
 	empty := table.NewTable(nil)

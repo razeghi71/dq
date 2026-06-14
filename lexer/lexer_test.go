@@ -178,6 +178,24 @@ func TestScanSourceStdin(t *testing.T) {
 	}
 }
 
+func TestScanSourceStdinAdjacentPipe(t *testing.T) {
+	l := NewLexer("-| head 10")
+	tok, err := l.ScanSource()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Type != TokenStdin || tok.Val != "-" {
+		t.Fatalf("expected STDIN '-', got %s %q", tok.Type, tok.Val)
+	}
+	tok, err = l.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Type != TokenPipe || tok.Pos != 1 {
+		t.Fatalf("expected pipe at position 1, got %s @%d", tok.Type, tok.Pos)
+	}
+}
+
 func TestScanSourceHyphenatedFilename(t *testing.T) {
 	l := NewLexer("my-file.csv | head")
 	tok, err := l.ScanSource()
@@ -198,4 +216,205 @@ func TestLexComment(t *testing.T) {
 	if len(tokens) != len(expected) {
 		t.Fatalf("expected %d tokens, got %d", len(expected), len(tokens))
 	}
+}
+
+func TestLexCommentAtEOF(t *testing.T) {
+	tokens, err := Lex("age // trailing comment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := []TokenType{TokenIdent, TokenEOF}
+	if len(tokens) != len(expected) {
+		t.Fatalf("expected %d tokens, got %#v", len(expected), tokens)
+	}
+	for i, tt := range expected {
+		if tokens[i].Type != tt {
+			t.Fatalf("token %d: expected %s, got %s (%q)", i, tt, tokens[i].Type, tokens[i].Val)
+		}
+	}
+	if tokens[1].Pos != len([]rune("age // trailing comment")) {
+		t.Fatalf("EOF position: got %d", tokens[1].Pos)
+	}
+}
+
+func TestLexUnderscoreIdentifier(t *testing.T) {
+	tokens, err := Lex("_name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tokens) != 2 {
+		t.Fatalf("expected identifier and EOF, got %#v", tokens)
+	}
+	if tokens[0].Type != TokenIdent || tokens[0].Val != "_name" {
+		t.Fatalf("expected _name identifier, got %s %q", tokens[0].Type, tokens[0].Val)
+	}
+}
+
+func TestLexSingleCharacterTokensAtEOF(t *testing.T) {
+	cases := []struct {
+		input string
+		typ   TokenType
+		val   string
+	}{
+		{"|", TokenPipe, "|"},
+		{"{", TokenLBrace, "{"},
+		{"}", TokenRBrace, "}"},
+		{"(", TokenLParen, "("},
+		{")", TokenRParen, ")"},
+		{",", TokenComma, ","},
+		{".", TokenDot, "."},
+		{"+", TokenPlus, "+"},
+		{"-", TokenMinus, "-"},
+		{"*", TokenStar, "*"},
+		{"/", TokenSlash, "/"},
+		{"=", TokenEquals, "="},
+		{"<", TokenLt, "<"},
+		{">", TokenGt, ">"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			l := NewLexer(tc.input)
+			tok, err := l.Next()
+			if err != nil {
+				t.Fatalf("first token: %v", err)
+			}
+			if tok.Type != tc.typ || tok.Val != tc.val || tok.Pos != 0 {
+				t.Fatalf("first token: want %s %q @0, got %s %q @%d", tc.typ, tc.val, tok.Type, tok.Val, tok.Pos)
+			}
+			eof, err := l.Next()
+			if err != nil {
+				t.Fatalf("EOF token: %v", err)
+			}
+			if eof.Type != TokenEOF || eof.Pos != len([]rune(tc.input)) {
+				t.Fatalf("EOF token: want EOF at %d, got %s @%d", len([]rune(tc.input)), eof.Type, eof.Pos)
+			}
+		})
+	}
+}
+
+func TestLexTwoCharacterOperatorBoundaries(t *testing.T) {
+	cases := []struct {
+		input string
+		typ   TokenType
+		val   string
+	}{
+		{"==", TokenEq, "=="},
+		{"!=", TokenNeq, "!="},
+		{"<=", TokenLte, "<="},
+		{">=", TokenGte, ">="},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			tokens, err := Lex(tc.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(tokens) != 2 {
+				t.Fatalf("expected operator and EOF, got %#v", tokens)
+			}
+			if tokens[0].Type != tc.typ || tokens[0].Val != tc.val {
+				t.Fatalf("token: want %s %q, got %s %q", tc.typ, tc.val, tokens[0].Type, tokens[0].Val)
+			}
+			if tokens[1].Type != TokenEOF || tokens[1].Pos != len([]rune(tc.input)) {
+				t.Fatalf("EOF: got %s @%d", tokens[1].Type, tokens[1].Pos)
+			}
+		})
+	}
+
+	if _, err := Lex("!"); err == nil {
+		t.Fatal("expected bare ! to error")
+	}
+}
+
+func TestLexStringAndNumberBoundaries(t *testing.T) {
+	t.Run("empty_string", func(t *testing.T) {
+		tokens, err := Lex(`""`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tokens[0].Type != TokenString || tokens[0].Val != "" {
+			t.Fatalf("expected empty string token, got %s %q", tokens[0].Type, tokens[0].Val)
+		}
+	})
+
+	t.Run("trailing_escape_is_literal_until_unterminated", func(t *testing.T) {
+		_, err := Lex(`"unterminated\`)
+		if err == nil {
+			t.Fatal("expected unterminated string error")
+		}
+	})
+
+	t.Run("integer_followed_by_dot_is_not_float", func(t *testing.T) {
+		tokens, err := Lex("1.")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(tokens) != 3 || tokens[0].Type != TokenInt || tokens[0].Val != "1" || tokens[1].Type != TokenDot {
+			t.Fatalf("expected INT(1), DOT, EOF; got %#v", tokens)
+		}
+	})
+
+	t.Run("negative_number_at_start", func(t *testing.T) {
+		tokens, err := Lex("-5")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(tokens) != 2 || tokens[0].Type != TokenInt || tokens[0].Val != "-5" {
+			t.Fatalf("expected INT(-5), EOF; got %#v", tokens)
+		}
+	})
+}
+
+func TestLexBacktickAndSourceBoundaries(t *testing.T) {
+	t.Run("empty_backtick_identifier", func(t *testing.T) {
+		tokens, err := Lex("``")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tokens[0].Type != TokenBacktickIdent || tokens[0].Val != "" {
+			t.Fatalf("expected empty backtick identifier, got %s %q", tokens[0].Type, tokens[0].Val)
+		}
+	})
+
+	t.Run("source_at_eof", func(t *testing.T) {
+		l := NewLexer("users.csv")
+		tok, err := l.ScanSource()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tok.Type != TokenIdent || tok.Val != "users.csv" {
+			t.Fatalf("expected source filename, got %s %q", tok.Type, tok.Val)
+		}
+		eof, err := l.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if eof.Type != TokenEOF {
+			t.Fatalf("expected EOF after source, got %s", eof.Type)
+		}
+	})
+
+	t.Run("stdin_at_eof", func(t *testing.T) {
+		l := NewLexer("-")
+		tok, err := l.ScanSource()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tok.Type != TokenStdin || tok.Val != "-" {
+			t.Fatalf("expected stdin token, got %s %q", tok.Type, tok.Val)
+		}
+	})
+
+	t.Run("all_whitespace_source", func(t *testing.T) {
+		l := NewLexer(" \t\n")
+		tok, err := l.ScanSource()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tok.Type != TokenEOF || tok.Pos != 3 {
+			t.Fatalf("expected EOF after whitespace, got %s @%d", tok.Type, tok.Pos)
+		}
+	})
 }

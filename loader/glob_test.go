@@ -770,3 +770,82 @@ func TestLoadGlobCSVHeaderFalse(t *testing.T) {
 		t.Fatalf("expected 3 rows, got %d: %s", tbl.NumRows, tbl.String())
 	}
 }
+
+func TestCSVGlobHeaderClassificationHelpers(t *testing.T) {
+	t.Run("column_name_shape", func(t *testing.T) {
+		valid := []string{"id", "_id", "id2", "id_name", "idName"}
+		for _, s := range valid {
+			if !looksLikeColumnName(s) {
+				t.Fatalf("%q should look like a column name", s)
+			}
+		}
+
+		invalid := []string{"", "Id", "2id", "id-name", "id name"}
+		for _, s := range invalid {
+			if looksLikeColumnName(s) {
+				t.Fatalf("%q should not look like a column name", s)
+			}
+		}
+	})
+
+	t.Run("anchor_permutation_respects_duplicates", func(t *testing.T) {
+		anchor := []string{"id", "id", "name"}
+		if !isAnchorColumnPermutation([]string{"name", "id", "id"}, anchor) {
+			t.Fatal("expected reordered duplicate columns to be a permutation")
+		}
+		if isAnchorColumnPermutation([]string{"name", "id", "email"}, anchor) {
+			t.Fatal("unexpected permutation when one duplicate is replaced")
+		}
+		if isAnchorColumnPermutation([]string{"name", "id"}, anchor) {
+			t.Fatal("unexpected permutation with different length")
+		}
+	})
+
+	t.Run("extended_header_requires_overlap_and_valid_new_columns", func(t *testing.T) {
+		anchor := []string{"id", "name"}
+		if !isExtendedHeaderRow([]string{"id", "name", "email_2"}, anchor) {
+			t.Fatal("expected lowercase extension with anchor overlap")
+		}
+		if isExtendedHeaderRow([]string{"user_id", "full_name"}, anchor) {
+			t.Fatal("renamed columns without overlap should be positional")
+		}
+		if isExtendedHeaderRow([]string{"id", "name", "Email"}, anchor) {
+			t.Fatal("PascalCase extension should not be treated as a header")
+		}
+		if isExtendedHeaderRow([]string{"id", "name", "123"}, anchor) {
+			t.Fatal("numeric-looking row should not be treated as a header")
+		}
+	})
+}
+
+func TestValidateCSVRecordWidthBoundaries(t *testing.T) {
+	strict := csvLoadConfig{}
+	if err := validateCSVRecord([]string{"1", "Alice"}, 2, strict, 7); err != nil {
+		t.Fatalf("exact-width row should validate: %v", err)
+	}
+	if err := validateCSVRecord([]string{"1", "Alice", "extra"}, 2, strict, 7); err == nil || !strings.Contains(err.Error(), "1 extra") {
+		t.Fatalf("expected strict extra-column error, got %v", err)
+	}
+	if err := validateCSVRecord([]string{"1"}, 2, strict, 7); err == nil || !strings.Contains(err.Error(), "1 missing") {
+		t.Fatalf("expected strict missing-column error, got %v", err)
+	}
+
+	ignoreExtra := csvLoadConfig{ignoreUnknownValues: true}
+	if err := validateCSVRecord([]string{"1", "Alice", "extra"}, 2, ignoreExtra, 7); err != nil {
+		t.Fatalf("ignoreUnknownValues should allow extra columns: %v", err)
+	}
+
+	allowMissing := csvLoadConfig{allowJaggedRows: true}
+	if err := validateCSVRecord([]string{"1"}, 2, allowMissing, 7); err != nil {
+		t.Fatalf("allowJaggedRows should allow missing trailing columns: %v", err)
+	}
+}
+
+func TestCSVRowLooksLikeDataSkipsEmptyCells(t *testing.T) {
+	if !csvRowLooksLikeData([]string{"", "42"}) {
+		t.Fatal("numeric value after an empty cell should still classify the row as data")
+	}
+	if csvRowLooksLikeData([]string{"", "name"}) {
+		t.Fatal("non-numeric text with empty cells should not classify the row as data")
+	}
+}

@@ -1461,6 +1461,214 @@ func TestReduceAggregateDotPath(t *testing.T) {
 	}
 }
 
+func TestReduceMinLastAndAggregateExpression(t *testing.T) {
+	result := runQuery(t, usersTable(), "group city | reduce min_age = min(age), last_name = last(name), age_span = max(age) - min(age) | remove grouped | sort city")
+
+	cityIdx := result.ColIndex("city")
+	minIdx := result.ColIndex("min_age")
+	lastIdx := result.ColIndex("last_name")
+	spanIdx := result.ColIndex("age_span")
+
+	want := map[string]struct {
+		minAge int64
+		last   string
+		span   int64
+	}{
+		"LA": {minAge: 22, last: "Eve", span: 3},
+		"NY": {minAge: 30, last: "Frank", span: 10},
+		"SF": {minAge: 28, last: "Diana", span: 0},
+	}
+
+	if result.NumRows != len(want) {
+		t.Fatalf("expected %d rows, got %d", len(want), result.NumRows)
+	}
+	for i := 0; i < result.NumRows; i++ {
+		city := result.GetAt(i, cityIdx).Str
+		w, ok := want[city]
+		if !ok {
+			t.Fatalf("unexpected city %q", city)
+		}
+		if got := result.GetAt(i, minIdx); got.Type != table.TypeInt || got.Int != w.minAge {
+			t.Fatalf("%s min_age: want %d, got %v", city, w.minAge, got)
+		}
+		if got := result.GetAt(i, lastIdx); got.Type != table.TypeString || got.Str != w.last {
+			t.Fatalf("%s last_name: want %q, got %v", city, w.last, got)
+		}
+		if got := result.GetAt(i, spanIdx); got.Type != table.TypeInt || got.Int != w.span {
+			t.Fatalf("%s age_span: want %d, got %v", city, w.span, got)
+		}
+	}
+}
+
+func TestEvalUnaryBranches(t *testing.T) {
+	tbl := table.NewTable([]string{"flag", "n", "f", "missing"})
+	tbl.AddRow([]table.Value{table.BoolVal(false), table.IntVal(4), table.FloatVal(1.5), table.Null()})
+	ctx := &EvalContext{Table: tbl, RowIdx: 0}
+
+	cases := []struct {
+		name string
+		expr ast.Expr
+		want table.Value
+	}{
+		{
+			name: "not",
+			expr: &ast.UnaryExpr{Op: "not", Operand: &ast.ColumnExpr{Path: []string{"flag"}}},
+			want: table.BoolVal(true),
+		},
+		{
+			name: "negative_int",
+			expr: &ast.UnaryExpr{Op: "-", Operand: &ast.ColumnExpr{Path: []string{"n"}}},
+			want: table.IntVal(-4),
+		},
+		{
+			name: "negative_float",
+			expr: &ast.UnaryExpr{Op: "-", Operand: &ast.ColumnExpr{Path: []string{"f"}}},
+			want: table.FloatVal(-1.5),
+		},
+		{
+			name: "negative_null",
+			expr: &ast.UnaryExpr{Op: "-", Operand: &ast.ColumnExpr{Path: []string{"missing"}}},
+			want: table.Null(),
+		},
+	}
+
+	for _, tc := range cases {
+		got, err := Eval(tc.expr, ctx)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", tc.name, err)
+		}
+		if !table.Equal(got, tc.want) {
+			t.Fatalf("%s: want %v, got %v", tc.name, tc.want, got)
+		}
+	}
+
+	if _, err := Eval(&ast.UnaryExpr{Op: "-", Operand: &ast.ColumnExpr{Path: []string{"flag"}}}, ctx); err == nil {
+		t.Fatal("expected bool negation to fail")
+	}
+	if _, err := Eval(&ast.UnaryExpr{Op: "bad", Operand: &ast.ColumnExpr{Path: []string{"n"}}}, ctx); err == nil {
+		t.Fatal("expected unknown unary operator to fail")
+	}
+}
+
+func TestCmpResultCoversAllOperators(t *testing.T) {
+	cases := []struct {
+		op   string
+		cmp  int
+		want bool
+	}{
+		{op: "==", cmp: 0, want: true},
+		{op: "!=", cmp: 1, want: true},
+		{op: "<", cmp: -1, want: true},
+		{op: ">", cmp: 1, want: true},
+		{op: "<=", cmp: 0, want: true},
+		{op: ">=", cmp: 0, want: true},
+		{op: "bad", cmp: 0, want: false},
+	}
+	for _, tc := range cases {
+		if got := cmpResult(tc.op, tc.cmp); got != tc.want {
+			t.Fatalf("cmpResult(%q, %d): want %v, got %v", tc.op, tc.cmp, tc.want, got)
+		}
+	}
+}
+
+func TestEvalArithDirectBranches(t *testing.T) {
+	got, err := evalArith("+", table.StrVal("a"), table.StrVal("b"))
+	if err != nil || got.Type != table.TypeString || got.Str != "ab" {
+		t.Fatalf("string concat: want ab, got %v err=%v", got, err)
+	}
+
+	got, err = evalArith("/", table.IntVal(4), table.IntVal(2))
+	if err != nil || got.Type != table.TypeInt || got.Int != 2 {
+		t.Fatalf("whole int division: want 2, got %v err=%v", got, err)
+	}
+
+	got, err = evalArith("/", table.IntVal(5), table.IntVal(2))
+	if err != nil || got.Type != table.TypeFloat || got.Float != 2.5 {
+		t.Fatalf("fractional int division: want 2.5, got %v err=%v", got, err)
+	}
+
+	got, err = evalArith("/", table.IntVal(5), table.IntVal(0))
+	if err != nil || !got.IsNull() {
+		t.Fatalf("division by zero: want null, got %v err=%v", got, err)
+	}
+
+	if _, err := evalArith("+", table.StrVal("a"), table.IntVal(1)); err == nil {
+		t.Fatal("expected mixed string/int arithmetic to fail")
+	}
+}
+
+func TestEvalAggregateEdgeCases(t *testing.T) {
+	empty := table.NewTable([]string{"x"})
+	count, err := EvalAggregate(&ast.FuncCallExpr{Name: "count"}, empty)
+	if err != nil || count.Type != table.TypeInt || count.Int != 0 {
+		t.Fatalf("count(empty): want 0, got %v err=%v", count, err)
+	}
+
+	for _, name := range []string{"sum", "avg", "min", "max", "first", "last"} {
+		got, err := EvalAggregate(&ast.FuncCallExpr{Name: name, Args: []ast.Expr{&ast.ColumnExpr{Path: []string{"x"}}}}, empty)
+		if err != nil {
+			t.Fatalf("%s(empty): unexpected error: %v", name, err)
+		}
+		if !got.IsNull() {
+			t.Fatalf("%s(empty): want null, got %v", name, got)
+		}
+	}
+
+	lit, err := EvalAggregate(&ast.LiteralExpr{Kind: "int", Int: 7}, empty)
+	if err != nil || lit.Type != table.TypeInt || lit.Int != 7 {
+		t.Fatalf("literal aggregate expression: want 7, got %v err=%v", lit, err)
+	}
+
+	nullExpr := &ast.BinaryExpr{
+		Op:    "+",
+		Left:  &ast.FuncCallExpr{Name: "sum", Args: []ast.Expr{&ast.ColumnExpr{Path: []string{"x"}}}},
+		Right: &ast.LiteralExpr{Kind: "int", Int: 1},
+	}
+	got, err := EvalAggregate(nullExpr, empty)
+	if err != nil || !got.IsNull() {
+		t.Fatalf("null aggregate expression: want null, got %v err=%v", got, err)
+	}
+
+	bad := table.NewTable([]string{"x"})
+	bad.AddRow([]table.Value{table.StrVal("nope")})
+	for _, name := range []string{"sum", "avg", "min", "max"} {
+		if _, err := EvalAggregate(&ast.FuncCallExpr{Name: name, Args: []ast.Expr{&ast.ColumnExpr{Path: []string{"x"}}}}, bad); err == nil {
+			t.Fatalf("expected %s over strings to fail", name)
+		}
+	}
+
+	errorCases := []ast.Expr{
+		&ast.FuncCallExpr{Name: "upper", Args: []ast.Expr{&ast.ColumnExpr{Path: []string{"x"}}}},
+		&ast.FuncCallExpr{Name: "sum", Args: []ast.Expr{&ast.LiteralExpr{Kind: "int", Int: 1}}},
+		&ast.StructExpr{},
+		&ast.ListExpr{},
+		&ast.ColumnExpr{Path: []string{"x"}},
+	}
+	for _, expr := range errorCases {
+		if _, err := EvalAggregate(expr, empty); err == nil {
+			t.Fatalf("expected %T aggregate expression to fail", expr)
+		}
+	}
+}
+
+func TestCompareValuesFallbackOrdering(t *testing.T) {
+	if got := compareValues(table.Null(), table.Null()); got != 0 {
+		t.Fatalf("null/null comparison: want 0, got %d", got)
+	}
+	if got := compareValues(table.Null(), table.IntVal(1)); got <= 0 {
+		t.Fatalf("null should sort after non-null, got %d", got)
+	}
+	if got := compareValues(table.IntVal(1), table.Null()); got >= 0 {
+		t.Fatalf("non-null should sort before null, got %d", got)
+	}
+	if got := compareValues(table.IntVal(1), table.StrVal("1")); got >= 0 {
+		t.Fatalf("different types should fall back to type-name ordering, got %d", got)
+	}
+	if got := compareValues(table.ListVal([]table.Value{table.IntVal(1)}), table.ListVal([]table.Value{table.IntVal(2)})); got >= 0 {
+		t.Fatalf("same non-orderable type should fall back to canonical key ordering, got %d", got)
+	}
+}
+
 func ordersTable() *table.Table {
 	t := table.NewTable([]string{"order_id", "user_name", "product", "amount"})
 	t.AddRow([]table.Value{table.IntVal(1), table.StrVal("Alice"), table.StrVal("Widget"), table.IntVal(10)})

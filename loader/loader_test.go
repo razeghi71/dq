@@ -229,8 +229,9 @@ func TestLoadGzipCSVBadStreamsReturnGzipError(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected gzip error")
 		}
-		if !strings.Contains(strings.ToLower(err.Error()), "gzip") {
-			t.Fatalf("error should mention gzip, got %v", err)
+		lower := strings.ToLower(err.Error())
+		if !strings.Contains(lower, "cannot read gzip stream") {
+			t.Fatalf("error should use gzip-specific open message, got %v", err)
 		}
 	})
 
@@ -267,6 +268,16 @@ func TestLoadGzipJSONBadStreamsReturnGzipError(t *testing.T) {
 				t.Fatalf("error should mention gzip, got %v", err)
 			}
 		})
+	}
+}
+
+func TestLoadJSONLInvalidLineNumberIncludesBlankLines(t *testing.T) {
+	_, err := LoadReader(strings.NewReader("\n{\"ok\":true}\nnot-json\n"), Options{Format: "jsonl"})
+	if err == nil {
+		t.Fatal("expected invalid JSONL error")
+	}
+	if !strings.Contains(err.Error(), "invalid JSON on line 3") {
+		t.Fatalf("expected physical line 3 in error, got %v", err)
 	}
 }
 
@@ -825,5 +836,74 @@ func TestLoadAvroNamespacedUnionRecord(t *testing.T) {
 	}
 	if got := tbl.Get(0, "v").Str; got != "hello" {
 		t.Fatalf("string branch: want hello, got %q", got)
+	}
+}
+
+func TestAvroValueSchemaBranchShapes(t *testing.T) {
+	if got := avroValue(map[string]any{"string": "wrapped"}, "string", ""); got.Type != table.TypeString || got.Str != "wrapped" {
+		t.Fatalf("wrapped primitive branch: want wrapped string, got %v", got)
+	}
+
+	if got := avroValue("fallback", []any{"null", "string"}, ""); got.Type != table.TypeString || got.Str != "fallback" {
+		t.Fatalf("union fallback branch: want fallback string, got %v", got)
+	}
+	if got := avroValue("ignored", []any{"null"}, ""); !got.IsNull() {
+		t.Fatalf("null-only union: want null, got %v", got)
+	}
+
+	arraySchema := map[string]any{"type": "array", "items": "long"}
+	got := avroValue([]any{int64(1), int64(2)}, arraySchema, "")
+	if got.Type != table.TypeList || len(got.List) != 2 || got.List[0].Int != 1 || got.List[1].Int != 2 {
+		t.Fatalf("array schema: want [1,2], got %v", got)
+	}
+
+	nestedSliceType := map[string]any{"type": []any{"null", "long"}}
+	if got := avroValue(int64(7), nestedSliceType, ""); got.Type != table.TypeInt || got.Int != 7 {
+		t.Fatalf("nested slice type: want 7, got %v", got)
+	}
+
+	nestedMapType := map[string]any{"type": map[string]any{"type": "array", "items": "string"}}
+	got = avroValue([]any{"a"}, nestedMapType, "")
+	if got.Type != table.TypeList || len(got.List) != 1 || got.List[0].Str != "a" {
+		t.Fatalf("nested map type: want [a], got %v", got)
+	}
+
+	recordSchema := map[string]any{
+		"type": "record",
+		"name": "Row",
+		"fields": []any{
+			"not-a-field",
+			map[string]any{"type": "long"},
+			map[string]any{"name": "b", "type": "string"},
+			map[string]any{"name": "a", "type": "long"},
+		},
+	}
+	got = avroValue(map[string]any{"a": int64(1), "b": "x"}, recordSchema, "")
+	if got.Type != table.TypeRecord || len(got.Fields) != 2 {
+		t.Fatalf("record schema: want two fields, got %v", got)
+	}
+	if got.Fields[0].Name != "a" || got.Fields[0].Value.Int != 1 || got.Fields[1].Name != "b" || got.Fields[1].Value.Str != "x" {
+		t.Fatalf("record fields should be sorted and decoded, got %v", got)
+	}
+}
+
+func TestAnyToValueAdditionalTypes(t *testing.T) {
+	if got := anyToValue(float64(1.25)); got.Type != table.TypeFloat || got.Float != 1.25 {
+		t.Fatalf("float64: want 1.25, got %v", got)
+	}
+	if got := anyToValue(float32(2.5)); got.Type != table.TypeFloat || got.Float != 2.5 {
+		t.Fatalf("float32: want 2.5, got %v", got)
+	}
+	if got := anyToValue([]byte("bytes")); got.Type != table.TypeString || got.Str != "bytes" {
+		t.Fatalf("[]byte: want bytes, got %v", got)
+	}
+	if got := anyToValue([]interface{}{float64(1), "x"}); got.Type != table.TypeList || len(got.List) != 2 || got.List[0].Int != 1 || got.List[1].Str != "x" {
+		t.Fatalf("slice: want [1,x], got %v", got)
+	}
+	if got := anyToValue(map[string]interface{}{"element": int64(9)}); got.Type != table.TypeInt || got.Int != 9 {
+		t.Fatalf("parquet element wrapper: want 9, got %v", got)
+	}
+	if got := anyToValue(struct{ X int }{X: 1}); got.Type != table.TypeString || got.Str != `{"X":1}` {
+		t.Fatalf("fallback JSON value: want object string, got %v", got)
 	}
 }

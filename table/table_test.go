@@ -1,6 +1,7 @@
 package table
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -135,6 +136,121 @@ func TestSelectColsSharesData(t *testing.T) {
 	}
 	if sub.Col(0) != tbl.Col(0) || sub.Col(1) != tbl.Col(2) {
 		t.Error("SelectCols should share column pointers")
+	}
+}
+
+func TestTableCloneCopiesColumnData(t *testing.T) {
+	tbl := NewTable([]string{"name", "age"})
+	tbl.AddRow([]Value{StrVal("Alice"), IntVal(30)})
+	tbl.AddRow([]Value{StrVal("Bob"), Null()})
+
+	clone := tbl.Clone()
+	if clone == tbl {
+		t.Fatal("Clone returned the original table")
+	}
+	if clone.Col(0) == tbl.Col(0) || clone.Col(1) == tbl.Col(1) {
+		t.Fatal("Clone should copy column storage")
+	}
+	if got := clone.Col(0).ColName(); got != "name" {
+		t.Fatalf("cloned column name: want name, got %q", got)
+	}
+	if got := clone.GetAt(0, 0).Str; got != "Alice" {
+		t.Fatalf("clone row 0 name: want Alice, got %q", got)
+	}
+	if !clone.GetAt(1, 1).IsNull() {
+		t.Fatalf("clone row 1 age: want null, got %v", clone.GetAt(1, 1))
+	}
+
+	tbl.Col(0).Append(StrVal("Carol"))
+	if clone.Col(0).Len() != 2 {
+		t.Fatalf("clone should not grow after source mutation, got %d rows", clone.Col(0).Len())
+	}
+}
+
+func TestTableCloneCopiesAllColumnTypes(t *testing.T) {
+	tbl := NewTable([]string{"i", "f", "s", "b", "list", "record"})
+	tbl.AddRow([]Value{
+		IntVal(1),
+		FloatVal(1.5),
+		StrVal("x"),
+		BoolVal(true),
+		ListVal([]Value{IntVal(2)}),
+		RecordVal([]RecordField{{Name: "n", Value: IntVal(3)}}),
+	})
+	tbl.AddRow([]Value{Null(), Null(), Null(), Null(), Null(), Null()})
+
+	clone := tbl.Clone()
+	for i, col := range tbl.Columns {
+		if clone.Col(i) == tbl.Col(i) {
+			t.Fatalf("%s column storage was shared", col)
+		}
+		if got, want := clone.Col(i).ColType(), tbl.Col(i).ColType(); got != want {
+			t.Fatalf("%s column type: want %v, got %v", col, want, got)
+		}
+		if !Equal(clone.GetAt(0, i), tbl.GetAt(0, i)) {
+			t.Fatalf("%s row 0: clone value mismatch", col)
+		}
+		if !clone.GetAt(1, i).IsNull() {
+			t.Fatalf("%s row 1: want null, got %v", col, clone.GetAt(1, i))
+		}
+	}
+}
+
+func TestTableStringIncludesRowsAndEmptyShape(t *testing.T) {
+	empty := NewTable([]string{"name", "age"})
+	if got, want := empty.String(), "[name, age] (0 rows)"; got != want {
+		t.Fatalf("empty String(): want %q, got %q", want, got)
+	}
+
+	tbl := NewTable([]string{"name", "age"})
+	tbl.AddRow([]Value{StrVal("Alice"), IntVal(30)})
+	tbl.AddRow([]Value{StrVal("Bob"), Null()})
+
+	got := tbl.String()
+	for _, want := range []string{"name:Alice", "age:30", "name:Bob", "age:null"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("String() = %q, missing %q", got, want)
+		}
+	}
+}
+
+func TestTableInvalidAccessReturnsNullOrNil(t *testing.T) {
+	tbl := NewTable([]string{"x"})
+	tbl.AddRow([]Value{IntVal(1)})
+
+	if tbl.Col(-1) != nil || tbl.Col(1) != nil {
+		t.Fatal("out-of-range Col should return nil")
+	}
+	for _, got := range []Value{
+		tbl.GetAt(-1, 0),
+		tbl.GetAt(0, -1),
+		tbl.GetAt(1, 0),
+		tbl.GetAt(0, 1),
+	} {
+		if !got.IsNull() {
+			t.Fatalf("out-of-range GetAt should return null, got %v", got)
+		}
+	}
+}
+
+func TestValueAsBoolVariants(t *testing.T) {
+	cases := []struct {
+		name string
+		v    Value
+		want bool
+		ok   bool
+	}{
+		{name: "true", v: BoolVal(true), want: true, ok: true},
+		{name: "false", v: BoolVal(false), want: false, ok: true},
+		{name: "null", v: Null(), want: false, ok: true},
+		{name: "string", v: StrVal("true"), want: false, ok: false},
+	}
+
+	for _, tc := range cases {
+		got, ok := tc.v.AsBool()
+		if got != tc.want || ok != tc.ok {
+			t.Fatalf("%s: want (%v, %v), got (%v, %v)", tc.name, tc.want, tc.ok, got, ok)
+		}
 	}
 }
 
