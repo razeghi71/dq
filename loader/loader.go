@@ -2,8 +2,10 @@ package loader
 
 import (
 	"bufio"
+	"compress/gzip"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -62,23 +64,28 @@ func Load(filename string, opts Options) (*table.Table, error) {
 }
 
 func loadFile(filename string, opts Options, csvColumns []string) (*table.Table, error) {
-	format := opts.Format
-	if format == "" {
-		format = strings.TrimPrefix(strings.ToLower(filepath.Ext(filename)), ".")
-	}
+	format, compression := resolveFormatCompression(filename, opts)
 	if err := validateOptionsForFormat(opts, format); err != nil {
 		return nil, err
 	}
 	switch format {
 	case "csv":
-		return loadCSV(filename, csvConfigFromOptions(opts, csvColumns))
+		cfg := csvConfigFromOptions(opts, csvColumns)
+		cfg.compression = compression
+		return loadCSV(filename, cfg)
 	case "json":
-		return loadJSON(filename)
+		return loadJSON(filename, compression)
 	case "jsonl":
-		return loadJSONL(filename)
+		return loadJSONL(filename, compression)
 	case "avro":
+		if compression != "" {
+			return nil, fmt.Errorf("compression=%s applies only to csv, json, and jsonl formats", compression)
+		}
 		return loadAvro(filename)
 	case "parquet":
+		if compression != "" {
+			return nil, fmt.Errorf("compression=%s applies only to csv, json, and jsonl formats", compression)
+		}
 		return loadParquet(filename)
 	default:
 		if format == "" {
@@ -93,10 +100,11 @@ func loadGlob(pattern string, opts Options) (*table.Table, error) {
 	if err != nil {
 		return nil, err
 	}
-	resolved, err := validateUniformFormat(matches, opts.Format)
+	resolved, compression, err := validateUniformLoad(matches, opts)
 	if err != nil {
 		return nil, err
 	}
+	opts.Compression = compression
 	if err := validateOptionsForFormat(opts, resolved); err != nil {
 		return nil, err
 	}
@@ -108,6 +116,7 @@ func loadGlob(pattern string, opts Options) (*table.Table, error) {
 	var parts []*table.Table
 	partOpts := opts
 	partOpts.Format = resolved
+	partOpts.Compression = compression
 	for _, path := range matches {
 		tbl, err := loadFile(path, partOpts, nil)
 		if err != nil {
@@ -176,8 +185,20 @@ func loadGlobCSVHeaderless(pattern string, matches []string, cfg csvLoadConfig) 
 
 // LoadReader reads a table from r. opts.Format must be csv, json, or jsonl.
 func LoadReader(r io.Reader, opts Options) (*table.Table, error) {
+	opts = normalizeOptions(opts)
 	if err := validateOptionsForFormat(opts, opts.Format); err != nil {
 		return nil, err
+	}
+	if opts.Compression != "" {
+		wrapped, err := wrapInputReader(r, opts.Compression)
+		if err != nil {
+			if opts.Compression == "gzip" {
+				return nil, fmt.Errorf("cannot read gzip stream: %w", err)
+			}
+			return nil, err
+		}
+		defer wrapped.Close()
+		r = wrapped
 	}
 	switch opts.Format {
 	case "csv":
@@ -197,13 +218,15 @@ type csvLoadConfig struct {
 	delim               rune
 	allowJaggedRows     bool
 	ignoreUnknownValues bool
+	compression         string
 }
 
 func csvConfigFromOptions(opts Options, columns []string) csvLoadConfig {
 	cfg := csvLoadConfig{
-		columns: columns,
-		header:  true,
-		delim:   ',',
+		columns:     columns,
+		header:      true,
+		delim:       ',',
+		compression: opts.Compression,
 	}
 	if opts.Header != nil {
 		cfg.header = *opts.Header
@@ -229,7 +252,16 @@ func synthesizeColumns(n int) []string {
 }
 
 func validateOptionsForFormat(opts Options, format string) error {
+	if opts.Compression != "" {
+		if !ast.IsSupportedCompression(opts.Compression) {
+			return fmt.Errorf("unsupported compression %q (supported: %s)", opts.Compression, ast.CompressionFormatsList())
+		}
+		if !ast.IsStreamLoadFormat(format) {
+			return fmt.Errorf("compression=%s applies only to csv, json, and jsonl formats", opts.Compression)
+		}
+	}
 	return ast.ValidateCSVOnlyOptionsForFormat(ast.LoadOptions{
+		Compression:         opts.Compression,
 		Header:              opts.Header,
 		Delim:               opts.Delim,
 		AllowJaggedRows:     opts.AllowJaggedRows,
@@ -237,19 +269,85 @@ func validateOptionsForFormat(opts Options, format string) error {
 	}, format, "")
 }
 
-func loadCSV(filename string, cfg csvLoadConfig) (*table.Table, error) {
+func resolveFormatCompression(filename string, opts Options) (format, compression string) {
+	format = opts.Format
+	if format == "" {
+		format = ast.EffectiveFormat(filename, "")
+	}
+	compression = opts.Compression
+	if compression == "" && strings.EqualFold(filepath.Ext(filename), ".gz") {
+		compression = "gzip"
+	}
+	return format, compression
+}
+
+type multiReadCloser struct {
+	first  io.ReadCloser
+	second io.Closer
+}
+
+func (m multiReadCloser) Read(p []byte) (int, error) {
+	return m.first.Read(p)
+}
+
+func (m multiReadCloser) Close() error {
+	err1 := m.first.Close()
+	err2 := m.second.Close()
+	return errors.Join(err1, err2)
+}
+
+func openInputReader(filename, compression string) (io.ReadCloser, error) {
 	f, err := os.Open(filename)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open %s: %w", filename, err)
+	}
+	wrapped, err := wrapInputReadCloser(f, compression)
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("%s %s: %w", compressionOpenAction(compression), filename, err)
+	}
+	return wrapped, nil
+}
+
+func wrapInputReader(r io.Reader, compression string) (io.ReadCloser, error) {
+	return wrapInputReadCloser(io.NopCloser(r), compression)
+}
+
+func wrapInputReadCloser(r io.ReadCloser, compression string) (io.ReadCloser, error) {
+	switch compression {
+	case "":
+		return r, nil
+	case "gzip":
+		gr, err := gzip.NewReader(r)
+		if err != nil {
+			return nil, err
+		}
+		return multiReadCloser{first: gr, second: r}, nil
+	default:
+		return nil, fmt.Errorf("unsupported compression %q (supported: %s)", compression, ast.CompressionFormatsList())
+	}
+}
+
+func compressionOpenAction(compression string) string {
+	if compression == "gzip" {
+		return "cannot read gzip stream"
+	}
+	return "cannot open compressed stream"
+}
+
+func loadCSV(filename string, cfg csvLoadConfig) (*table.Table, error) {
+	f, err := openInputReader(filename, cfg.compression)
+	if err != nil {
+		return nil, err
 	}
 	defer f.Close()
 	return loadCSVReader(f, cfg)
 }
 
 func loadCSVPositional(path string, columns []string, cfg csvLoadConfig) (*table.Table, error) {
-	f, err := os.Open(path)
+	f, err := openInputReader(path, cfg.compression)
 	if err != nil {
-		return nil, fmt.Errorf("cannot open %s: %w", path, err)
+		return nil, err
 	}
 	defer f.Close()
 
@@ -431,9 +529,9 @@ func classifyCSVGlobFirstRow(peek, anchor []string) csvGlobShardKind {
 }
 
 func loadCSVGlobShard(path string, anchor []string, cfg csvLoadConfig) (*table.Table, error) {
-	f, err := os.Open(path)
+	f, err := openInputReader(path, cfg.compression)
 	if err != nil {
-		return nil, fmt.Errorf("cannot open %s: %w", path, err)
+		return nil, err
 	}
 	defer f.Close()
 
@@ -636,10 +734,10 @@ func parseValue(s string) table.Value {
 	return table.StrVal(s)
 }
 
-func loadJSON(filename string) (*table.Table, error) {
-	f, err := os.Open(filename)
+func loadJSON(filename, compression string) (*table.Table, error) {
+	f, err := openInputReader(filename, compression)
 	if err != nil {
-		return nil, fmt.Errorf("cannot open %s: %w", filename, err)
+		return nil, err
 	}
 	defer f.Close()
 	return loadJSONReader(f)
@@ -659,10 +757,10 @@ func loadJSONReader(r io.Reader) (*table.Table, error) {
 	return buildTableFromRecords(records), nil
 }
 
-func loadJSONL(filename string) (*table.Table, error) {
-	f, err := os.Open(filename)
+func loadJSONL(filename, compression string) (*table.Table, error) {
+	f, err := openInputReader(filename, compression)
 	if err != nil {
-		return nil, fmt.Errorf("cannot open %s: %w", filename, err)
+		return nil, err
 	}
 	defer f.Close()
 	return loadJSONLReader(f)

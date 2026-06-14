@@ -1,6 +1,7 @@
 package loader
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,6 +75,48 @@ func TestLoadOptionsStdin(t *testing.T) {
 	}
 	if tbl.NumRows != 1 || tbl.Get(0, "name").Str != "Bob" {
 		t.Fatalf("got %s", tbl.String())
+	}
+}
+
+func TestLoadOptionsGzipStdin(t *testing.T) {
+	tbl, err := LoadInput("-", Options{Format: "csv", Compression: "gzip"}, bytes.NewReader(gzipTestBytes(t, "name\nBob\n")))
+	if err != nil {
+		t.Fatalf("load gzip stdin: %v", err)
+	}
+	if tbl.NumRows != 1 || tbl.Get(0, "name").Str != "Bob" {
+		t.Fatalf("got %s", tbl.String())
+	}
+}
+
+func TestLoadOptionsGzipJSONLStdin(t *testing.T) {
+	data := "{\"level\":\"INFO\"}\n{\"level\":\"ERROR\"}\n"
+	tbl, err := LoadInput("-", Options{Format: "jsonl", Compression: "gzip"}, bytes.NewReader(gzipTestBytes(t, data)))
+	if err != nil {
+		t.Fatalf("load gzip jsonl stdin: %v", err)
+	}
+	if tbl.NumRows != 2 || tbl.Get(1, "level").Str != "ERROR" {
+		t.Fatalf("got %s", tbl.String())
+	}
+}
+
+func TestLoadOptionsBadGzipStdin(t *testing.T) {
+	_, err := LoadInput("-", Options{Format: "csv", Compression: "gzip"}, strings.NewReader("name\nBob\n"))
+	if err == nil {
+		t.Fatal("expected gzip error")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "gzip") {
+		t.Fatalf("error should mention gzip, got %v", err)
+	}
+}
+
+func TestLoadOptionsGzipStdinRejectsUnsupportedFormat(t *testing.T) {
+	_, err := LoadInput("-", Options{Format: "parquet", Compression: "gzip"}, bytes.NewReader(gzipTestBytes(t, "x")))
+	if err == nil {
+		t.Fatal("expected error for compressed parquet stdin")
+	}
+	lower := strings.ToLower(err.Error())
+	if !strings.Contains(lower, "compression=gzip") || !strings.Contains(lower, "csv") || !strings.Contains(lower, "jsonl") {
+		t.Fatalf("expected compression format restriction, got %v", err)
 	}
 }
 

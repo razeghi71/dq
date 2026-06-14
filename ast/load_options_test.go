@@ -75,6 +75,61 @@ func TestValidateLoadOptionsForFilenameCSVExtension(t *testing.T) {
 	}
 }
 
+func TestEffectiveFormatGzipDoubleExtensions(t *testing.T) {
+	cases := []struct {
+		filename string
+		want     string
+	}{
+		{"data.csv.gz", "csv"},
+		{"data.json.gz", "json"},
+		{"data.jsonl.gz", "jsonl"},
+		{"DATA.CSV.GZ", "csv"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.filename, func(t *testing.T) {
+			if got := EffectiveFormat(tc.filename, ""); got != tc.want {
+				t.Fatalf("EffectiveFormat(%q): got %q, want %q", tc.filename, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateLoadOptionsForFilenameGzipCSVExtension(t *testing.T) {
+	cases := []struct {
+		name     string
+		filename string
+		opts     LoadOptions
+	}{
+		{
+			name:     "header_false",
+			filename: "data.csv.gz",
+			opts:     LoadOptions{Header: boolPtr(false)},
+		},
+		{
+			name:     "delim_only",
+			filename: "data.csv.gz",
+			opts:     LoadOptions{Delim: ";"},
+		},
+		{
+			name:     "row_shape_options",
+			filename: "data.csv.gz",
+			opts: LoadOptions{
+				AllowJaggedRows:     boolPtr(true),
+				IgnoreUnknownValues: boolPtr(true),
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidateLoadOptionsForFilename(tc.filename, tc.opts); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateCSVOnlyOptionsForFormat(t *testing.T) {
 	if err := ValidateCSVOnlyOptionsForFormat(LoadOptions{Header: boolPtr(false)}, "dat", ""); err == nil {
 		t.Fatal("expected error for csv option on unknown format")

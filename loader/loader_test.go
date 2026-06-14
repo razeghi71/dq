@@ -101,6 +101,175 @@ func TestLoadCSV(t *testing.T) {
 	checkUsersTable(t, tbl)
 }
 
+func TestLoadGzipCSVByDoubleExtension(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "users.csv.gz")
+	if err := os.WriteFile(path, gzipTestBytes(t, "name,age,city\nAlice,30,NY\nBob,25,LA\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tbl, err := Load(path, Options{})
+	if err != nil {
+		t.Fatalf("load gzip csv: %v", err)
+	}
+	if tbl.NumRows != 2 || tbl.Get(0, "name").Str != "Alice" || tbl.Get(1, "age").Int != 25 {
+		t.Fatalf("unexpected table: %s", tbl.String())
+	}
+}
+
+func TestLoadGzipJSONByDoubleExtension(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "users.json.gz")
+	if err := os.WriteFile(path, gzipTestBytes(t, `[{"name":"Alice","age":30},{"name":"Bob","age":25}]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tbl, err := Load(path, Options{})
+	if err != nil {
+		t.Fatalf("load gzip json: %v", err)
+	}
+	if tbl.NumRows != 2 || tbl.Get(1, "name").Str != "Bob" {
+		t.Fatalf("unexpected table: %s", tbl.String())
+	}
+}
+
+func TestLoadGzipJSONLByDoubleExtension(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl.gz")
+	data := "{\"level\":\"INFO\",\"msg\":\"start\"}\n{\"level\":\"ERROR\",\"msg\":\"timeout\"}\n"
+	if err := os.WriteFile(path, gzipTestBytes(t, data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tbl, err := Load(path, Options{})
+	if err != nil {
+		t.Fatalf("load gzip jsonl: %v", err)
+	}
+	if tbl.NumRows != 2 || tbl.Get(1, "level").Str != "ERROR" {
+		t.Fatalf("unexpected table: %s", tbl.String())
+	}
+}
+
+func TestLoadGzipUnsupportedFormatsRejected(t *testing.T) {
+	for _, name := range []string{"data.avro.gz", "data.parquet.gz"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), name)
+			if err := os.WriteFile(path, gzipTestBytes(t, "x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := Load(path, Options{})
+			if err == nil {
+				t.Fatal("expected compression format restriction")
+			}
+			lower := strings.ToLower(err.Error())
+			if !strings.Contains(lower, "compression=gzip") || !strings.Contains(lower, "csv") || !strings.Contains(lower, "jsonl") {
+				t.Fatalf("expected compression format restriction, got %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadGzipCSVOptionsStillApply(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rows.csv.gz")
+	if err := os.WriteFile(path, gzipTestBytes(t, "1;Alice\n2;Bob;extra\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tbl, err := Load(path, Options{
+		Header:              BoolPtr(false),
+		Delim:               ";",
+		IgnoreUnknownValues: BoolPtr(true),
+	})
+	if err != nil {
+		t.Fatalf("load gzip csv with options: %v", err)
+	}
+	if tbl.NumRows != 2 || tbl.Get(0, "col1").Int != 1 || tbl.Get(1, "col2").Str != "Bob" {
+		t.Fatalf("unexpected table: %s", tbl.String())
+	}
+	if tbl.ColIndex("col3") >= 0 {
+		t.Fatalf("extra field should be dropped, got columns %v", tbl.Columns)
+	}
+}
+
+func TestLoadGzipCSVEmptyAndBOMOnly(t *testing.T) {
+	t.Run("empty", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "empty.csv.gz")
+		if err := os.WriteFile(path, gzipTestBytes(t, ""), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tbl, err := Load(path, Options{})
+		if err != nil {
+			t.Fatalf("load empty gzip csv: %v", err)
+		}
+		if tbl.NumRows != 0 || len(tbl.Columns) != 0 {
+			t.Fatalf("expected empty table, got %s", tbl.String())
+		}
+	})
+
+	t.Run("bom_only", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "bom.csv.gz")
+		if err := os.WriteFile(path, gzipTestBytes(t, "\ufeff"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tbl, err := Load(path, Options{})
+		if err != nil {
+			t.Fatalf("load BOM-only gzip csv: %v", err)
+		}
+		if tbl.NumRows != 0 || len(tbl.Columns) != 0 {
+			t.Fatalf("expected empty table, got %s", tbl.String())
+		}
+	})
+}
+
+func TestLoadGzipCSVBadStreamsReturnGzipError(t *testing.T) {
+	t.Run("plain_text_named_gz", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "bad.csv.gz")
+		if err := os.WriteFile(path, []byte("name\nAlice\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Load(path, Options{})
+		if err == nil {
+			t.Fatal("expected gzip error")
+		}
+		if !strings.Contains(strings.ToLower(err.Error()), "gzip") {
+			t.Fatalf("error should mention gzip, got %v", err)
+		}
+	})
+
+	t.Run("truncated_gzip", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "truncated.csv.gz")
+		data := gzipTestBytes(t, "name\nAlice\n")
+		if err := os.WriteFile(path, data[:len(data)-4], 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Load(path, Options{})
+		if err == nil {
+			t.Fatal("expected gzip error")
+		}
+		lower := strings.ToLower(err.Error())
+		if !strings.Contains(lower, "gzip") && !strings.Contains(lower, "unexpected eof") && !strings.Contains(lower, "checksum") {
+			t.Fatalf("error should mention gzip/truncation, got %v", err)
+		}
+	})
+}
+
+func TestLoadGzipJSONBadStreamsReturnGzipError(t *testing.T) {
+	for _, name := range []string{"bad.json.gz", "bad.jsonl.gz"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), name)
+			if err := os.WriteFile(path, []byte(`{"name":"Alice"}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := Load(path, Options{})
+			if err == nil {
+				t.Fatal("expected gzip error")
+			}
+			if !strings.Contains(strings.ToLower(err.Error()), "gzip") {
+				t.Fatalf("error should mention gzip, got %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadEmptyCSVReader(t *testing.T) {
 	tbl, err := LoadReader(strings.NewReader(""), Options{Format: "csv"})
 	if err != nil {
@@ -111,6 +280,19 @@ func TestLoadEmptyCSVReader(t *testing.T) {
 	}
 	if len(tbl.Columns) != 0 {
 		t.Fatalf("expected 0 columns, got %v", tbl.Columns)
+	}
+}
+
+func TestLoadReaderGzipCompression(t *testing.T) {
+	tbl, err := LoadReader(bytes.NewReader(gzipTestBytes(t, "name\nAlice\n")), Options{
+		Format:      "csv",
+		Compression: "gzip",
+	})
+	if err != nil {
+		t.Fatalf("load compressed reader: %v", err)
+	}
+	if tbl.NumRows != 1 || tbl.Get(0, "name").Str != "Alice" {
+		t.Fatalf("got %s", tbl.String())
 	}
 }
 

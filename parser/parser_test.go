@@ -1373,6 +1373,22 @@ func TestParseSourceWithLoadOptions(t *testing.T) {
 		}
 	})
 
+	t.Run("stdin_with_gzip_compression", func(t *testing.T) {
+		q, err := Parse("- with format=csv, compression=gzip | count")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if q.Source.Filename != "-" {
+			t.Errorf("filename: got %q", q.Source.Filename)
+		}
+		if q.Source.Load.Format != "csv" {
+			t.Errorf("format: got %q", q.Source.Load.Format)
+		}
+		if q.Source.Load.Compression != "gzip" {
+			t.Errorf("compression: got %q", q.Source.Load.Compression)
+		}
+	})
+
 	t.Run("explicit_header_true", func(t *testing.T) {
 		q, err := Parse("data.csv with header=true | head")
 		if err != nil {
@@ -1406,6 +1422,35 @@ func TestParseSourceWithLoadOptions(t *testing.T) {
 		}
 		if q.Source.Load.IgnoreUnknownValues == nil || *q.Source.Load.IgnoreUnknownValues != true {
 			t.Errorf("ignore_unknown_values: got %v", q.Source.Load.IgnoreUnknownValues)
+		}
+	})
+
+	t.Run("gzip_compression_option", func(t *testing.T) {
+		q, err := Parse(`events.gz with format=jsonl, compression=gzip | count`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if q.Source.Filename != "events.gz" {
+			t.Errorf("filename: got %q", q.Source.Filename)
+		}
+		if q.Source.Load.Format != "jsonl" {
+			t.Errorf("format: got %q", q.Source.Load.Format)
+		}
+		if q.Source.Load.Compression != "gzip" {
+			t.Errorf("compression: got %q", q.Source.Load.Compression)
+		}
+	})
+
+	t.Run("gzip_double_extension_csv_options", func(t *testing.T) {
+		q, err := Parse(`data.csv.gz with header=false, delim=";" | count`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if q.Source.Load.Header == nil || *q.Source.Load.Header != false {
+			t.Errorf("header: want false, got %v", q.Source.Load.Header)
+		}
+		if q.Source.Load.Delim != ";" {
+			t.Errorf("delim: got %q", q.Source.Load.Delim)
 		}
 	})
 }
@@ -1463,6 +1508,34 @@ func TestParseJoinWithLoadOptions(t *testing.T) {
 			t.Errorf("format: got %q", j.Load.Format)
 		}
 	})
+
+	t.Run("gzip_compression_option", func(t *testing.T) {
+		q, err := Parse(`users.csv | join orders.gz with format=csv, compression=gzip on user_id`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		j := q.Ops[0].(*ast.JoinOp)
+		if j.Filename != "orders.gz" {
+			t.Errorf("filename: got %q", j.Filename)
+		}
+		if j.Load.Format != "csv" {
+			t.Errorf("format: got %q", j.Load.Format)
+		}
+		if j.Load.Compression != "gzip" {
+			t.Errorf("compression: got %q", j.Load.Compression)
+		}
+	})
+
+	t.Run("gzip_double_extension_csv_options", func(t *testing.T) {
+		q, err := Parse(`users.csv | join orders.csv.gz with header=false on user_id == col1`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		j := q.Ops[0].(*ast.JoinOp)
+		if j.Load.Header == nil || *j.Load.Header != false {
+			t.Errorf("header: want false, got %v", j.Load.Header)
+		}
+	})
 }
 
 func TestParseWithLoadOptionsRejected(t *testing.T) {
@@ -1473,7 +1546,9 @@ func TestParseWithLoadOptionsRejected(t *testing.T) {
 	}{
 		{"unknown_key", "data.csv with foo=bar | head", "unknown"},
 		{"duplicate_format", "data.csv with format=csv, format=json | head", "duplicate"},
+		{"duplicate_compression", "data.csv.gz with compression=gzip, compression=gzip | head", "duplicate"},
 		{"unsupported_format", "data.csv with format=csvv | head", "unsupported"},
+		{"unsupported_compression", "data.csv with compression=brotli | head", "unsupported"},
 		{"with_after_on", "users.csv | join orders.csv on id with format=csv", "with"},
 		{"csv_header_on_json", "data.json with format=json, header=false | head", "header"},
 		{"csv_delim_on_json", "data.json with format=json, delim=\";\" | head", "delim"},
@@ -1485,6 +1560,8 @@ func TestParseWithLoadOptionsRejected(t *testing.T) {
 		{"unknown_ext_header", "data.dat with header=false | head", "with format"},
 		{"unknown_ext_delim", "data.dat with delim=\";\" | head", "with format"},
 		{"glob_csv_opts_without_format", "part-*.dat with header=false | head", "with format"},
+		{"gzip_on_avro", "data.avro with compression=gzip | head", "compression"},
+		{"gzip_on_parquet", "data.parquet with compression=gzip | head", "compression"},
 	}
 
 	for _, tc := range cases {

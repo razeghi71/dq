@@ -153,6 +153,7 @@ func (p *Parser) parseSource() (*ast.SourceOp, error) {
 
 var loadOptionKeys = map[string]bool{
 	"format":                true,
+	"compression":           true,
 	"header":                true,
 	"delim":                 true,
 	"allow_jagged_rows":     true,
@@ -197,6 +198,11 @@ func (p *Parser) parseWithClause() (ast.LoadOptions, error) {
 				return ast.LoadOptions{}, fmt.Errorf("with: format value must be an identifier, got %s", valTok.Type)
 			}
 			opts.Format = strings.ToLower(valTok.Val)
+		case "compression":
+			if valTok.Type != lexer.TokenIdent {
+				return ast.LoadOptions{}, fmt.Errorf("with: compression value must be an identifier, got %s", valTok.Type)
+			}
+			opts.Compression = strings.ToLower(valTok.Val)
 		case "header", "allow_jagged_rows", "ignore_unknown_values":
 			switch valTok.Type {
 			case lexer.TokenTrue:

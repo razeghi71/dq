@@ -2,7 +2,6 @@ package loader
 
 import (
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -28,31 +27,58 @@ func expandGlob(pattern string) ([]string, error) {
 	return matches, nil
 }
 
-func validateUniformFormat(paths []string, format string) (string, error) {
-	if format != "" {
-		return format, nil
-	}
+func validateUniformLoad(paths []string, opts Options) (string, string, error) {
 	if len(paths) == 0 {
-		return "", fmt.Errorf("glob: no files to load")
+		return "", "", fmt.Errorf("glob: no files to load")
 	}
 
-	resolved := make([]string, len(paths))
-	seen := make(map[string]bool)
-	for i, path := range paths {
-		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
-		if ext == "" {
-			return "", fmt.Errorf("cannot determine file format for %q: use with format=... in query (%s)", path, ast.LoadFormatsList())
+	format := opts.Format
+	compression := opts.Compression
+
+	if format == "" {
+		seen := make(map[string]bool)
+		for _, path := range paths {
+			ext := ast.EffectiveFormat(path, "")
+			if ext == "" {
+				return "", "", fmt.Errorf("cannot determine file format for %q: use with format=... in query (%s)", path, ast.LoadFormatsList())
+			}
+			seen[ext] = true
 		}
-		resolved[i] = ext
-		seen[ext] = true
-	}
-	if len(seen) > 1 {
-		exts := make([]string, 0, len(seen))
+		if len(seen) > 1 {
+			exts := make([]string, 0, len(seen))
+			for ext := range seen {
+				exts = append(exts, ext)
+			}
+			sort.Strings(exts)
+			return "", "", fmt.Errorf("glob matched mixed formats (%s); use with format=... in query", strings.Join(exts, ", "))
+		}
 		for ext := range seen {
-			exts = append(exts, ext)
+			format = ext
 		}
-		sort.Strings(exts)
-		return "", fmt.Errorf("glob matched mixed formats (%s); use with format=... in query", strings.Join(exts, ", "))
 	}
-	return resolved[0], nil
+
+	if compression == "" {
+		seen := make(map[string]bool)
+		for _, path := range paths {
+			_, inferred := resolveFormatCompression(path, Options{})
+			seen[inferred] = true
+		}
+		if len(seen) > 1 {
+			names := make([]string, 0, len(seen))
+			for c := range seen {
+				if c == "" {
+					names = append(names, "none")
+				} else {
+					names = append(names, c)
+				}
+			}
+			sort.Strings(names)
+			return "", "", fmt.Errorf("glob matched mixed compression (%s); use with compression=... in query", strings.Join(names, ", "))
+		}
+		for c := range seen {
+			compression = c
+		}
+	}
+
+	return format, compression, nil
 }

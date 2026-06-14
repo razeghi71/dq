@@ -10,16 +10,23 @@ var dataFormatNames = []string{"csv", "json", "jsonl", "avro", "parquet"}
 // streamDataFormatNames are data formats readable from io.Reader (stdin).
 var streamDataFormatNames = []string{"csv", "json", "jsonl"}
 
+// compressionFormatNames are file-level compression wrappers.
+var compressionFormatNames = []string{"gzip"}
+
 var (
 	supportedLoadFormats   map[string]bool
+	supportedStreamFormats map[string]bool
 	loadFormatsList        string
 	supportedOutputFormats map[string]bool
 	outputFormatsList      string
 	streamFormatsList      string
+	supportedCompressions  map[string]bool
+	compressionsList       string
 )
 
 func init() {
 	supportedLoadFormats = makeFormatSet(dataFormatNames)
+	supportedStreamFormats = makeFormatSet(streamDataFormatNames)
 	loadFormatsList = joinFormatNames(dataFormatNames)
 
 	outputNames := append([]string{outputFormatTable}, dataFormatNames...)
@@ -27,6 +34,9 @@ func init() {
 	outputFormatsList = joinFormatNames(outputNames)
 
 	streamFormatsList = joinFormatNames(streamDataFormatNames)
+
+	supportedCompressions = makeFormatSet(compressionFormatNames)
+	compressionsList = joinFormatNames(compressionFormatNames)
 }
 
 // DataFormatNames returns a copy of the canonical data format names.
@@ -53,6 +63,21 @@ func OutputFormatsList() string {
 // StreamFormatsList returns the user-facing comma-separated list of stdin/stream load formats.
 func StreamFormatsList() string {
 	return streamFormatsList
+}
+
+// CompressionFormatsList returns the user-facing comma-separated list of load compression names.
+func CompressionFormatsList() string {
+	return compressionsList
+}
+
+// IsSupportedCompression reports whether name is a recognized load compression wrapper.
+func IsSupportedCompression(compression string) bool {
+	return isSupportedFormat(supportedCompressions, compression)
+}
+
+// IsStreamLoadFormat reports whether format can be loaded through an io.Reader.
+func IsStreamLoadFormat(format string) bool {
+	return isSupportedFormat(supportedStreamFormats, format)
 }
 
 func makeFormatSet(names []string) map[string]bool {

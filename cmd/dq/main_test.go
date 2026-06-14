@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -11,6 +12,19 @@ import (
 
 	dq "github.com/razeghi71/dq"
 )
+
+func gzipCLIBytes(t *testing.T, content string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write([]byte(content)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
 
 func buildCLI(t *testing.T) string {
 	t.Helper()
@@ -67,6 +81,107 @@ func TestCLIFileWithHeaderFalse(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "2") {
 		t.Fatalf("expected count 2, got:\n%s", out)
+	}
+}
+
+func TestCLIGzipCSVDoubleExtension(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rows.csv.gz")
+	if err := os.WriteFile(path, gzipCLIBytes(t, "name,level\nAlice,INFO\nBob,ERROR\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, path+` | filter { level == "ERROR" } | select name | csv`)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "name\nBob" {
+		t.Fatalf("expected Bob only, got:\n%s", got)
+	}
+}
+
+func TestCLIGzipJSONLExplicitCompression(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.data")
+	data := "{\"level\":\"INFO\",\"msg\":\"start\"}\n{\"level\":\"ERROR\",\"msg\":\"timeout\"}\n"
+	if err := os.WriteFile(path, gzipCLIBytes(t, data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, path+` with format=jsonl, compression=gzip | filter { level == "ERROR" } | select msg | jsonl`)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); !strings.Contains(got, `"msg":"timeout"`) {
+		t.Fatalf("expected timeout JSONL row, got:\n%s", got)
+	}
+}
+
+func TestCLIGzipCSVStdinExplicitCompression(t *testing.T) {
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, `- with format=csv, compression=gzip | filter { level == "ERROR" } | select name | csv`)
+	cmd.Stdin = bytes.NewReader(gzipCLIBytes(t, "name,level\nAlice,INFO\nBob,ERROR\n"))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "name\nBob" {
+		t.Fatalf("expected Bob only, got:\n%s", got)
+	}
+}
+
+func TestCLIBadGzipStdinReportsGzipError(t *testing.T) {
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, `- with format=csv, compression=gzip | count`)
+	cmd.Stdin = strings.NewReader("name\nAlice\n")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected cli failure, got output:\n%s", out)
+	}
+	if !strings.Contains(strings.ToLower(string(out)), "gzip") {
+		t.Fatalf("expected gzip error, got:\n%s", out)
+	}
+}
+
+func TestCLIGzipCSVGlobWithFormat(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "part-001.csv.gz"), gzipCLIBytes(t, "id,name\n1,Alice\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "part-002.csv.gz"), gzipCLIBytes(t, "id,name\n2,Bob\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, filepath.Join(dir, "part-*.csv.gz")+` with format=csv | count | json`)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), `"count": 2`) {
+		t.Fatalf("expected count 2, got:\n%s", out)
+	}
+}
+
+func TestCLIBadGzipInputReportsGzipError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad.csv.gz")
+	if err := os.WriteFile(path, []byte("name\nAlice\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, path+` | count`)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected cli failure, got output:\n%s", out)
+	}
+	if !strings.Contains(strings.ToLower(string(out)), "gzip") {
+		t.Fatalf("expected gzip error, got:\n%s", out)
 	}
 }
 

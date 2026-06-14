@@ -10,6 +10,7 @@ import (
 // Zero value keeps extension-based inference and CSV defaults.
 type Options struct {
 	Format              string
+	Compression         string
 	Header              *bool
 	Delim               string
 	AllowJaggedRows     *bool
@@ -20,6 +21,9 @@ func normalizeOptions(o Options) Options {
 	if o.Format != "" {
 		o.Format = strings.ToLower(o.Format)
 	}
+	if o.Compression != "" {
+		o.Compression = strings.ToLower(o.Compression)
+	}
 	return o
 }
 
@@ -27,6 +31,7 @@ func normalizeOptions(o Options) Options {
 func FromAST(o ast.LoadOptions) Options {
 	return normalizeOptions(Options{
 		Format:              o.Format,
+		Compression:         o.Compression,
 		Header:              o.Header,
 		Delim:               o.Delim,
 		AllowJaggedRows:     o.AllowJaggedRows,

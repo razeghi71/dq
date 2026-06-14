@@ -25,8 +25,8 @@ func writeGlobTestFiles(t *testing.T, dir string, files map[string]string) {
 func TestExpandGlobMatches(t *testing.T) {
 	dir := t.TempDir()
 	writeGlobTestFiles(t, dir, map[string]string{
-		"logs/a.csv":      "id\n1\n",
-		"logs/b.csv":      "id\n2\n",
+		"logs/a.csv":        "id\n1\n",
+		"logs/b.csv":        "id\n2\n",
 		"logs/nested/c.csv": "id\n3\n",
 	})
 
@@ -68,6 +68,93 @@ func TestLoadGlobCSV(t *testing.T) {
 	}
 	if tbl.NumRows != 2 {
 		t.Fatalf("expected 2 rows, got %d", tbl.NumRows)
+	}
+}
+
+func TestLoadGlobGzipCSVWithFormat(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "part-001.csv.gz"), gzipTestBytes(t, "id,name\n1,Alice\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "part-002.csv.gz"), gzipTestBytes(t, "id,name\n2,Bob\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tbl, err := Load(filepath.Join(dir, "part-*.csv.gz"), Options{Format: "csv"})
+	if err != nil {
+		t.Fatalf("load gzip csv glob: %v", err)
+	}
+	if tbl.NumRows != 2 {
+		t.Fatalf("expected 2 rows, got %d: %s", tbl.NumRows, tbl.String())
+	}
+	if tbl.Get(0, "name").Str != "Alice" || tbl.Get(1, "name").Str != "Bob" {
+		t.Fatalf("unexpected table: %s", tbl.String())
+	}
+}
+
+func TestLoadGlobGzipCSVAnchorsSchemaAcrossShards(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "part-001.csv.gz"), gzipTestBytes(t, "id,name\n1,Alice\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "part-002.csv.gz"), gzipTestBytes(t, "id,name,email\n2,Bob,bob@example.com\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tbl, err := Load(filepath.Join(dir, "part-*.csv.gz"), Options{Format: "csv"})
+	if err != nil {
+		t.Fatalf("load gzip csv glob: %v", err)
+	}
+	if tbl.ColIndex("email") < 0 {
+		t.Fatalf("expected extended email column, got %v", tbl.Columns)
+	}
+	if tbl.NumRows != 2 || tbl.Get(1, "email").Str != "bob@example.com" {
+		t.Fatalf("unexpected table: %s", tbl.String())
+	}
+}
+
+func TestLoadGlobGzipCSVOptionsStillApply(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "part-001.csv.gz"), gzipTestBytes(t, "1;Alice\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "part-002.csv.gz"), gzipTestBytes(t, "2;Bob;extra\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tbl, err := Load(filepath.Join(dir, "part-*.csv.gz"), Options{
+		Format:              "csv",
+		Header:              BoolPtr(false),
+		Delim:               ";",
+		IgnoreUnknownValues: BoolPtr(true),
+	})
+	if err != nil {
+		t.Fatalf("load gzip csv glob with options: %v", err)
+	}
+	if tbl.NumRows != 2 || tbl.Get(1, "col2").Str != "Bob" {
+		t.Fatalf("unexpected table: %s", tbl.String())
+	}
+	if tbl.ColIndex("col3") >= 0 {
+		t.Fatalf("extra field should be dropped, got columns %v", tbl.Columns)
+	}
+}
+
+func TestLoadGlobMixedCompressedAndUncompressedCSVRequiresClearError(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "part-001.csv"), []byte("id\n1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "part-002.csv.gz"), gzipTestBytes(t, "id\n2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(filepath.Join(dir, "part-*"), Options{})
+	if err == nil {
+		t.Fatal("expected mixed compression/format error")
+	}
+	lower := strings.ToLower(err.Error())
+	if !strings.Contains(lower, "mixed") || (!strings.Contains(lower, "compression") && !strings.Contains(lower, "format")) {
+		t.Fatalf("expected mixed compression/format error, got %v", err)
 	}
 }
 
@@ -561,6 +648,45 @@ func TestLoadGlobJSON(t *testing.T) {
 	}
 }
 
+func TestLoadGlobGzipJSON(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.json.gz"), gzipTestBytes(t, `[{"id":1,"name":"Alice"}]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.json.gz"), gzipTestBytes(t, `[{"id":2,"email":"bob@x.com"}]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tbl, err := Load(filepath.Join(dir, "*.json.gz"), Options{})
+	if err != nil {
+		t.Fatalf("load gzip json glob: %v", err)
+	}
+	if tbl.NumRows != 2 || tbl.ColIndex("email") < 0 {
+		t.Fatalf("unexpected table: %s", tbl.String())
+	}
+	if tbl.Get(1, "email").Str != "bob@x.com" {
+		t.Fatalf("row 1 email: got %v", tbl.Get(1, "email"))
+	}
+}
+
+func TestLoadGlobGzipJSONL(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.jsonl.gz"), gzipTestBytes(t, "{\"id\":1,\"level\":\"INFO\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.jsonl.gz"), gzipTestBytes(t, "{\"id\":2,\"level\":\"ERROR\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tbl, err := Load(filepath.Join(dir, "*.jsonl.gz"), Options{})
+	if err != nil {
+		t.Fatalf("load gzip jsonl glob: %v", err)
+	}
+	if tbl.NumRows != 2 || tbl.Get(1, "level").Str != "ERROR" {
+		t.Fatalf("unexpected table: %s", tbl.String())
+	}
+}
+
 func TestLoadGlobFormatOverride(t *testing.T) {
 	dir := t.TempDir()
 	writeGlobTestFiles(t, dir, map[string]string{
@@ -580,7 +706,7 @@ func TestLoadGlobFormatOverride(t *testing.T) {
 func TestLoadGlobMixedFormatsError(t *testing.T) {
 	dir := t.TempDir()
 	writeGlobTestFiles(t, dir, map[string]string{
-		"a.csv": "id\n1\n",
+		"a.csv":  "id\n1\n",
 		"b.json": "[{\"id\":2}]\n",
 	})
 

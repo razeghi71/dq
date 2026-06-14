@@ -15,7 +15,7 @@ func EffectiveFormat(filename, explicitFormat string) string {
 	if filename == "-" || strings.ContainsAny(filename, "*?{") {
 		return ""
 	}
-	return strings.TrimPrefix(strings.ToLower(filepath.Ext(filename)), ".")
+	return inferFormatFromFilename(filename)
 }
 
 // IsSupportedLoadFormat reports whether name is a recognized load format.
@@ -28,6 +28,14 @@ func ValidateLoadOptions(opts LoadOptions) error {
 	if opts.Format != "" {
 		if !IsSupportedLoadFormat(opts.Format) {
 			return fmt.Errorf("with: unsupported format %q (supported: %s)", opts.Format, LoadFormatsList())
+		}
+	}
+	if opts.Compression != "" {
+		if !IsSupportedCompression(opts.Compression) {
+			return fmt.Errorf("with: unsupported compression %q (supported: %s)", opts.Compression, CompressionFormatsList())
+		}
+		if opts.Format != "" && !IsStreamLoadFormat(opts.Format) {
+			return fmt.Errorf("with: compression=%s applies only to csv, json, and jsonl formats", opts.Compression)
 		}
 	}
 	if opts.Format != "" && opts.Format != "csv" {
@@ -45,6 +53,14 @@ func ValidateLoadOptionsForFilename(filename string, opts LoadOptions) error {
 		return nil
 	}
 	format := EffectiveFormat(filename, "")
+	if opts.Compression != "" {
+		if format == "" || !IsSupportedLoadFormat(format) {
+			return fmt.Errorf("with: cannot determine file format: use with format=... in query (%s)", LoadFormatsList())
+		}
+		if !IsStreamLoadFormat(format) {
+			return fmt.Errorf("with: compression=%s applies only to csv, json, and jsonl formats", opts.Compression)
+		}
+	}
 	return validateCSVOnlyOptions(opts, format, "with: ")
 }
 
@@ -73,4 +89,17 @@ func validateCSVOnlyOptions(opts LoadOptions, format, prefix string) error {
 		return fmt.Errorf("%sallow_jagged_rows applies only to csv format", prefix)
 	}
 	return fmt.Errorf("%signore_unknown_values applies only to csv format", prefix)
+}
+
+func inferFormatFromFilename(filename string) string {
+	lower := strings.ToLower(filename)
+	ext := strings.TrimPrefix(filepath.Ext(lower), ".")
+	if ext == "gz" {
+		base := strings.TrimSuffix(lower, filepath.Ext(lower))
+		inner := strings.TrimPrefix(filepath.Ext(base), ".")
+		if inner != "" {
+			return inner
+		}
+	}
+	return ext
 }

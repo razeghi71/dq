@@ -290,6 +290,13 @@ Output format commands (`table`, `csv`, `json`, `jsonl`, `avro`, `parquet`) must
 
 CSV (`.csv`), JSON (`.json`), JSONL (`.jsonl`), Avro (`.avro`), Parquet (`.parquet`)
 
+Gzip-compressed CSV/JSON/JSONL inputs work by suffix, or with an explicit load option:
+
+```bash
+dq 'data.csv.gz | head 5'
+dq 'data.dat with format=csv, compression=gzip | count'
+```
+
 If the extension isn't clear, add `with format=...` after the source — or after a join file:
 
 ```bash
