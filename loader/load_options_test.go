@@ -99,6 +99,49 @@ func TestLoadOptionsGzipJSONLStdin(t *testing.T) {
 	}
 }
 
+func TestLoadOptionsZstdStdin(t *testing.T) {
+	tbl, err := LoadInput("-", Options{Format: "csv", Compression: "zstd"}, bytes.NewReader(zstdTestBytes(t, "name\nBob\n")))
+	if err != nil {
+		t.Fatalf("load zstd stdin: %v", err)
+	}
+	if tbl.NumRows != 1 || tbl.Get(0, "name").Str != "Bob" {
+		t.Fatalf("got %s", tbl.String())
+	}
+}
+
+func TestLoadOptionsZstdJSONLStdin(t *testing.T) {
+	data := "{\"level\":\"INFO\"}\n{\"level\":\"ERROR\"}\n"
+	tbl, err := LoadInput("-", Options{Format: "jsonl", Compression: "zstd"}, bytes.NewReader(zstdTestBytes(t, data)))
+	if err != nil {
+		t.Fatalf("load zstd jsonl stdin: %v", err)
+	}
+	if tbl.NumRows != 2 || tbl.Get(1, "level").Str != "ERROR" {
+		t.Fatalf("got %s", tbl.String())
+	}
+}
+
+func TestLoadOptionsBadZstdStdin(t *testing.T) {
+	_, err := LoadInput("-", Options{Format: "csv", Compression: "zstd"}, strings.NewReader("name\nBob\n"))
+	if err == nil {
+		t.Fatal("expected zstd error")
+	}
+	lower := strings.ToLower(err.Error())
+	if !strings.Contains(lower, "zstd") && !strings.Contains(lower, "zstandard") {
+		t.Fatalf("error should mention zstd, got %v", err)
+	}
+}
+
+func TestLoadOptionsZstdStdinRejectsUnsupportedFormat(t *testing.T) {
+	_, err := LoadInput("-", Options{Format: "parquet", Compression: "zstd"}, bytes.NewReader(zstdTestBytes(t, "x")))
+	if err == nil {
+		t.Fatal("expected error for compressed parquet stdin")
+	}
+	lower := strings.ToLower(err.Error())
+	if !strings.Contains(lower, "compression=zstd") || !strings.Contains(lower, "csv") || !strings.Contains(lower, "jsonl") {
+		t.Fatalf("expected compression format restriction, got %v", err)
+	}
+}
+
 func TestLoadOptionsBadGzipStdin(t *testing.T) {
 	_, err := LoadInput("-", Options{Format: "csv", Compression: "gzip"}, strings.NewReader("name\nBob\n"))
 	if err == nil {

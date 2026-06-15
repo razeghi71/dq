@@ -357,14 +357,16 @@ Output format commands (`table`, `csv`, `json`, `jsonl`, `avro`, `parquet`) must
 
 CSV (`.csv`), JSON (`.json`), JSONL (`.jsonl`), Avro (`.avro`), Parquet (`.parquet`)
 
-Gzip-compressed CSV/JSON/JSONL inputs work by suffix, or with an explicit load option:
+Gzip- and Zstandard-compressed CSV/JSON/JSONL inputs work by suffix, or with an explicit load option:
 
 ```bash
 dq 'data.csv.gz | head 5'
 dq 'data.dat with format=csv, compression=gzip | count'
+dq 'events.jsonl.zst | filter { level == "ERROR" }'
+dq 'events.data with format=jsonl, compression=zstd | count'
 ```
 
-Avro and Parquet internal compression codecs are read from the file metadata; do not pass `compression=snappy`, `compression=zstd`, etc. The `compression=` load option is only for file-level gzip wrappers on CSV/JSON/JSONL, not `.avro.gz` or `.parquet.gz`.
+Avro and Parquet internal compression codecs are read from the file metadata. The `compression=` load option is only for file-level gzip/zstd wrappers on CSV/JSON/JSONL, not `.avro.gz`, `.avro.zst`, `.parquet.gz`, or `.parquet.zst`.
 
 If the extension isn't clear, add `with format=...` after the source — or after a join file:
 

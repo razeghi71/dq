@@ -84,12 +84,121 @@ func TestEffectiveFormatGzipDoubleExtensions(t *testing.T) {
 		{"data.json.gz", "json"},
 		{"data.jsonl.gz", "jsonl"},
 		{"DATA.CSV.GZ", "csv"},
+		{"data.csv.zst", "csv"},
+		{"data.json.zst", "json"},
+		{"data.jsonl.zst", "jsonl"},
+		{"data.csv.zstd", "csv"},
+		{"data.json.zstd", "json"},
+		{"data.jsonl.zstd", "jsonl"},
+		{"DATA.CSV.ZST", "csv"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.filename, func(t *testing.T) {
 			if got := EffectiveFormat(tc.filename, ""); got != tc.want {
 				t.Fatalf("EffectiveFormat(%q): got %q, want %q", tc.filename, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEffectiveCompression(t *testing.T) {
+	cases := []struct {
+		name     string
+		filename string
+		explicit string
+		want     string
+	}{
+		{
+			name:     "gzip_suffix",
+			filename: "data.csv.gz",
+			want:     "gzip",
+		},
+		{
+			name:     "zst_suffix",
+			filename: "data.jsonl.zst",
+			want:     "zstd",
+		},
+		{
+			name:     "zstd_suffix",
+			filename: "data.json.zstd",
+			want:     "zstd",
+		},
+		{
+			name:     "case_insensitive_suffix",
+			filename: "DATA.CSV.ZST",
+			want:     "zstd",
+		},
+		{
+			name:     "explicit_override",
+			filename: "data.csv.gz",
+			explicit: "zstd",
+			want:     "zstd",
+		},
+		{
+			name:     "extensionless",
+			filename: "data",
+			want:     "",
+		},
+		{
+			name:     "glob_short_circuit",
+			filename: "part-*.csv.zst",
+			want:     "",
+		},
+		{
+			name:     "stdin_short_circuit",
+			filename: "-",
+			want:     "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := EffectiveCompression(tc.filename, tc.explicit); got != tc.want {
+				t.Fatalf("EffectiveCompression(%q, %q): got %q, want %q", tc.filename, tc.explicit, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateLoadOptionsForFilenameZstdCSVExtension(t *testing.T) {
+	cases := []struct {
+		name     string
+		filename string
+		opts     LoadOptions
+	}{
+		{
+			name:     "header_false_zst",
+			filename: "data.csv.zst",
+			opts:     LoadOptions{Header: boolPtr(false)},
+		},
+		{
+			name:     "delim_only_zstd",
+			filename: "data.csv.zstd",
+			opts:     LoadOptions{Delim: ";"},
+		},
+		{
+			name:     "explicit_compression",
+			filename: "data.data",
+			opts: LoadOptions{
+				Format:      "csv",
+				Compression: "zstd",
+			},
+		},
+		{
+			name:     "row_shape_options",
+			filename: "data.csv.zst",
+			opts: LoadOptions{
+				AllowJaggedRows:     boolPtr(true),
+				IgnoreUnknownValues: boolPtr(true),
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidateLoadOptionsForFilename(tc.filename, tc.opts); err != nil {
+				t.Fatalf("unexpected error: %v", err)
 			}
 		})
 	}

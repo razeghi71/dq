@@ -7,7 +7,7 @@ dq 'filename | op [args] | op2 [args] ... [| output_format]'
 ```
 
 * The entire query is passed as a **single-quoted string** to avoid shell interpretation of `|`, `{`, `}`, `>`, `<`, and backticks.
-* Takes a file (csv, avro, json, etc.) as input. Gzip-compressed CSV/JSON/JSONL text files are supported via double extensions such as `.csv.gz` or explicit `with compression=gzip`. Globs are supported (`logs/**/*.csv`, `orders/part-*.csv`) — matched files are concatenated. All matched files are loaded into memory before the pipeline runs. A zero-byte CSV (or BOM-/whitespace-only with no data rows) loads as an empty table (0 columns, 0 rows). Empty glob shards are skipped when establishing the column schema; the first non-empty shard defines the anchor columns. CSV rows must match the schema width by default (same rules for single files and glob shards); use `with allow_jagged_rows=true` for missing trailing columns (null-filled) and `with ignore_unknown_values=true` to drop extra columns. On glob sources, CSV-only options require `with format=csv` at parse time (e.g. `logs/part-* with format=csv, allow_jagged_rows=true`) — format cannot be inferred from the pattern alone. CSV glob shards without a detectable header row are read positionally under the first file's columns. Extended headers require shared column names plus new lowercase identifiers (`email`, not `Email`); renamed columns with no anchor overlap are positional.
+* Takes a file (csv, avro, json, etc.) as input. Gzip- and Zstandard-compressed CSV/JSON/JSONL text files are supported via double extensions such as `.csv.gz` / `.jsonl.zst` or explicit `with compression=gzip` / `with compression=zstd`. Globs are supported (`logs/**/*.csv`, `orders/part-*.csv`) — matched files are concatenated. All matched files are loaded into memory before the pipeline runs. A zero-byte CSV (or BOM-/whitespace-only with no data rows) loads as an empty table (0 columns, 0 rows). Empty glob shards are skipped when establishing the column schema; the first non-empty shard defines the anchor columns. CSV rows must match the schema width by default (same rules for single files and glob shards); use `with allow_jagged_rows=true` for missing trailing columns (null-filled) and `with ignore_unknown_values=true` to drop extra columns. On glob sources, CSV-only options require `with format=csv` at parse time (e.g. `logs/part-* with format=csv, allow_jagged_rows=true`) — format cannot be inferred from the pattern alone. CSV glob shards without a detectable header row are read positionally under the first file's columns. Extended headers require shared column names plus new lowercase identifiers (`email`, not `Email`); renamed columns with no anchor overlap are positional.
 * Optional **`with key=value, ...`** on the primary source or join file sets load format, compression, and CSV options (see Load options below).
 * Optional **output format command** at the end of the query (`table`, `csv`, `json`, `jsonl`, `avro`, `parquet`); omitted means pretty table output. Output commands can write to a path with `to`, and can split files with `with split_rows=N`.
 * Everything is **pipe-based** — each op takes a table and returns a table.
@@ -124,27 +124,31 @@ Examples:
 ```
 data.dat with format=csv | head 5
 data.csv.gz | head 5
+events.jsonl.zst | count
 data.dat with format=csv, compression=gzip | count
+events.data with format=jsonl, compression=zstd | count
 logs/part-* with format=csv | count
 logs/part-* with format=csv, allow_jagged_rows=true, ignore_unknown_values=true | count
 - with format=csv | filter { age > 25 }
 - with format=csv, compression=gzip | count
+- with format=jsonl, compression=zstd | count
 users.csv | join left orders/part-*.dat with format=csv, delim=";" on user_id == customer_id
 users.csv | join orders.data with format=csv, compression=gzip on user_id
+users.csv | join orders.jsonl.zst with format=jsonl on user_id
 ```
 
 | Key | Applies to | Values | Notes |
 |-----|------------|--------|-------|
 | `format` | all | `csv`, `json`, `jsonl`, `avro`, `parquet` | Overrides extension; required when extension missing |
-| `compression` | csv/json/jsonl inputs | `gzip` | File-level gzip wrapper; inferred from `.csv.gz`, `.json.gz`, `.jsonl.gz`; explicit `compression=gzip` also works for stdin when `format=...` is set; not supported for avro or parquet |
+| `compression` | csv/json/jsonl inputs | `gzip`, `zstd` | File-level wrapper; inferred from `.csv.gz`, `.json.gz`, `.jsonl.gz`, `.csv.zst`, `.json.zst`, `.jsonl.zst`, and `.zstd` equivalents; explicit compression also works for stdin when `format=...` is set; not supported for avro or parquet |
 | `header` | csv | `true`, `false` | Default `true`; `false` uses `col1`, `col2`, … from first row width |
 | `delim` | csv | string, e.g. `delim=";"` | Default `,`; only the first character is used as the separator |
 | `allow_jagged_rows` | csv | `true`, `false` | Default `false`; when `true`, rows with fewer fields than the schema get null-filled trailing columns |
 | `ignore_unknown_values` | csv | `true`, `false` | Default `false`; when `true`, extra fields beyond the schema are dropped |
 
-Format resolution: explicit `format=` → file extension → error (`use with format=...`). Literal gzip double extensions infer both pieces: `.csv.gz` means `format=csv, compression=gzip`, `.json.gz` means `format=json, compression=gzip`, and `.jsonl.gz` means `format=jsonl, compression=gzip`. Use `with compression=gzip` when the compressed file name is ambiguous or extensionless, e.g. `events.data with format=jsonl, compression=gzip`. Stdin (`-`) requires `with format=...`; gzip-compressed stdin must be explicit (`- with format=csv, compression=gzip`). Globs and extensionless paths cannot infer format at parse time — use `with format=...` before any CSV-only option (`header`, `delim`, `allow_jagged_rows`, `ignore_unknown_values`), e.g. `part-* with format=csv, allow_jagged_rows=true`. Use `with format=...` when a glob matches mixed or missing extensions at load time.
+Format resolution: explicit `format=` → file extension → error (`use with format=...`). Literal gzip and zstd double extensions infer both pieces: `.csv.gz` means `format=csv, compression=gzip`, `.jsonl.zst` means `format=jsonl, compression=zstd`, and `.json.zstd` means `format=json, compression=zstd`. Use explicit `with compression=...` when the compressed file name is ambiguous or extensionless, e.g. `events.data with format=jsonl, compression=zstd`. Explicit `format=` overrides the inner suffix while suffix-based compression inference still applies, so `events.csv.zst with format=jsonl` reads zstd-compressed JSONL. Stdin (`-`) requires `with format=...`; compressed stdin must be explicit (`- with format=csv, compression=gzip` or `- with format=jsonl, compression=zstd`). Globs and extensionless paths cannot infer format at parse time — use `with format=...` before any CSV-only option (`header`, `delim`, `allow_jagged_rows`, `ignore_unknown_values`), e.g. `part-* with format=csv, allow_jagged_rows=true`. Use `with format=...` when a glob matches mixed or missing extensions at load time.
 
-Avro and Parquet internal compression codecs are discovered from the file metadata. Do not use load options such as `compression=snappy`, `compression=deflate`, `compression=zstd`, or `compression=brotli` for Avro/Parquet; those are not query syntax. The `compression=` load option means a file-level wrapper and is currently limited to gzip-compressed CSV/JSON/JSONL text inputs, not `.avro.gz` or `.parquet.gz`.
+Avro and Parquet internal compression codecs are discovered from the file metadata. Do not use load options such as `compression=snappy`, `compression=deflate`, `compression=zstd`, or `compression=brotli` for Avro/Parquet; those are not Avro/Parquet query syntax. The `compression=` load option means a file-level wrapper and is currently limited to gzip- or zstd-compressed CSV/JSON/JSONL text inputs, not `.avro.gz`, `.avro.zst`, `.parquet.gz`, or `.parquet.zst`.
 
 ---
 

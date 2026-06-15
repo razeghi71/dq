@@ -87,7 +87,7 @@ type Assignment struct {
 // Zero value keeps extension-based inference and CSV defaults (header row, comma delim).
 type LoadOptions struct {
 	Format              string // optional override: csv, json, jsonl, avro, parquet
-	Compression         string // optional file-level compression wrapper: gzip
+	Compression         string // optional file-level compression wrapper: gzip, zstd
 	Header              *bool  // csv only; nil = default (true)
 	Delim               string // csv only; "" = comma
 	AllowJaggedRows     *bool  // csv only; nil = default (false)

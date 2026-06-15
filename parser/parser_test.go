@@ -1643,6 +1643,35 @@ func TestParseSourceWithLoadOptions(t *testing.T) {
 		}
 	})
 
+	t.Run("zstd_compression_option", func(t *testing.T) {
+		q, err := Parse(`events.data with format=jsonl, compression=zstd | count`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if q.Source.Filename != "events.data" {
+			t.Errorf("filename: got %q", q.Source.Filename)
+		}
+		if q.Source.Load.Format != "jsonl" {
+			t.Errorf("format: got %q", q.Source.Load.Format)
+		}
+		if q.Source.Load.Compression != "zstd" {
+			t.Errorf("compression: got %q", q.Source.Load.Compression)
+		}
+	})
+
+	t.Run("zstd_double_extension_csv_options", func(t *testing.T) {
+		q, err := Parse(`data.csv.zst with header=false, delim=";" | count`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if q.Source.Load.Header == nil || *q.Source.Load.Header != false {
+			t.Errorf("header: want false, got %v", q.Source.Load.Header)
+		}
+		if q.Source.Load.Delim != ";" {
+			t.Errorf("delim: got %q", q.Source.Load.Delim)
+		}
+	})
+
 	t.Run("gzip_double_extension_csv_options", func(t *testing.T) {
 		q, err := Parse(`data.csv.gz with header=false, delim=";" | count`)
 		if err != nil {
@@ -1728,6 +1757,34 @@ func TestParseJoinWithLoadOptions(t *testing.T) {
 		}
 	})
 
+	t.Run("zstd_compression_option", func(t *testing.T) {
+		q, err := Parse(`users.csv | join orders.data with format=csv, compression=zstd on user_id`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		j := q.Ops[0].(*ast.JoinOp)
+		if j.Filename != "orders.data" {
+			t.Errorf("filename: got %q", j.Filename)
+		}
+		if j.Load.Format != "csv" {
+			t.Errorf("format: got %q", j.Load.Format)
+		}
+		if j.Load.Compression != "zstd" {
+			t.Errorf("compression: got %q", j.Load.Compression)
+		}
+	})
+
+	t.Run("zstd_double_extension_csv_options", func(t *testing.T) {
+		q, err := Parse(`users.csv | join orders.csv.zst with header=false on user_id == col1`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		j := q.Ops[0].(*ast.JoinOp)
+		if j.Load.Header == nil || *j.Load.Header != false {
+			t.Errorf("header: want false, got %v", j.Load.Header)
+		}
+	})
+
 	t.Run("gzip_double_extension_csv_options", func(t *testing.T) {
 		q, err := Parse(`users.csv | join orders.csv.gz with header=false on user_id == col1`)
 		if err != nil {
@@ -1764,6 +1821,8 @@ func TestParseWithLoadOptionsRejected(t *testing.T) {
 		{"glob_csv_opts_without_format", "part-*.dat with header=false | head", "with format"},
 		{"gzip_on_avro", "data.avro with compression=gzip | head", "compression"},
 		{"gzip_on_parquet", "data.parquet with compression=gzip | head", "compression"},
+		{"zstd_on_avro", "data.avro with compression=zstd | head", "compression"},
+		{"zstd_on_parquet", "data.parquet with compression=zstd | head", "compression"},
 	}
 
 	for _, tc := range cases {

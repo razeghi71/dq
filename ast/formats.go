@@ -11,7 +11,7 @@ var dataFormatNames = []string{"csv", "json", "jsonl", "avro", "parquet"}
 var streamDataFormatNames = []string{"csv", "json", "jsonl"}
 
 // compressionFormatNames are file-level compression wrappers.
-var compressionFormatNames = []string{"gzip"}
+var compressionFormatNames = []string{"gzip", "zstd"}
 
 var (
 	supportedLoadFormats   map[string]bool

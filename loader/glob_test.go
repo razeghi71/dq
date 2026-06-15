@@ -139,6 +139,148 @@ func TestLoadGlobGzipCSVOptionsStillApply(t *testing.T) {
 	}
 }
 
+func TestLoadGlobZstdCSVWithFormat(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "part-001.csv.zst"), zstdTestBytes(t, "id,name\n1,Alice\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "part-002.csv.zst"), zstdTestBytes(t, "id,name\n2,Bob\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tbl, err := Load(filepath.Join(dir, "part-*.csv.zst"), Options{Format: "csv"})
+	if err != nil {
+		t.Fatalf("load zstd csv glob: %v", err)
+	}
+	if tbl.NumRows != 2 {
+		t.Fatalf("expected 2 rows, got %d: %s", tbl.NumRows, tbl.String())
+	}
+	if tbl.Get(0, "name").Str != "Alice" || tbl.Get(1, "name").Str != "Bob" {
+		t.Fatalf("unexpected table: %s", tbl.String())
+	}
+}
+
+func TestLoadGlobZstdCSVAnchorsSchemaAcrossShards(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "part-001.csv.zst"), zstdTestBytes(t, "id,name\n1,Alice\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "part-002.csv.zst"), zstdTestBytes(t, "id,name,email\n2,Bob,bob@example.com\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tbl, err := Load(filepath.Join(dir, "part-*.csv.zst"), Options{Format: "csv"})
+	if err != nil {
+		t.Fatalf("load zstd csv glob: %v", err)
+	}
+	if tbl.ColIndex("email") < 0 {
+		t.Fatalf("expected extended email column, got %v", tbl.Columns)
+	}
+	if tbl.NumRows != 2 || tbl.Get(1, "email").Str != "bob@example.com" {
+		t.Fatalf("unexpected table: %s", tbl.String())
+	}
+}
+
+func TestLoadGlobZstdCSVOptionsStillApply(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "part-001.csv.zst"), zstdTestBytes(t, "1;Alice\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "part-002.csv.zst"), zstdTestBytes(t, "2;Bob;extra\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tbl, err := Load(filepath.Join(dir, "part-*.csv.zst"), Options{
+		Format:              "csv",
+		Header:              BoolPtr(false),
+		Delim:               ";",
+		IgnoreUnknownValues: BoolPtr(true),
+	})
+	if err != nil {
+		t.Fatalf("load zstd csv glob with options: %v", err)
+	}
+	if tbl.NumRows != 2 || tbl.Get(1, "col2").Str != "Bob" {
+		t.Fatalf("unexpected table: %s", tbl.String())
+	}
+	if tbl.ColIndex("col3") >= 0 {
+		t.Fatalf("extra field should be dropped, got columns %v", tbl.Columns)
+	}
+}
+
+func TestLoadGlobZstdJSONAndJSONL(t *testing.T) {
+	t.Run("json", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "a.json.zst"), zstdTestBytes(t, `[{"id":1,"name":"Alice"}]`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "b.json.zst"), zstdTestBytes(t, `[{"id":2,"name":"Bob"}]`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tbl, err := Load(filepath.Join(dir, "*.json.zst"), Options{})
+		if err != nil {
+			t.Fatalf("load zstd json glob: %v", err)
+		}
+		if tbl.NumRows != 2 || tbl.Get(1, "name").Str != "Bob" {
+			t.Fatalf("unexpected table: %s", tbl.String())
+		}
+	})
+
+	t.Run("jsonl", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "a.jsonl.zstd"), zstdTestBytes(t, "{\"id\":1,\"level\":\"INFO\"}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "b.jsonl.zstd"), zstdTestBytes(t, "{\"id\":2,\"level\":\"ERROR\"}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tbl, err := Load(filepath.Join(dir, "*.jsonl.zstd"), Options{})
+		if err != nil {
+			t.Fatalf("load zstd jsonl glob: %v", err)
+		}
+		if tbl.NumRows != 2 || tbl.Get(1, "level").Str != "ERROR" {
+			t.Fatalf("unexpected table: %s", tbl.String())
+		}
+	})
+}
+
+func TestLoadGlobMixedZstdAndUncompressedCSVRequiresClearError(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "part-001.csv"), []byte("id\n1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "part-002.csv.zst"), zstdTestBytes(t, "id\n2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(filepath.Join(dir, "part-*"), Options{})
+	if err == nil {
+		t.Fatal("expected mixed compression/format error")
+	}
+	lower := strings.ToLower(err.Error())
+	if !strings.Contains(lower, "mixed") || (!strings.Contains(lower, "compression") && !strings.Contains(lower, "format")) {
+		t.Fatalf("expected mixed compression/format error, got %v", err)
+	}
+}
+
+func TestLoadGlobMixedGzipAndZstdCSVRequiresClearError(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "part-001.csv.gz"), gzipTestBytes(t, "id\n1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "part-002.csv.zst"), zstdTestBytes(t, "id\n2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(filepath.Join(dir, "part-*"), Options{Format: "csv"})
+	if err == nil {
+		t.Fatal("expected mixed compression error")
+	}
+	lower := strings.ToLower(err.Error())
+	if !strings.Contains(lower, "mixed") || !strings.Contains(lower, "compression") {
+		t.Fatalf("expected mixed compression error, got %v", err)
+	}
+}
+
 func TestLoadGlobMixedCompressedAndUncompressedCSVRequiresClearError(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "part-001.csv"), []byte("id\n1\n"), 0o644); err != nil {

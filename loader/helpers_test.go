@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"testing"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 // BoolPtr returns a pointer to b (test helper).
@@ -16,6 +18,22 @@ func gzipTestBytes(t *testing.T, content string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write([]byte(content)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func zstdTestBytes(t *testing.T, content string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw, err := zstd.NewWriter(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := zw.Write([]byte(content)); err != nil {
 		t.Fatal(err)
 	}

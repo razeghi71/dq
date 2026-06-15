@@ -18,6 +18,19 @@ func EffectiveFormat(filename, explicitFormat string) string {
 	return inferFormatFromFilename(filename)
 }
 
+// EffectiveCompression returns the explicit compression or inferred file-level wrapper.
+// Returns "" for stdin, globs, extensionless paths, or uncompressed literal paths.
+func EffectiveCompression(filename, explicitCompression string) string {
+	if explicitCompression != "" {
+		return strings.ToLower(explicitCompression)
+	}
+	if filename == "-" || strings.ContainsAny(filename, "*?{") {
+		return ""
+	}
+	compression, _ := inferCompressionFromFilename(filename)
+	return compression
+}
+
 // IsSupportedLoadFormat reports whether name is a recognized load format.
 func IsSupportedLoadFormat(format string) bool {
 	return isSupportedFormat(supportedLoadFormats, format)
@@ -94,7 +107,7 @@ func validateCSVOnlyOptions(opts LoadOptions, format, prefix string) error {
 func inferFormatFromFilename(filename string) string {
 	lower := strings.ToLower(filename)
 	ext := strings.TrimPrefix(filepath.Ext(lower), ".")
-	if ext == "gz" {
+	if _, ok := compressionFromExtension(ext); ok {
 		base := strings.TrimSuffix(lower, filepath.Ext(lower))
 		inner := strings.TrimPrefix(filepath.Ext(base), ".")
 		if inner != "" {
@@ -102,4 +115,21 @@ func inferFormatFromFilename(filename string) string {
 		}
 	}
 	return ext
+}
+
+func inferCompressionFromFilename(filename string) (string, bool) {
+	lower := strings.ToLower(filename)
+	ext := strings.TrimPrefix(filepath.Ext(lower), ".")
+	return compressionFromExtension(ext)
+}
+
+func compressionFromExtension(ext string) (string, bool) {
+	switch strings.ToLower(ext) {
+	case "gz":
+		return "gzip", true
+	case "zst", "zstd":
+		return "zstd", true
+	default:
+		return "", false
+	}
 }

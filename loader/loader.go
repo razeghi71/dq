@@ -9,12 +9,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"unicode"
 
+	"github.com/klauspost/compress/zstd"
 	goavro "github.com/linkedin/goavro/v2"
 	parquet "github.com/parquet-go/parquet-go"
 	"github.com/razeghi71/dq/ast"
@@ -192,10 +192,7 @@ func LoadReader(r io.Reader, opts Options) (*table.Table, error) {
 	if opts.Compression != "" {
 		wrapped, err := wrapInputReader(r, opts.Compression)
 		if err != nil {
-			if opts.Compression == "gzip" {
-				return nil, fmt.Errorf("cannot read gzip stream: %w", err)
-			}
-			return nil, err
+			return nil, fmt.Errorf("%s: %w", compressionOpenAction(opts.Compression), err)
 		}
 		defer wrapped.Close()
 		r = wrapped
@@ -274,10 +271,7 @@ func resolveFormatCompression(filename string, opts Options) (format, compressio
 	if format == "" {
 		format = ast.EffectiveFormat(filename, "")
 	}
-	compression = opts.Compression
-	if compression == "" && strings.EqualFold(filepath.Ext(filename), ".gz") {
-		compression = "gzip"
-	}
+	compression = ast.EffectiveCompression(filename, opts.Compression)
 	return format, compression
 }
 
@@ -294,6 +288,23 @@ func (m multiReadCloser) Close() error {
 	err1 := m.first.Close()
 	err2 := m.second.Close()
 	return errors.Join(err1, err2)
+}
+
+type errorLabelReadCloser struct {
+	r     io.ReadCloser
+	label string
+}
+
+func (e errorLabelReadCloser) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return n, fmt.Errorf("%s stream: %w", e.label, err)
+	}
+	return n, err
+}
+
+func (e errorLabelReadCloser) Close() error {
+	return e.r.Close()
 }
 
 func openInputReader(filename, compression string) (io.ReadCloser, error) {
@@ -323,16 +334,27 @@ func wrapInputReadCloser(r io.ReadCloser, compression string) (io.ReadCloser, er
 			return nil, err
 		}
 		return multiReadCloser{first: gr, second: r}, nil
+	case "zstd":
+		zr, err := zstd.NewReader(r)
+		if err != nil {
+			return nil, err
+		}
+		labeled := errorLabelReadCloser{r: zr.IOReadCloser(), label: "zstd"}
+		return multiReadCloser{first: labeled, second: r}, nil
 	default:
 		return nil, fmt.Errorf("unsupported compression %q (supported: %s)", compression, ast.CompressionFormatsList())
 	}
 }
 
 func compressionOpenAction(compression string) string {
-	if compression == "gzip" {
+	switch compression {
+	case "gzip":
 		return "cannot read gzip stream"
+	case "zstd":
+		return "cannot read zstd stream"
+	default:
+		return "cannot open compressed stream"
 	}
-	return "cannot open compressed stream"
 }
 
 func loadCSV(filename string, cfg csvLoadConfig) (*table.Table, error) {

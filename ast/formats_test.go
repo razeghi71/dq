@@ -30,6 +30,7 @@ func TestFormatListsMatchRegistry(t *testing.T) {
 	}{
 		{LoadFormatsList(), DataFormatNames(), IsSupportedLoadFormat},
 		{OutputFormatsList(), OutputFormatNames(), IsSupportedOutputFormat},
+		{CompressionFormatsList(), compressionFormatNames, IsSupportedCompression},
 	}
 	for _, tc := range cases {
 		names := strings.Split(tc.list, ", ")
@@ -43,6 +44,17 @@ func TestFormatListsMatchRegistry(t *testing.T) {
 			if !tc.isSup(name) {
 				t.Errorf("list entry %q not supported", name)
 			}
+		}
+	}
+}
+
+func TestCompressionRegistryIncludesTextWrappers(t *testing.T) {
+	for _, compression := range []string{"gzip", "zstd"} {
+		if !IsSupportedCompression(compression) {
+			t.Fatalf("compression %q missing from load compression registry", compression)
+		}
+		if !strings.Contains(CompressionFormatsList(), compression) {
+			t.Fatalf("compression list %q should include %q", CompressionFormatsList(), compression)
 		}
 	}
 }
