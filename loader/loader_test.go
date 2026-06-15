@@ -474,6 +474,263 @@ func TestLoadZstdBadStreamsReturnZstdError(t *testing.T) {
 	}
 }
 
+func TestLoadDeflateTextByDoubleExtension(t *testing.T) {
+	cases := []struct {
+		name     string
+		filename string
+		content  string
+		check    func(t *testing.T, tbl *table.Table)
+	}{
+		{
+			name:     "csv_deflate",
+			filename: "users.csv.deflate",
+			content:  "name,age,city\nAlice,30,NY\nBob,25,LA\n",
+			check: func(t *testing.T, tbl *table.Table) {
+				t.Helper()
+				if tbl.NumRows != 2 || tbl.Get(0, "name").Str != "Alice" || tbl.Get(1, "age").Int != 25 {
+					t.Fatalf("unexpected table: %s", tbl.String())
+				}
+			},
+		},
+		{
+			name:     "csv_zlib",
+			filename: "users.csv.zlib",
+			content:  "name,age\nAlice,30\nBob,25\n",
+			check: func(t *testing.T, tbl *table.Table) {
+				t.Helper()
+				if tbl.NumRows != 2 || tbl.Get(1, "name").Str != "Bob" {
+					t.Fatalf("unexpected table: %s", tbl.String())
+				}
+			},
+		},
+		{
+			name:     "json_deflate",
+			filename: "users.json.deflate",
+			content:  `[{"name":"Alice","age":30},{"name":"Bob","age":25}]`,
+			check: func(t *testing.T, tbl *table.Table) {
+				t.Helper()
+				if tbl.NumRows != 2 || tbl.Get(1, "name").Str != "Bob" {
+					t.Fatalf("unexpected table: %s", tbl.String())
+				}
+			},
+		},
+		{
+			name:     "json_zlib",
+			filename: "users.json.zlib",
+			content:  `[{"name":"Alice","age":30},{"name":"Bob","age":25}]`,
+			check: func(t *testing.T, tbl *table.Table) {
+				t.Helper()
+				if tbl.NumRows != 2 || tbl.Get(0, "age").Int != 30 {
+					t.Fatalf("unexpected table: %s", tbl.String())
+				}
+			},
+		},
+		{
+			name:     "jsonl_deflate",
+			filename: "events.jsonl.deflate",
+			content:  "{\"level\":\"INFO\",\"msg\":\"start\"}\n{\"level\":\"ERROR\",\"msg\":\"timeout\"}\n",
+			check: func(t *testing.T, tbl *table.Table) {
+				t.Helper()
+				if tbl.NumRows != 2 || tbl.Get(1, "level").Str != "ERROR" {
+					t.Fatalf("unexpected table: %s", tbl.String())
+				}
+			},
+		},
+		{
+			name:     "jsonl_zlib_uppercase",
+			filename: "EVENTS.JSONL.ZLIB",
+			content:  "{\"level\":\"INFO\",\"msg\":\"start\"}\n{\"level\":\"ERROR\",\"msg\":\"timeout\"}\n",
+			check: func(t *testing.T, tbl *table.Table) {
+				t.Helper()
+				if tbl.NumRows != 2 || tbl.Get(1, "msg").Str != "timeout" {
+					t.Fatalf("unexpected table: %s", tbl.String())
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), tc.filename)
+			if err := os.WriteFile(path, deflateTestBytes(t, tc.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			tbl, err := Load(path, Options{})
+			if err != nil {
+				t.Fatalf("load deflate input: %v", err)
+			}
+			tc.check(t, tbl)
+		})
+	}
+}
+
+func TestLoadDeflateExplicitCompressionExtensionless(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.data")
+	data := "{\"level\":\"INFO\",\"msg\":\"start\"}\n{\"level\":\"ERROR\",\"msg\":\"timeout\"}\n"
+	if err := os.WriteFile(path, deflateTestBytes(t, data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tbl, err := Load(path, Options{Format: "jsonl", Compression: "deflate"})
+	if err != nil {
+		t.Fatalf("load explicit deflate jsonl: %v", err)
+	}
+	if tbl.NumRows != 2 || tbl.Get(1, "msg").Str != "timeout" {
+		t.Fatalf("unexpected table: %s", tbl.String())
+	}
+}
+
+func TestLoadDeflateExplicitFormatOverridesInnerSuffix(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.csv.deflate")
+	data := "{\"level\":\"ERROR\",\"msg\":\"jsonl despite suffix\"}\n"
+	if err := os.WriteFile(path, deflateTestBytes(t, data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tbl, err := Load(path, Options{Format: "jsonl"})
+	if err != nil {
+		t.Fatalf("load deflate with explicit format override: %v", err)
+	}
+	if tbl.NumRows != 1 || tbl.Get(0, "msg").Str != "jsonl despite suffix" {
+		t.Fatalf("unexpected table: %s", tbl.String())
+	}
+}
+
+func TestLoadDeflateSuffixWithoutInnerFormatRequiresFormat(t *testing.T) {
+	for _, name := range []string{"events.deflate", "events.zlib"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), name)
+			if err := os.WriteFile(path, deflateTestBytes(t, "name\nAlice\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(path, Options{})
+			if err == nil {
+				t.Fatal("expected missing format error")
+			}
+			if !strings.Contains(strings.ToLower(err.Error()), "with format=") {
+				t.Fatalf("expected with format error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadDeflateCSVOptionsStillApply(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rows.csv.deflate")
+	if err := os.WriteFile(path, deflateTestBytes(t, "1;Alice\n2;Bob;extra\n3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tbl, err := Load(path, Options{
+		Header:              BoolPtr(false),
+		Delim:               ";",
+		AllowJaggedRows:     BoolPtr(true),
+		IgnoreUnknownValues: BoolPtr(true),
+	})
+	if err != nil {
+		t.Fatalf("load deflate csv with options: %v", err)
+	}
+	if tbl.NumRows != 3 || tbl.Get(0, "col1").Int != 1 || tbl.Get(1, "col2").Str != "Bob" {
+		t.Fatalf("unexpected table: %s", tbl.String())
+	}
+	if tbl.Get(2, "col2").Type != table.TypeNull {
+		t.Fatalf("missing trailing field should be null-filled, got %s", tbl.Get(2, "col2").AsString())
+	}
+	if tbl.ColIndex("col3") >= 0 {
+		t.Fatalf("extra field should be dropped, got columns %v", tbl.Columns)
+	}
+}
+
+func TestLoadDeflateCSVEmptyAndBOMOnly(t *testing.T) {
+	t.Run("empty", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "empty.csv.deflate")
+		if err := os.WriteFile(path, deflateTestBytes(t, ""), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tbl, err := Load(path, Options{})
+		if err != nil {
+			t.Fatalf("load empty deflate csv: %v", err)
+		}
+		if tbl.NumRows != 0 || len(tbl.Columns) != 0 {
+			t.Fatalf("expected empty table, got %s", tbl.String())
+		}
+	})
+
+	t.Run("bom_only", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "bom.csv.zlib")
+		if err := os.WriteFile(path, deflateTestBytes(t, "\ufeff"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tbl, err := Load(path, Options{})
+		if err != nil {
+			t.Fatalf("load BOM-only deflate csv: %v", err)
+		}
+		if tbl.NumRows != 0 || len(tbl.Columns) != 0 {
+			t.Fatalf("expected empty table, got %s", tbl.String())
+		}
+	})
+}
+
+func TestLoadDeflateUnsupportedFormatsRejected(t *testing.T) {
+	for _, name := range []string{"data.avro.deflate", "data.parquet.zlib"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), name)
+			if err := os.WriteFile(path, deflateTestBytes(t, "x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := Load(path, Options{})
+			if err == nil {
+				t.Fatal("expected compression format restriction")
+			}
+			lower := strings.ToLower(err.Error())
+			if !strings.Contains(lower, "compression=deflate") || !strings.Contains(lower, "csv") || !strings.Contains(lower, "jsonl") {
+				t.Fatalf("expected compression format restriction, got %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadDeflateBadStreamsReturnDeflateError(t *testing.T) {
+	cases := []struct {
+		name    string
+		content []byte
+	}{
+		{name: "plain_text_named_deflate", content: []byte("name\nAlice\n")},
+		{name: "truncated_deflate", content: deflateTestBytes(t, "name\nAlice\n")[:4]},
+		{name: "raw_deflate_rejected", content: rawDeflateTestBytes(t, "name\nAlice\n")},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "bad.csv.deflate")
+			if err := os.WriteFile(path, tc.content, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(path, Options{})
+			if err == nil {
+				t.Fatal("expected deflate error")
+			}
+			lower := strings.ToLower(err.Error())
+			if !strings.Contains(lower, "deflate") && !strings.Contains(lower, "zlib") {
+				t.Fatalf("error should mention deflate/zlib, got %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadReaderDeflateCompression(t *testing.T) {
+	tbl, err := LoadReader(bytes.NewReader(deflateTestBytes(t, "name\nAlice\n")), Options{
+		Format:      "csv",
+		Compression: "deflate",
+	})
+	if err != nil {
+		t.Fatalf("load deflate reader: %v", err)
+	}
+	if tbl.NumRows != 1 || tbl.Get(0, "name").Str != "Alice" {
+		t.Fatalf("got %s", tbl.String())
+	}
+}
+
 func TestLoadJSONLInvalidLineNumberIncludesBlankLines(t *testing.T) {
 	_, err := LoadReader(strings.NewReader("\n{\"ok\":true}\nnot-json\n"), Options{Format: "jsonl"})
 	if err == nil {

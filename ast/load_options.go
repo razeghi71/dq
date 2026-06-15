@@ -110,9 +110,7 @@ func inferFormatFromFilename(filename string) string {
 	if _, ok := compressionFromExtension(ext); ok {
 		base := strings.TrimSuffix(lower, filepath.Ext(lower))
 		inner := strings.TrimPrefix(filepath.Ext(base), ".")
-		if inner != "" {
-			return inner
-		}
+		return inner
 	}
 	return ext
 }
@@ -129,6 +127,8 @@ func compressionFromExtension(ext string) (string, bool) {
 		return "gzip", true
 	case "zst", "zstd":
 		return "zstd", true
+	case "deflate", "zlib":
+		return "deflate", true
 	default:
 		return "", false
 	}

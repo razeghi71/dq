@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"compress/gzip"
+	"compress/zlib"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,6 +38,19 @@ func zstdIntegrationBytes(t *testing.T, content string) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := zw.Write([]byte(content)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func deflateIntegrationBytes(t *testing.T, content string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zlib.NewWriter(&buf)
 	if _, err := zw.Write([]byte(content)); err != nil {
 		t.Fatal(err)
 	}
@@ -1257,6 +1271,58 @@ func TestIntegrationPrimarySourceWithLoadOptions(t *testing.T) {
 			t.Fatalf("got %s", result.String())
 		}
 	})
+
+	t.Run("deflate_double_extension", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "events.jsonl.deflate")
+		data := "{\"level\":\"INFO\",\"message\":\"start\"}\n{\"level\":\"ERROR\",\"message\":\"timeout\"}\n"
+		if err := os.WriteFile(path, deflateIntegrationBytes(t, data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		result := loadAndQuery(t, path, `filter { level == "ERROR" } | select message`)
+		if result.NumRows != 1 || result.Get(0, "message").Str != "timeout" {
+			t.Fatalf("got %s", result.String())
+		}
+	})
+
+	t.Run("deflate_zlib_double_extension", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "events.jsonl.zlib")
+		data := "{\"level\":\"INFO\",\"message\":\"start\"}\n{\"level\":\"ERROR\",\"message\":\"timeout\"}\n"
+		if err := os.WriteFile(path, deflateIntegrationBytes(t, data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		result := loadAndQuery(t, path, `filter { level == "ERROR" } | select message`)
+		if result.NumRows != 1 || result.Get(0, "message").Str != "timeout" {
+			t.Fatalf("got %s", result.String())
+		}
+	})
+
+	t.Run("deflate_explicit_compression", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "events.logdata")
+		data := "{\"level\":\"INFO\",\"message\":\"start\"}\n{\"level\":\"ERROR\",\"message\":\"timeout\"}\n"
+		if err := os.WriteFile(path, deflateIntegrationBytes(t, data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		result := loadAndQuery(t, path+` with format=jsonl, compression=deflate`, `filter { level == "ERROR" } | count`)
+		if result.NumRows != 1 || result.Get(0, "count").Int != 1 {
+			t.Fatalf("got %s", result.String())
+		}
+	})
+
+	t.Run("deflate_explicit_format_overrides_inner_suffix", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "events.csv.deflate")
+		data := "{\"level\":\"ERROR\",\"message\":\"jsonl despite suffix\"}\n"
+		if err := os.WriteFile(path, deflateIntegrationBytes(t, data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		result := loadAndQuery(t, path+` with format=jsonl`, `select message`)
+		if result.NumRows != 1 || result.Get(0, "message").Str != "jsonl despite suffix" {
+			t.Fatalf("got %s", result.String())
+		}
+	})
 }
 
 func TestIntegrationJoinGzipCompressedSource(t *testing.T) {
@@ -1322,6 +1388,69 @@ func TestIntegrationJoinZstdCompressedSource(t *testing.T) {
 	}
 	if result.ColIndex("orders_csv_note") < 0 {
 		t.Fatalf("expected colliding right note column to be prefixed, got %v", result.Columns)
+	}
+}
+
+func TestIntegrationJoinDeflateCompressedSource(t *testing.T) {
+	dir := t.TempDir()
+	usersPath := filepath.Join(dir, "users.csv")
+	ordersPath := filepath.Join(dir, "orders.csv.deflate")
+	if err := os.WriteFile(usersPath, []byte("user_id,name,note\n1,Alice,left-note\n2,Bob,left-note-2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ordersPath, deflateIntegrationBytes(t, "user_id,total,note\n1,10,first\n2,20,second\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	left, err := loader.Load(usersPath, loader.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, err := parser.Parse(usersPath + ` | join ` + ordersPath + ` on user_id | sort user_id`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	result, err := Execute(q, left, func(filename string, opts ast.LoadOptions) (*table.Table, error) {
+		return loader.Load(filename, loader.FromAST(opts))
+	})
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if result.NumRows != 2 || result.Get(0, "total").Int != 10 || result.Get(1, "total").Int != 20 {
+		t.Fatalf("unexpected table: %s", result.String())
+	}
+	if result.ColIndex("orders_csv_note") < 0 {
+		t.Fatalf("expected colliding right note column to be prefixed, got %v", result.Columns)
+	}
+}
+
+func TestIntegrationJoinExplicitDeflateCompressionSource(t *testing.T) {
+	dir := t.TempDir()
+	usersPath := filepath.Join(dir, "users.csv")
+	ordersPath := filepath.Join(dir, "orders.data")
+	if err := os.WriteFile(usersPath, []byte("user_id,name\n1,Alice\n2,Bob\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ordersPath, deflateIntegrationBytes(t, "user_id,total\n1,10\n2,20\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	left, err := loader.Load(usersPath, loader.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, err := parser.Parse(usersPath + ` | join ` + ordersPath + ` with format=csv, compression=deflate on user_id | sort user_id`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	result, err := Execute(q, left, func(filename string, opts ast.LoadOptions) (*table.Table, error) {
+		return loader.Load(filename, loader.FromAST(opts))
+	})
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if result.NumRows != 2 || result.Get(0, "total").Int != 10 || result.Get(1, "total").Int != 20 {
+		t.Fatalf("unexpected table: %s", result.String())
 	}
 }
 
@@ -1397,6 +1526,28 @@ func TestIntegrationStdinWithLoadOptions(t *testing.T) {
 	tbl, err := loader.LoadInput("-", loader.FromAST(q.Source.Load), strings.NewReader(data))
 	if err != nil {
 		t.Fatalf("load stdin: %v", err)
+	}
+	result, err := Execute(q, tbl, nil)
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if result.NumRows != 1 || result.Get(0, "name").Str != "Alice" {
+		t.Fatalf("got %s", result.String())
+	}
+}
+
+func TestIntegrationDeflateStdinWithLoadOptions(t *testing.T) {
+	data := deflateIntegrationBytes(t, "name,age\nAlice,30\nBob,25\n")
+	q, err := parser.Parse(`- with format=csv, compression=deflate | filter { age > 25 } | select name`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if q.Source.Load.Format != "csv" || q.Source.Load.Compression != "deflate" {
+		t.Fatalf("source load options: got format=%q compression=%q", q.Source.Load.Format, q.Source.Load.Compression)
+	}
+	tbl, err := loader.LoadInput("-", loader.FromAST(q.Source.Load), bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("load deflate stdin: %v", err)
 	}
 	result, err := Execute(q, tbl, nil)
 	if err != nil {

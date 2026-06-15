@@ -49,7 +49,7 @@ func TestFormatListsMatchRegistry(t *testing.T) {
 }
 
 func TestCompressionRegistryIncludesTextWrappers(t *testing.T) {
-	for _, compression := range []string{"gzip", "zstd"} {
+	for _, compression := range []string{"gzip", "zstd", "deflate"} {
 		if !IsSupportedCompression(compression) {
 			t.Fatalf("compression %q missing from load compression registry", compression)
 		}

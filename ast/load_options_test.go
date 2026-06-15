@@ -91,6 +91,13 @@ func TestEffectiveFormatGzipDoubleExtensions(t *testing.T) {
 		{"data.json.zstd", "json"},
 		{"data.jsonl.zstd", "jsonl"},
 		{"DATA.CSV.ZST", "csv"},
+		{"data.csv.deflate", "csv"},
+		{"data.json.deflate", "json"},
+		{"data.jsonl.deflate", "jsonl"},
+		{"data.csv.zlib", "csv"},
+		{"data.json.zlib", "json"},
+		{"data.jsonl.zlib", "jsonl"},
+		{"DATA.CSV.ZLIB", "csv"},
 	}
 
 	for _, tc := range cases {
@@ -130,10 +137,25 @@ func TestEffectiveCompression(t *testing.T) {
 			want:     "zstd",
 		},
 		{
+			name:     "deflate_suffix",
+			filename: "data.jsonl.deflate",
+			want:     "deflate",
+		},
+		{
+			name:     "zlib_suffix",
+			filename: "data.json.zlib",
+			want:     "deflate",
+		},
+		{
+			name:     "deflate_case_insensitive_suffix",
+			filename: "DATA.CSV.ZLIB",
+			want:     "deflate",
+		},
+		{
 			name:     "explicit_override",
 			filename: "data.csv.gz",
-			explicit: "zstd",
-			want:     "zstd",
+			explicit: "deflate",
+			want:     "deflate",
 		},
 		{
 			name:     "extensionless",
@@ -156,6 +178,64 @@ func TestEffectiveCompression(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := EffectiveCompression(tc.filename, tc.explicit); got != tc.want {
 				t.Fatalf("EffectiveCompression(%q, %q): got %q, want %q", tc.filename, tc.explicit, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateLoadOptionsForFilenameDeflateCSVExtension(t *testing.T) {
+	cases := []struct {
+		name     string
+		filename string
+		opts     LoadOptions
+	}{
+		{
+			name:     "header_false_deflate",
+			filename: "data.csv.deflate",
+			opts:     LoadOptions{Header: boolPtr(false)},
+		},
+		{
+			name:     "delim_only_zlib",
+			filename: "data.csv.zlib",
+			opts:     LoadOptions{Delim: ";"},
+		},
+		{
+			name:     "explicit_compression",
+			filename: "data.csv",
+			opts: LoadOptions{
+				Compression: "deflate",
+			},
+		},
+		{
+			name:     "explicit_format_and_compression",
+			filename: "data",
+			opts: LoadOptions{
+				Format:      "csv",
+				Compression: "deflate",
+				Header:      boolPtr(false),
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidateLoadOptionsForFilename(tc.filename, tc.opts); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateLoadOptionsDeflateRejectsUnsupportedFormats(t *testing.T) {
+	for _, format := range []string{"avro", "parquet"} {
+		t.Run(format, func(t *testing.T) {
+			err := ValidateLoadOptions(LoadOptions{Format: format, Compression: "deflate"})
+			if err == nil {
+				t.Fatal("expected compression format restriction")
+			}
+			lower := strings.ToLower(err.Error())
+			if !strings.Contains(lower, "compression=deflate") || !strings.Contains(lower, "csv") || !strings.Contains(lower, "jsonl") {
+				t.Fatalf("expected compression format restriction, got %v", err)
 			}
 		})
 	}

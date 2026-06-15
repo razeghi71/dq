@@ -3,6 +3,7 @@ package loader
 import (
 	"bufio"
 	"compress/gzip"
+	"compress/zlib"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -341,6 +342,13 @@ func wrapInputReadCloser(r io.ReadCloser, compression string) (io.ReadCloser, er
 		}
 		labeled := errorLabelReadCloser{r: zr.IOReadCloser(), label: "zstd"}
 		return multiReadCloser{first: labeled, second: r}, nil
+	case "deflate":
+		zr, err := zlib.NewReader(r)
+		if err != nil {
+			return nil, err
+		}
+		labeled := errorLabelReadCloser{r: zr, label: "deflate/zlib"}
+		return multiReadCloser{first: labeled, second: r}, nil
 	default:
 		return nil, fmt.Errorf("unsupported compression %q (supported: %s)", compression, ast.CompressionFormatsList())
 	}
@@ -352,6 +360,8 @@ func compressionOpenAction(compression string) string {
 		return "cannot read gzip stream"
 	case "zstd":
 		return "cannot read zstd stream"
+	case "deflate":
+		return "cannot read deflate/zlib stream"
 	default:
 		return "cannot open compressed stream"
 	}

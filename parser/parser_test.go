@@ -1659,6 +1659,22 @@ func TestParseSourceWithLoadOptions(t *testing.T) {
 		}
 	})
 
+	t.Run("deflate_compression_option", func(t *testing.T) {
+		q, err := Parse(`events.data with format=jsonl, compression=deflate | count`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if q.Source.Filename != "events.data" {
+			t.Errorf("filename: got %q", q.Source.Filename)
+		}
+		if q.Source.Load.Format != "jsonl" {
+			t.Errorf("format: got %q", q.Source.Load.Format)
+		}
+		if q.Source.Load.Compression != "deflate" {
+			t.Errorf("compression: got %q", q.Source.Load.Compression)
+		}
+	})
+
 	t.Run("zstd_double_extension_csv_options", func(t *testing.T) {
 		q, err := Parse(`data.csv.zst with header=false, delim=";" | count`)
 		if err != nil {
@@ -1770,6 +1786,23 @@ func TestParseJoinWithLoadOptions(t *testing.T) {
 			t.Errorf("format: got %q", j.Load.Format)
 		}
 		if j.Load.Compression != "zstd" {
+			t.Errorf("compression: got %q", j.Load.Compression)
+		}
+	})
+
+	t.Run("deflate_compression_option", func(t *testing.T) {
+		q, err := Parse(`users.csv | join orders.data with format=csv, compression=deflate on user_id`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		j := q.Ops[0].(*ast.JoinOp)
+		if j.Filename != "orders.data" {
+			t.Errorf("filename: got %q", j.Filename)
+		}
+		if j.Load.Format != "csv" {
+			t.Errorf("format: got %q", j.Load.Format)
+		}
+		if j.Load.Compression != "deflate" {
 			t.Errorf("compression: got %q", j.Load.Compression)
 		}
 	})

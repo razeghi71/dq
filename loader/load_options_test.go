@@ -120,6 +120,49 @@ func TestLoadOptionsZstdJSONLStdin(t *testing.T) {
 	}
 }
 
+func TestLoadOptionsDeflateStdin(t *testing.T) {
+	tbl, err := LoadInput("-", Options{Format: "csv", Compression: "deflate"}, bytes.NewReader(deflateTestBytes(t, "name\nBob\n")))
+	if err != nil {
+		t.Fatalf("load deflate stdin: %v", err)
+	}
+	if tbl.NumRows != 1 || tbl.Get(0, "name").Str != "Bob" {
+		t.Fatalf("got %s", tbl.String())
+	}
+}
+
+func TestLoadOptionsDeflateJSONLStdin(t *testing.T) {
+	data := "{\"level\":\"INFO\"}\n{\"level\":\"ERROR\"}\n"
+	tbl, err := LoadInput("-", Options{Format: "jsonl", Compression: "deflate"}, bytes.NewReader(deflateTestBytes(t, data)))
+	if err != nil {
+		t.Fatalf("load deflate jsonl stdin: %v", err)
+	}
+	if tbl.NumRows != 2 || tbl.Get(1, "level").Str != "ERROR" {
+		t.Fatalf("got %s", tbl.String())
+	}
+}
+
+func TestLoadOptionsBadDeflateStdin(t *testing.T) {
+	_, err := LoadInput("-", Options{Format: "csv", Compression: "deflate"}, strings.NewReader("name\nBob\n"))
+	if err == nil {
+		t.Fatal("expected deflate error")
+	}
+	lower := strings.ToLower(err.Error())
+	if !strings.Contains(lower, "deflate") && !strings.Contains(lower, "zlib") {
+		t.Fatalf("error should mention deflate/zlib, got %v", err)
+	}
+}
+
+func TestLoadOptionsDeflateStdinRejectsUnsupportedFormat(t *testing.T) {
+	_, err := LoadInput("-", Options{Format: "parquet", Compression: "deflate"}, bytes.NewReader(deflateTestBytes(t, "x")))
+	if err == nil {
+		t.Fatal("expected error for compressed parquet stdin")
+	}
+	lower := strings.ToLower(err.Error())
+	if !strings.Contains(lower, "compression=deflate") || !strings.Contains(lower, "csv") || !strings.Contains(lower, "jsonl") {
+		t.Fatalf("expected compression format restriction, got %v", err)
+	}
+}
+
 func TestLoadOptionsBadZstdStdin(t *testing.T) {
 	_, err := LoadInput("-", Options{Format: "csv", Compression: "zstd"}, strings.NewReader("name\nBob\n"))
 	if err == nil {
