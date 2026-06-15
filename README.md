@@ -40,6 +40,43 @@ dq 'data.dat [with format=..., delim=..., ...] | operation1 | operation2 | ... [
 
 Wrap queries in single quotes so your shell doesn't interpret `|`, `{`, `}`, or `>`.
 
+## MCP / AI Agents
+
+`dq` can run as a local MCP server for agent tools that support stdio MCP:
+
+```bash
+dq mcp
+```
+
+Example host config:
+
+```json
+{
+  "mcpServers": {
+    "dq": {
+      "command": "dq",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+The MCP server exposes one tool, `query`, which takes the same query string you would pass on the command line:
+
+```json
+{
+  "query": "users.csv | describe | json"
+}
+```
+
+Use normal query syntax for inspection, filtering, joins, output formats, and file writes. To print this quick guide from the CLI, run:
+
+```bash
+dq -agent-guide
+```
+
+For the detailed language and design contract, see `AGENTS.md`.
+
 ## Operations
 
 ### `describe` - Show columns, types, and row count

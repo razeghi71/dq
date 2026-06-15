@@ -24,6 +24,90 @@ dq "users.csv | filter { name == \"O'Brien\" }"
 
 ---
 
+## MCP / Agent Integration
+
+`dq mcp` starts a stdio Model Context Protocol server for local agent hosts. Messages are newline-delimited JSON-RPC objects on stdin/stdout, as required by the MCP stdio transport:
+
+```
+dq mcp
+```
+
+Host configuration example:
+
+```
+{
+  "mcpServers": {
+    "dq": {
+      "command": "dq",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### MCP surface
+
+The MCP server intentionally exposes the query language directly instead of creating a second API.
+
+| Surface | Name | Purpose |
+|---------|------|---------|
+| Tool | `query` | Run one complete `dq` query string through the same execution path as the CLI |
+| Resource | `dq://guide` | Return `README.md` as Markdown |
+
+There is no separate MCP `describe`, `head`, `sample`, export, or format tool. Use normal query syntax:
+
+```
+users.csv | describe | json
+users.csv | head 5 | json
+users.csv | filter { city == "NY" } | select name | json
+users.csv | csv to out/users.csv
+users.csv | csv with split_rows=50000 to out/
+```
+
+The `query` tool input schema is:
+
+```
+{
+  "query": "users.csv | filter { age > 25 } | select name, city | json"
+}
+```
+
+The query string is exactly the same language accepted by the CLI: source, load options, pipeline operations, and an optional terminal output command. This keeps agent behavior and CLI behavior from drifting.
+
+### Output and errors
+
+For stdout queries, the MCP tool returns the stdout payload as text content. The payload may be table text, CSV, JSON, JSONL, or any other textual output chosen by the query.
+
+For `to path` queries, the file write is the primary result. The MCP tool returns a successful text response with no table payload.
+
+Parse, load, engine, and output failures are returned as MCP tool errors. Examples:
+
+```
+users.csv | csv | head 1          # output command not last -> tool error
+missing.csv | count               # load error
+users.csv | csv to existing.csv   # output error unless overwrite=true
+```
+
+### Stdin and trust model
+
+Stdin source queries are not supported through MCP:
+
+```
+- with format=csv | count
+```
+
+MCP already uses stdio for JSON-RPC transport, so data should be read from files, globs, or future explicit content tools instead.
+
+The MCP server runs with the same OS privileges as the host process. Relative paths and globs resolve from the server process working directory. File output can write wherever that process has permission. Only enable `dq mcp` for trusted workspaces.
+
+### Agent guide
+
+`dq -agent-guide` prints `README.md`. The MCP `dq://guide` resource returns the same content.
+
+`README.md` is intentionally shorter and example-led. `AGENTS.md` remains the detailed language and design contract for agents and maintainers.
+
+---
+
 ## Load options (`with`)
 
 Optional on any source or join file, before `|` or `on`:

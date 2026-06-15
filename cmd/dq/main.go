@@ -8,11 +8,7 @@ import (
 
 	dq "github.com/razeghi71/dq"
 	"github.com/razeghi71/dq/ast"
-	"github.com/razeghi71/dq/engine"
 	"github.com/razeghi71/dq/loader"
-	"github.com/razeghi71/dq/parser"
-	"github.com/razeghi71/dq/table"
-	"github.com/razeghi71/dq/writer"
 )
 
 var (
@@ -21,6 +17,18 @@ var (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "mcp" {
+		if len(os.Args) > 2 {
+			fmt.Fprintf(os.Stderr, "error: dq mcp does not accept extra arguments: %s\n", strings.Join(os.Args[2:], " "))
+			os.Exit(1)
+		}
+		if err := runMCPServer(os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "mcp error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	query, err := parseArgs(os.Args[1:])
 	if err == errHelp {
 		printUsage()
@@ -43,37 +51,8 @@ func main() {
 		query = loader.StdinSource
 	}
 
-	q, err := parser.Parse(query)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "parse error: %v\n", err)
-		os.Exit(1)
-	}
-
-	inputOpts := loader.FromAST(q.Source.Load)
-	input, err := loader.LoadInput(q.Source.Filename, inputOpts, nil)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "load error: %v\n", err)
-		os.Exit(1)
-	}
-
-	result, err := engine.Execute(q, input, func(filename string, opts ast.LoadOptions) (*table.Table, error) {
-		return loader.Load(filename, loader.FromAST(opts))
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-
-	if q.Output.Path != "" {
-		if err := writer.WriteOutput(result, q.Output); err != nil {
-			fmt.Fprintf(os.Stderr, "output error: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	if err := writer.Write(os.Stdout, result, q.Output.Format); err != nil {
-		fmt.Fprintf(os.Stderr, "output error: %v\n", err)
+	if err := runQueryString(query, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
@@ -100,10 +79,14 @@ func parseArgs(args []string) (query string, err error) {
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "usage: dq '<query>'")
+	fmt.Fprintln(os.Stderr, "       dq mcp")
 	fmt.Fprintln(os.Stderr, "example: dq 'users.csv | filter { age > 20 } | select name, age'")
 	fmt.Fprintln(os.Stderr, "         dq 'users.csv | select name, age | csv'")
 	fmt.Fprintln(os.Stderr, "         dq 'logs/**/*.csv | count'")
 	fmt.Fprintln(os.Stderr, "         cat users.csv | dq '- with format=csv | count'")
+	fmt.Fprintln(os.Stderr, "subcommands:")
+	fmt.Fprintln(os.Stderr, "  mcp")
+	fmt.Fprintln(os.Stderr, "        start a stdio MCP server")
 	fmt.Fprintln(os.Stderr, "flags:")
 	fmt.Fprintln(os.Stderr, "  -agent-guide")
 	fmt.Fprintln(os.Stderr, "        print an AI agent friendly guide")

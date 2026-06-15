@@ -284,6 +284,38 @@ func TestAgentGuideMatchesREADME(t *testing.T) {
 	}
 }
 
+func TestCLIAgentGuidePrintsREADME(t *testing.T) {
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, "-agent-guide")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli: %v\n%s", err, out)
+	}
+
+	readme, err := os.ReadFile("../../README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != string(readme) {
+		t.Fatal("-agent-guide output is not README.md")
+	}
+}
+
+func TestCLIHelpMentionsMCPSubcommand(t *testing.T) {
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, "-h")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli: %v\n%s", err, out)
+	}
+	s := string(out)
+	for _, want := range []string{"usage: dq '<query>'", "dq mcp", "subcommands:", "start a stdio MCP server"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("help output missing %q:\n%s", want, s)
+		}
+	}
+}
+
 func TestParseArgsDoubleDash(t *testing.T) {
 	query, err := parseArgs([]string{"--", "- with format=csv | head"})
 	if err != nil {
