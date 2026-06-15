@@ -144,6 +144,8 @@ users.csv | join orders.data with format=csv, compression=gzip on user_id
 
 Format resolution: explicit `format=` → file extension → error (`use with format=...`). Literal gzip double extensions infer both pieces: `.csv.gz` means `format=csv, compression=gzip`, `.json.gz` means `format=json, compression=gzip`, and `.jsonl.gz` means `format=jsonl, compression=gzip`. Use `with compression=gzip` when the compressed file name is ambiguous or extensionless, e.g. `events.data with format=jsonl, compression=gzip`. Stdin (`-`) requires `with format=...`; gzip-compressed stdin must be explicit (`- with format=csv, compression=gzip`). Globs and extensionless paths cannot infer format at parse time — use `with format=...` before any CSV-only option (`header`, `delim`, `allow_jagged_rows`, `ignore_unknown_values`), e.g. `part-* with format=csv, allow_jagged_rows=true`. Use `with format=...` when a glob matches mixed or missing extensions at load time.
 
+Avro and Parquet internal compression codecs are discovered from the file metadata. Do not use load options such as `compression=snappy`, `compression=deflate`, `compression=zstd`, or `compression=brotli` for Avro/Parquet; those are not query syntax. The `compression=` load option means a file-level wrapper and is currently limited to gzip-compressed CSV/JSON/JSONL text inputs, not `.avro.gz` or `.parquet.gz`.
+
 ---
 
 ## Syntax rules

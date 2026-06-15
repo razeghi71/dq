@@ -364,6 +364,8 @@ dq 'data.csv.gz | head 5'
 dq 'data.dat with format=csv, compression=gzip | count'
 ```
 
+Avro and Parquet internal compression codecs are read from the file metadata; do not pass `compression=snappy`, `compression=zstd`, etc. The `compression=` load option is only for file-level gzip wrappers on CSV/JSON/JSONL, not `.avro.gz` or `.parquet.gz`.
+
 If the extension isn't clear, add `with format=...` after the source — or after a join file:
 
 ```bash
