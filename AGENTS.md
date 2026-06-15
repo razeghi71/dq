@@ -150,6 +150,12 @@ Format resolution: explicit `format=` → file extension → error (`use with fo
 
 Every operation uses one of three argument styles. The style is fixed per op — do not mix them.
 
+Comma-separated syntaxes are strict: do **not** write trailing commas. This
+applies to column lists, assignment/binding lists, function argument lists,
+`list(...)` elements, and `struct(...)` fields. For example,
+`upper(name,)`, `coalesce(a, b,)`, `select name,`, `list(1,)`, and
+`struct(a = 1,)` are parse errors.
+
 ### Lists (comma-separated)
 
 Separate columns or sort keys with **commas**. A single item needs no comma.
@@ -168,6 +174,7 @@ Rules:
 * `sort`: prefix `-` on a key for descending (`sort city, -age`).
 * `group`: optional `as nested_name` comes after the column list.
 * `distinct` with no columns deduplicates the full row.
+* A trailing comma is invalid: `select name,` and `sort age,` are parse errors.
 
 ### Bindings (comma-separated, single `=`)
 
@@ -182,6 +189,7 @@ Separate assignments with **commas**. Use a single **`=`** (not `==`).
 Rules:
 * `rename` pairs use `old=new` bindings (same `=` style as `transform`; whitespace around `=` is ignored).
 * `reduce` takes an optional nested column name as a **single identifier** before the assignments: `reduce entries max_age = max(age), count = count()`.
+* A trailing comma is invalid: `transform x = upper(name),` and `rename name=first_name,` are parse errors.
 
 ### Comparisons (double `==`, not comma lists)
 
@@ -214,6 +222,9 @@ op ::= + | - | * | / | == | != | < | > | <= | >= | and | or | not
 * String literals MUST be quoted: `"NY"` (unquoted `NY` is a column reference)
 * Comparisons use `==`: `age == 20` (single `=` is invalid in expressions)
 * Backticks for column names with special chars: `` `first name` ``
+* Function arguments are comma-separated expressions. `func()`, `func(a)`, and
+  `func(a, b)` are valid shapes; `func(a,)`, `func(,a)`, and `func(a,, b)` are
+  parse errors.
 * Null checks: `age is null`, `age is not null` (do NOT use `== null`)
 * Logical `and`, `or`, `not` use SQL three-valued logic (see below)
 

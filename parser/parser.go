@@ -1183,6 +1183,9 @@ func (p *Parser) parseFuncCall(name string) (ast.Expr, error) {
 				break
 			}
 			p.advance() // consume comma
+			if p.peek().Type == lexer.TokenRParen {
+				return nil, fmt.Errorf("in function %s: expected expression after ',', got %s (%q)", name, p.peek().Type, p.peek().Val)
+			}
 		}
 	}
 

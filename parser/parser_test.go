@@ -291,6 +291,77 @@ func TestParseListExprErrors(t *testing.T) {
 	}
 }
 
+func TestParseFunctionCallsWithoutTrailingComma(t *testing.T) {
+	cases := []string{
+		"users.csv | transform x = upper(name)",
+		"users.csv | transform x = coalesce(age, null, 0)",
+		`users.csv | transform label = if(age > 30, "old", "young")`,
+		`users.csv | filter { str_contains(upper(name), "A") }`,
+		`users.csv | filter { matches(trim(name), "^A") }`,
+		"users.csv | group city | reduce total = sum(age), n = count()",
+		`users.csv | transform xs = list(upper(name), coalesce(city, "unknown"))`,
+		`users.csv | transform rec = struct(name = upper(name), city = trim(city))`,
+		`users.csv | transform x = upper(trim(name)) | filter { starts_with(x, "A") }`,
+	}
+
+	for _, query := range cases {
+		t.Run(query, func(t *testing.T) {
+			if _, err := Parse(query); err != nil {
+				t.Fatalf("expected valid function call query, got error: %v", err)
+			}
+		})
+	}
+}
+
+func TestParseFunctionCallTrailingCommaRejectedWithClearError(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{"single_arg_transform", "users.csv | transform x = upper(name,)"},
+		{"multi_arg_transform", "users.csv | transform x = coalesce(age, city, null,)"},
+		{"if_transform", `users.csv | transform label = if(age > 30, "old", "young",)`},
+		{"filter_predicate", `users.csv | filter { str_contains(name, "A",) }`},
+		{"filter_regex", `users.csv | filter { matches(name, "^A",) }`},
+		{"nested_inner_call", "users.csv | transform x = upper(trim(name,))"},
+		{"nested_outer_call", "users.csv | transform x = upper(trim(name),)"},
+		{"list_element_call", `users.csv | transform xs = list(upper(name,), city)`},
+		{"struct_field_call", `users.csv | transform rec = struct(name = upper(name,), city = city)`},
+		{"aggregate_reduce", "users.csv | group city | reduce total = sum(age,)"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse(tc.query)
+			if err == nil {
+				t.Fatalf("expected parse error for %q", tc.query)
+			}
+			if !strings.Contains(err.Error(), "expected expression after ','") {
+				t.Fatalf("expected clear trailing-comma error, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestParseFunctionCallMalformedCommasRejected(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{"leading_comma", "users.csv | transform x = upper(,name)"},
+		{"double_comma", "users.csv | transform x = coalesce(age,, null)"},
+		{"zero_arg_aggregate_with_comma", "users.csv | group city | reduce n = count(,)"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Parse(tc.query); err == nil {
+				t.Fatalf("expected parse error for malformed function call %q", tc.query)
+			}
+		})
+	}
+}
+
 func TestParseReduce(t *testing.T) {
 	q, err := Parse("users.csv | group name | reduce max_age = max(age), count = count()")
 	if err != nil {

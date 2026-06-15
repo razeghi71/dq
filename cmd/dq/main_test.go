@@ -85,6 +85,22 @@ func assertLoadedRowCount(t *testing.T, path string, want int) {
 	}
 }
 
+func cliFlatUserInputFiles() []struct {
+	name string
+	path string
+} {
+	return []struct {
+		name string
+		path string
+	}{
+		{"csv", "../../testdata/users.csv"},
+		{"json", "../../testdata/users.json"},
+		{"jsonl", "../../testdata/users.jsonl"},
+		{"avro", "../../testdata/users.avro"},
+		{"parquet", "../../testdata/users.parquet"},
+	}
+}
+
 func TestCLIStdinWithFormat(t *testing.T) {
 	bin := buildCLI(t)
 	cmd := exec.Command(bin, "- with format=csv | count")
@@ -438,6 +454,98 @@ func TestCLIListConstructionWithListContains(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(out)); got != "name\nBob" {
 		t.Fatalf("expected Bob only, got:\n%s", got)
+	}
+}
+
+func TestCLIFunctionCallsWithoutTrailingCommaAllInputFormats(t *testing.T) {
+	bin := buildCLI(t)
+
+	for _, tc := range cliFlatUserInputFiles() {
+		t.Run(tc.name, func(t *testing.T) {
+			out := runCLIQuery(t, bin, tc.path+` | transform norm = upper(trim(name)), city2 = coalesce(city, "unknown") | filter { starts_with(norm, "A") } | select norm, city2 | json`)
+			var rows []map[string]any
+			if err := json.Unmarshal(out, &rows); err != nil {
+				t.Fatalf("invalid JSON output:\n%s", out)
+			}
+			if len(rows) != 1 {
+				t.Fatalf("expected one Alice row, got %d:\n%s", len(rows), out)
+			}
+			if rows[0]["norm"] != "ALICE" || rows[0]["city2"] != "NY" {
+				t.Fatalf("unexpected transformed row: %#v", rows[0])
+			}
+		})
+	}
+}
+
+func TestCLIFunctionCallsWithoutTrailingCommaAllOutputFormats(t *testing.T) {
+	bin := buildCLI(t)
+	dir := t.TempDir()
+	input := "../../testdata/users.csv"
+	formats := []struct {
+		name string
+		ext  string
+	}{
+		{"table", ".txt"},
+		{"csv", ".csv"},
+		{"json", ".json"},
+		{"jsonl", ".jsonl"},
+		{"avro", ".avro"},
+		{"parquet", ".parquet"},
+	}
+
+	for _, tc := range formats {
+		t.Run(tc.name, func(t *testing.T) {
+			outPath := filepath.Join(dir, "function-calls-"+tc.name+tc.ext)
+			stdout := runCLIQuery(t, bin, input+` | transform norm = upper(trim(name)) | filter { starts_with(norm, "A") } | select norm | `+tc.name+` to `+outPath)
+			assertNoCLIStdout(t, stdout)
+
+			info, err := os.Stat(outPath)
+			if err != nil {
+				t.Fatalf("expected output file %s: %v", outPath, err)
+			}
+			if info.Size() == 0 {
+				t.Fatalf("expected non-empty output file %s", outPath)
+			}
+			if tc.name == "table" {
+				data, err := os.ReadFile(outPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(data), "ALICE") {
+					t.Fatalf("expected table output to contain ALICE, got:\n%s", data)
+				}
+				return
+			}
+			assertLoadedRowCount(t, outPath, 1)
+		})
+	}
+}
+
+func TestCLIFunctionCallTrailingCommaErrorsAllInputFormats(t *testing.T) {
+	bin := buildCLI(t)
+
+	for _, tc := range cliFlatUserInputFiles() {
+		t.Run(tc.name, func(t *testing.T) {
+			out := runCLIQueryExpectError(t, bin, tc.path+` | transform bad = upper(name,) | json`)
+			s := string(out)
+			if !strings.Contains(s, "parse error") || !strings.Contains(s, "expected expression after ','") {
+				t.Fatalf("expected clear trailing-comma parse error, got:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestCLIFunctionCallTrailingCommaDoesNotCreateOutputFile(t *testing.T) {
+	bin := buildCLI(t)
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "bad.csv")
+
+	out := runCLIQueryExpectError(t, bin, "../../testdata/users.csv | transform bad = upper(name,) | csv to "+outPath)
+	if !strings.Contains(string(out), "expected expression after ','") {
+		t.Fatalf("expected clear trailing-comma parse error, got:\n%s", out)
+	}
+	if _, err := os.Stat(outPath); !os.IsNotExist(err) {
+		t.Fatalf("parse failure should not create %s, stat err=%v", outPath, err)
 	}
 }
 

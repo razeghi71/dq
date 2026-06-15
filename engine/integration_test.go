@@ -61,6 +61,22 @@ func loadAndQueryExpectErr(t *testing.T, source, query string) error {
 	return err
 }
 
+func flatUserFormatFiles() []struct {
+	name string
+	file string
+} {
+	return []struct {
+		name string
+		file string
+	}{
+		{"csv", testdataDir + "/users.csv"},
+		{"json", testdataDir + "/users.json"},
+		{"jsonl", testdataDir + "/users.jsonl"},
+		{"avro", testdataDir + "/users.avro"},
+		{"parquet", testdataDir + "/users.parquet"},
+	}
+}
+
 // ============================================================
 // Flat files (users.{csv,json,jsonl,avro,parquet})
 // ============================================================
@@ -252,6 +268,59 @@ func TestIntegrationFlatJSON(t *testing.T) {
 
 func TestIntegrationFlatJSONL(t *testing.T) {
 	assertFlatQueriesSmall(t, testdataDir+"/users.jsonl")
+}
+
+func TestIntegrationFunctionCallsWithoutTrailingCommaAllFlatFormats(t *testing.T) {
+	for _, tc := range flatUserFormatFiles() {
+		t.Run(tc.name, func(t *testing.T) {
+			result := loadAndQuery(t, tc.file, `transform norm = upper(trim(name)), bucket = if(age > 25, coalesce(city, "unknown"), "young") | filter { starts_with(norm, "A") or str_contains(bucket, "N") } | select norm, bucket | sort norm`)
+			if result.NumRows == 0 {
+				t.Fatalf("expected at least one result row for %s", tc.file)
+			}
+			if result.ColIndex("norm") < 0 || result.ColIndex("bucket") < 0 {
+				t.Fatalf("expected norm and bucket columns, got %v", result.Columns)
+			}
+			foundAlice := false
+			normIdx := result.ColIndex("norm")
+			bucketIdx := result.ColIndex("bucket")
+			for i := 0; i < result.NumRows; i++ {
+				if result.GetAt(i, normIdx).Str == "ALICE" && result.GetAt(i, bucketIdx).Str == "NY" {
+					foundAlice = true
+				}
+			}
+			if !foundAlice {
+				t.Fatalf("expected transformed Alice row, got:\n%s", result.String())
+			}
+		})
+	}
+}
+
+func TestIntegrationFunctionCallTrailingCommaParseErrorsAllFlatFormats(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{"transform", "transform bad = upper(name,)"},
+		{"filter", `filter { str_contains(name, "A",) }`},
+		{"nested_call", "transform bad = upper(trim(name,))"},
+		{"reduce_aggregate", "group city | reduce total = sum(age,)"},
+	}
+
+	for _, file := range flatUserFormatFiles() {
+		t.Run(file.name, func(t *testing.T) {
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					_, err := parser.Parse(file.file + " | " + tc.query)
+					if err == nil {
+						t.Fatalf("expected parse error for %s | %s", file.file, tc.query)
+					}
+					if !strings.Contains(err.Error(), "expected expression after ','") {
+						t.Fatalf("expected clear trailing-comma error, got: %v", err)
+					}
+				})
+			}
+		})
+	}
 }
 
 // ============================================================
