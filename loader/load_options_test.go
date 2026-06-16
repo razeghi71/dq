@@ -6,7 +6,155 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/razeghi71/dq/ast"
 )
+
+func TestLoadOptionsDefaultCSVInferRows(t *testing.T) {
+	opts := normalizeOptions(Options{})
+	if opts.InferRows != defaultCSVInferRows {
+		t.Fatalf("default infer rows: got %d, want %d", opts.InferRows, defaultCSVInferRows)
+	}
+	if opts.InferRowsSet {
+		t.Fatal("default infer rows should not mark InferRowsSet")
+	}
+
+	fromAST := FromAST(ast.LoadOptions{})
+	if fromAST.InferRows != defaultCSVInferRows {
+		t.Fatalf("FromAST default infer rows: got %d, want %d", fromAST.InferRows, defaultCSVInferRows)
+	}
+	if fromAST.InferRowsSet {
+		t.Fatal("FromAST default infer rows should not mark InferRowsSet")
+	}
+}
+
+func TestLoadOptionsExplicitInferRowsZeroSurvivesNormalization(t *testing.T) {
+	opts := normalizeOptions(Options{InferRows: 0, InferRowsSet: true})
+	if opts.InferRows != 0 {
+		t.Fatalf("explicit infer rows zero: got %d, want 0", opts.InferRows)
+	}
+	if !opts.InferRowsSet {
+		t.Fatal("explicit infer rows zero should keep InferRowsSet")
+	}
+
+	zero := 0
+	fromAST := FromAST(ast.LoadOptions{InferRows: &zero})
+	if fromAST.InferRows != 0 {
+		t.Fatalf("FromAST explicit infer rows zero: got %d, want 0", fromAST.InferRows)
+	}
+	if !fromAST.InferRowsSet {
+		t.Fatal("FromAST explicit infer rows zero should keep InferRowsSet")
+	}
+}
+
+func TestLoadOptionsExplicitMaxBadRecordsZeroSurvivesFromAST(t *testing.T) {
+	zero := 0
+	opts := FromAST(ast.LoadOptions{MaxBadRecords: &zero})
+	if opts.MaxBadRecords != 0 {
+		t.Fatalf("FromAST explicit max bad records zero: got %d, want 0", opts.MaxBadRecords)
+	}
+	if !opts.MaxBadRecordsSet {
+		t.Fatal("FromAST explicit max bad records zero should set MaxBadRecordsSet")
+	}
+}
+
+func TestLoadOptionsRejectsMaxBadRecordsOnNonCSVWhenExplicitZero(t *testing.T) {
+	_, err := LoadReader(strings.NewReader(`[{"x":1}]`), Options{
+		Format:           "json",
+		MaxBadRecords:    0,
+		MaxBadRecordsSet: true,
+	})
+	if err == nil {
+		t.Fatal("expected max_bad_records=0 to be rejected for json")
+	}
+	if !strings.Contains(err.Error(), "max_bad_records applies only to csv format") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadOptionsRejectsMaxBadRecordsOnNonCSVWhenNonZero(t *testing.T) {
+	_, err := LoadReader(strings.NewReader(`[{"x":1}]`), Options{
+		Format:        "json",
+		MaxBadRecords: 1,
+	})
+	if err == nil {
+		t.Fatal("expected max_bad_records=1 to be rejected for json")
+	}
+	if !strings.Contains(err.Error(), "max_bad_records applies only to csv format") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadOptionsRejectsInferRowsOnNonCSVWhenNonDefault(t *testing.T) {
+	_, err := LoadReader(strings.NewReader(`[{"x":1}]`), Options{
+		Format:    "json",
+		InferRows: 1,
+	})
+	if err == nil {
+		t.Fatal("expected infer_rows=1 to be rejected for json")
+	}
+	if !strings.Contains(err.Error(), "infer_rows applies only to csv format") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadOptionsRejectsInferRowsOnNonCSVWhenExplicitDefault(t *testing.T) {
+	_, err := LoadReader(strings.NewReader(`[{"x":1}]`), Options{
+		Format:       "json",
+		InferRows:    defaultCSVInferRows,
+		InferRowsSet: true,
+	})
+	if err == nil {
+		t.Fatal("expected explicit infer_rows=default to be rejected for json")
+	}
+	if !strings.Contains(err.Error(), "infer_rows applies only to csv format") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadOptionsRejectsInvalidDirectCSVInferenceValues(t *testing.T) {
+	cases := []struct {
+		name string
+		opts Options
+		want string
+	}{
+		{
+			name: "infer_rows_too_negative",
+			opts: Options{Format: "csv", InferRows: -2},
+			want: "infer_rows must be -1 or greater",
+		},
+		{
+			name: "max_bad_records_negative",
+			opts: Options{Format: "csv", MaxBadRecords: -1},
+			want: "max_bad_records must be greater than or equal to 0",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadReader(strings.NewReader("x\n1\n"), tc.opts)
+			if err == nil {
+				t.Fatal("expected load option validation error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadOptionsAllowsExplicitMaxBadRecordsZeroOnCSV(t *testing.T) {
+	tbl, err := LoadReader(strings.NewReader("x\n1\n"), Options{
+		Format:           "csv",
+		MaxBadRecords:    0,
+		MaxBadRecordsSet: true,
+	})
+	if err != nil {
+		t.Fatalf("load csv with explicit max_bad_records=0: %v", err)
+	}
+	if tbl.NumRows != 1 || tbl.Get(0, "x").Int != 1 {
+		t.Fatalf("unexpected table: %s", tbl.String())
+	}
+}
 
 func TestLoadOptionsFormatOverride(t *testing.T) {
 	dir := t.TempDir()

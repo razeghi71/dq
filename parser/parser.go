@@ -264,6 +264,8 @@ var loadOptionKeys = map[string]bool{
 	"delim":                 true,
 	"allow_jagged_rows":     true,
 	"ignore_unknown_values": true,
+	"infer_rows":            true,
+	"max_bad_records":       true,
 }
 
 func (p *Parser) parseOptionalWithClause() (ast.LoadOptions, error) {
@@ -342,6 +344,20 @@ func (p *Parser) parseWithClause() (ast.LoadOptions, error) {
 				return ast.LoadOptions{}, fmt.Errorf("with: delim cannot be empty")
 			}
 			opts.Delim = valTok.Val
+		case "infer_rows", "max_bad_records":
+			if valTok.Type != lexer.TokenInt {
+				return ast.LoadOptions{}, fmt.Errorf("with: %s value must be an integer, got %s", keyTok.Val, valTok.Type)
+			}
+			n, err := strconv.Atoi(valTok.Val)
+			if err != nil {
+				return ast.LoadOptions{}, fmt.Errorf("with: invalid %s value %q", keyTok.Val, valTok.Val)
+			}
+			switch keyTok.Val {
+			case "infer_rows":
+				opts.InferRows = &n
+			default:
+				opts.MaxBadRecords = &n
+			}
 		}
 
 		if p.peek().Type != lexer.TokenComma {

@@ -22,6 +22,18 @@ func writeGlobTestFiles(t *testing.T, dir string, files map[string]string) {
 	}
 }
 
+func requireGlobColumnOrder(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("columns: got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("columns: got %v, want %v", got, want)
+		}
+	}
+}
+
 func TestExpandGlobMatches(t *testing.T) {
 	dir := t.TempDir()
 	writeGlobTestFiles(t, dir, map[string]string{
@@ -575,6 +587,52 @@ func TestLoadGlobCSVExtendedHeaderExplicit(t *testing.T) {
 	}
 	if tbl.Get(1, "email").Str != "bob@x.com" {
 		t.Errorf("row 1 email: got %v", tbl.Get(1, "email"))
+	}
+}
+
+func TestLoadGlobCSVExtendedHeaderSortsNewColumns(t *testing.T) {
+	dir := t.TempDir()
+	writeGlobTestFiles(t, dir, map[string]string{
+		"a.csv": "id,name\n1,Alice\n",
+		"b.csv": "id,name,zebra,apple\n2,Bob,z,a\n",
+	})
+
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireGlobColumnOrder(t, tbl.Columns, []string{"id", "name", "apple", "zebra"})
+	if tbl.Get(0, "apple").Type != table.TypeNull || tbl.Get(0, "zebra").Type != table.TypeNull {
+		t.Fatalf("row 0 extended columns should be null-filled, got %s", tbl.String())
+	}
+	if tbl.Get(1, "apple").Str != "a" || tbl.Get(1, "zebra").Str != "z" {
+		t.Fatalf("row 1 extended values should stay mapped by name, got %s", tbl.String())
+	}
+}
+
+func TestLoadGlobCSVExtendedHeaderInfersTypesAcrossShards(t *testing.T) {
+	dir := t.TempDir()
+	writeGlobTestFiles(t, dir, map[string]string{
+		"a.csv": "id,amount\n1,10\n",
+		"b.csv": "id,amount,score\n2,20,9.5\n",
+	})
+
+	tbl, err := Load(filepath.Join(dir, "*.csv"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireGlobColumnOrder(t, tbl.Columns, []string{"id", "amount", "score"})
+	if got := tbl.Col(tbl.ColIndex("amount")).ColType(); got != table.TypeInt {
+		t.Fatalf("amount type: got %v, want int", got)
+	}
+	if got := tbl.Col(tbl.ColIndex("score")).ColType(); got != table.TypeFloat {
+		t.Fatalf("score type: got %v, want float", got)
+	}
+	if !tbl.Get(0, "score").IsNull() {
+		t.Fatalf("row 0 score should be null-filled, got %s", tbl.Get(0, "score").AsString())
+	}
+	if got := tbl.Get(1, "score").Float; got != 9.5 {
+		t.Fatalf("row 1 score: got %v, want 9.5", got)
 	}
 }
 

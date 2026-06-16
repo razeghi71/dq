@@ -378,6 +378,24 @@ cat users.csv | dq '- with format=csv | count'
 dq 'users.csv | join orders.dat with format=csv, delim=";" on user_id'
 ```
 
+### CSV type inference
+
+CSV has no native column types, so `dq` infers them from the first 50 data rows by default:
+
+```bash
+dq 'sales.csv | describe'
+dq 'sales.csv with infer_rows=-1 | describe'      # scan all rows before choosing types
+dq 'ids.csv with infer_rows=0 | json'             # strings for non-null cells; empty/null stay null
+```
+
+Inference chooses the narrowest type that covers the sampled values: ints stay ints, int+float becomes float, and mixed string/numeric values become string. If a column has no sampled non-null values, including a header-only CSV, it is treated as string. After inference, later rows must fit the chosen type. A mismatch fails the load by default:
+
+```bash
+dq 'sales.csv with max_bad_records=10 | count'    # skip up to 10 bad rows
+```
+
+`max_bad_records` skips whole rows, not individual cells. CSV row-width errors are still controlled separately with `allow_jagged_rows=true` and `ignore_unknown_values=true`.
+
 ### Glob patterns
 
 Primary sources and join files support shell-style globs, including recursive `**`:

@@ -134,54 +134,86 @@ func loadGlobCSV(pattern string, matches []string, opts Options) (*table.Table, 
 		return loadGlobCSVHeaderless(pattern, matches, cfg)
 	}
 
-	var parts []*table.Table
 	var anchor []string
+	var columnSets [][]string
+	var groups []csvRowGroup
 	for _, path := range matches {
 		var (
-			tbl *table.Table
-			err error
+			partCols []string
+			group    csvRowGroup
+			err      error
 		)
 		if len(anchor) == 0 {
-			tbl, err = loadCSV(path, cfg)
+			partCols, group, err = collectCSVFileRows(path, cfg)
 		} else {
-			tbl, err = loadCSVGlobShard(path, anchor, cfg)
+			partCols, group, err = collectCSVGlobShardRows(path, anchor, cfg)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("loading glob %q: loading %q: %w", pattern, path, err)
 		}
-		if len(anchor) == 0 && hasNonEmptyColumnName(tbl.Columns) {
-			anchor = append([]string(nil), tbl.Columns...)
+		if len(anchor) == 0 && hasNonEmptyColumnName(partCols) {
+			anchor = append([]string(nil), partCols...)
 		}
-		parts = append(parts, tbl)
+		if hasNonEmptyColumnName(partCols) {
+			columnSets = append(columnSets, partCols)
+		}
+		groups = append(groups, group)
 	}
-	return table.Concat(parts)
+	columns := table.UnionColumns(columnSets...)
+	return materializeCSVGroups(columns, groups, cfg)
 }
 
 func loadGlobCSVHeaderless(pattern string, matches []string, cfg csvLoadConfig) (*table.Table, error) {
-	var parts []*table.Table
 	var anchor []string
+	var groups []csvRowGroup
 	for _, path := range matches {
 		var (
-			tbl *table.Table
-			err error
+			partCols []string
+			group    csvRowGroup
+			err      error
 		)
 		if len(anchor) == 0 {
-			tbl, err = loadCSV(path, cfg)
+			partCols, group, err = collectCSVFileRows(path, cfg)
 			if err != nil {
 				return nil, fmt.Errorf("loading glob %q: loading %q: %w", pattern, path, err)
 			}
-			if hasNonEmptyColumnName(tbl.Columns) {
-				anchor = append([]string(nil), tbl.Columns...)
+			if hasNonEmptyColumnName(partCols) {
+				anchor = append([]string(nil), partCols...)
 			}
 		} else {
-			tbl, err = loadCSVPositional(path, anchor, cfg)
+			partCols = append([]string(nil), anchor...)
+			group, err = collectCSVPositionalRows(path, anchor, cfg)
 			if err != nil {
 				return nil, fmt.Errorf("loading glob %q: loading %q: %w", pattern, path, err)
 			}
 		}
-		parts = append(parts, tbl)
+		groups = append(groups, group)
 	}
-	return table.Concat(parts)
+	return materializeCSVGroups(anchor, groups, cfg)
+}
+
+func collectCSVFileRows(path string, cfg csvLoadConfig) ([]string, csvRowGroup, error) {
+	f, err := openInputReader(path, cfg.compression)
+	if err != nil {
+		return nil, csvRowGroup{}, err
+	}
+	defer f.Close()
+	cfg.source = path
+	return collectCSVReaderRows(f, cfg)
+}
+
+func collectCSVPositionalRows(path string, columns []string, cfg csvLoadConfig) (csvRowGroup, error) {
+	f, err := openInputReader(path, cfg.compression)
+	if err != nil {
+		return csvRowGroup{}, err
+	}
+	defer f.Close()
+	cfg.source = path
+	rows, err := collectCSVRows(newCSVReader(f, cfg.delim), columns, cfg, 1)
+	if err != nil {
+		return csvRowGroup{}, err
+	}
+	return csvRowGroup{columns: append([]string(nil), columns...), source: path, rows: rows}, nil
 }
 
 // LoadReader reads a table from r. opts.Format must be csv, json, or jsonl.
@@ -217,6 +249,9 @@ type csvLoadConfig struct {
 	allowJaggedRows     bool
 	ignoreUnknownValues bool
 	compression         string
+	inferRows           int
+	maxBadRecords       int
+	source              string
 }
 
 func csvConfigFromOptions(opts Options, columns []string) csvLoadConfig {
@@ -225,7 +260,9 @@ func csvConfigFromOptions(opts Options, columns []string) csvLoadConfig {
 		header:      true,
 		delim:       ',',
 		compression: opts.Compression,
+		inferRows:   opts.InferRows,
 	}
+	cfg.maxBadRecords = opts.MaxBadRecords
 	if opts.Header != nil {
 		cfg.header = *opts.Header
 	}
@@ -264,7 +301,16 @@ func validateOptionsForFormat(opts Options, format string) error {
 		Delim:               opts.Delim,
 		AllowJaggedRows:     opts.AllowJaggedRows,
 		IgnoreUnknownValues: opts.IgnoreUnknownValues,
+		InferRows:           intPtrIfSet(opts.InferRows, opts.InferRowsSet || opts.InferRows != defaultCSVInferRows),
+		MaxBadRecords:       intPtrIfSet(opts.MaxBadRecords, opts.MaxBadRecordsSet || opts.MaxBadRecords != 0),
 	}, format, "")
+}
+
+func intPtrIfSet(v int, set bool) *int {
+	if !set {
+		return nil
+	}
+	return &v
 }
 
 func resolveFormatCompression(filename string, opts Options) (format, compression string) {
@@ -373,17 +419,8 @@ func loadCSV(filename string, cfg csvLoadConfig) (*table.Table, error) {
 		return nil, err
 	}
 	defer f.Close()
+	cfg.source = filename
 	return loadCSVReader(f, cfg)
-}
-
-func loadCSVPositional(path string, columns []string, cfg csvLoadConfig) (*table.Table, error) {
-	f, err := openInputReader(path, cfg.compression)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	return readCSVRows(newCSVReader(f, cfg.delim), columns, cfg, 1)
 }
 
 const utf8BOM = "\ufeff"
@@ -560,59 +597,59 @@ func classifyCSVGlobFirstRow(peek, anchor []string) csvGlobShardKind {
 	return csvGlobShardData
 }
 
-func loadCSVGlobShard(path string, anchor []string, cfg csvLoadConfig) (*table.Table, error) {
+func collectCSVGlobShardRows(path string, anchor []string, cfg csvLoadConfig) ([]string, csvRowGroup, error) {
 	f, err := openInputReader(path, cfg.compression)
 	if err != nil {
-		return nil, err
+		return nil, csvRowGroup{}, err
 	}
 	defer f.Close()
+	cfg.source = path
 
 	reader := newCSVReader(f, cfg.delim)
 
 	peekRowNum := 1
 	peek, err := reader.Read()
 	if err == io.EOF {
-		return table.NewTable(append([]string(nil), anchor...)), nil
+		cols := append([]string(nil), anchor...)
+		return cols, csvRowGroup{columns: cols, source: path}, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("error reading CSV row: %w", err)
+		return nil, csvRowGroup{}, fmt.Errorf("error reading CSV row: %w", err)
 	}
 
 	if isPhysicalBlankCSVLine(peek) {
 		var empty bool
 		peek, peekRowNum, empty, err = readFirstNonBlankCSVRow(reader, 2)
 		if err != nil {
-			return nil, err
+			return nil, csvRowGroup{}, err
 		}
 		if empty {
-			return table.NewTable(append([]string(nil), anchor...)), nil
+			cols := append([]string(nil), anchor...)
+			return cols, csvRowGroup{columns: cols, source: path}, nil
 		}
 	}
 
 	switch classifyCSVGlobFirstRow(peek, anchor) {
 	case csvGlobShardRepeated:
-		return readCSVRows(reader, anchor, cfg, peekRowNum+1)
+		rows, err := collectCSVRows(reader, anchor, cfg, peekRowNum+1)
+		cols := append([]string(nil), anchor...)
+		return cols, csvRowGroup{columns: cols, source: path, rows: rows}, err
 	case csvGlobShardNewHeader:
 		columns := trimmedCSVFields(peek)
-		return readCSVRows(reader, columns, cfg, peekRowNum+1)
+		rows, err := collectCSVRows(reader, columns, cfg, peekRowNum+1)
+		return columns, csvRowGroup{columns: columns, source: path, rows: rows}, err
 	default:
 		if err := validateCSVRecord(peek, len(anchor), cfg, peekRowNum); err != nil {
-			return nil, err
+			return nil, csvRowGroup{}, err
 		}
-		t := table.NewTable(append([]string(nil), anchor...))
-		t.AddRow(csvRowValues(peek, anchor))
-		rest, err := readCSVRows(reader, anchor, cfg, peekRowNum+1)
+		rows := []csvRawRow{newCSVRawRow(peek, peekRowNum, false)}
+		rest, err := collectCSVRows(reader, anchor, cfg, peekRowNum+1)
 		if err != nil {
-			return nil, err
+			return nil, csvRowGroup{}, err
 		}
-		for row := 0; row < rest.NumRows; row++ {
-			vals := make([]table.Value, len(anchor))
-			for i, col := range anchor {
-				vals[i] = rest.Get(row, col)
-			}
-			t.AddRow(vals)
-		}
-		return t, nil
+		rows = append(rows, rest...)
+		cols := append([]string(nil), anchor...)
+		return cols, csvRowGroup{columns: cols, source: path, rows: rows}, nil
 	}
 }
 
@@ -647,8 +684,20 @@ func validateCSVRecord(record []string, numColumns int, cfg csvLoadConfig, rowNu
 	)
 }
 
-func readCSVRows(reader *csv.Reader, columns []string, cfg csvLoadConfig, startRow int) (*table.Table, error) {
-	t := table.NewTable(append([]string(nil), columns...))
+type csvRawRow struct {
+	record []string
+	parsed []table.Value
+	rowNum int
+}
+
+type csvRowGroup struct {
+	columns []string
+	source  string
+	rows    []csvRawRow
+}
+
+func collectCSVRows(reader *csv.Reader, columns []string, cfg csvLoadConfig, startRow int) ([]csvRawRow, error) {
+	var rows []csvRawRow
 	rowNum := startRow
 	for {
 		record, err := reader.Read()
@@ -661,10 +710,247 @@ func readCSVRows(reader *csv.Reader, columns []string, cfg csvLoadConfig, startR
 		if err := validateCSVRecord(record, len(columns), cfg, rowNum); err != nil {
 			return nil, err
 		}
-		t.AddRow(csvRowValues(record, columns))
+		rows = append(rows, newCSVRawRow(record, rowNum, false))
 		rowNum++
 	}
+	return rows, nil
+}
+
+func newCSVRawRow(record []string, rowNum int, keepParsed bool) csvRawRow {
+	copied := append([]string(nil), record...)
+	row := csvRawRow{record: copied, rowNum: rowNum}
+	if keepParsed {
+		row.parsed = parseCSVRecordValues(copied)
+	}
+	return row
+}
+
+func parseCSVRecordValues(record []string) []table.Value {
+	values := make([]table.Value, len(record))
+	for i, cell := range record {
+		values[i] = parseValue(strings.TrimSpace(cell))
+	}
+	return values
+}
+
+func materializeCSVGroups(columns []string, groups []csvRowGroup, cfg csvLoadConfig) (*table.Table, error) {
+	types := inferCSVColumnTypes(columns, groups, cfg.inferRows)
+	t := table.NewTableWithTypes(append([]string(nil), columns...), types)
+	badRecords := 0
+	for _, group := range groups {
+		mapping := csvColumnMapping(columns, group.columns)
+		for _, row := range group.rows {
+			if err := addCSVTypedRow(t, row, mapping, group.source, columns, types, cfg, &badRecords); err != nil {
+				return nil, err
+			}
+		}
+	}
 	return t, nil
+}
+
+// CSV inference intentionally parallels parseValue and table widening without
+// reusing table.Append: inference chooses a fixed load schema first, then
+// materialization strictly converts every post-inference cell to that schema.
+func inferCSVColumnTypes(columns []string, groups []csvRowGroup, inferRows int) []table.ValueType {
+	types := make([]table.ValueType, len(columns))
+	if inferRows == 0 {
+		for i := range types {
+			types[i] = table.TypeString
+		}
+		return types
+	}
+	sampled := 0
+	for _, group := range groups {
+		mapping := csvColumnMapping(columns, group.columns)
+		for _, row := range group.rows {
+			if inferRows > 0 && sampled >= inferRows {
+				break
+			}
+			applyCSVInferenceRow(types, mapping, row)
+			sampled++
+		}
+		if inferRows > 0 && sampled >= inferRows {
+			break
+		}
+	}
+	for i := range types {
+		if types[i] == table.TypeNull {
+			types[i] = table.TypeString
+		}
+	}
+	return types
+}
+
+func applyCSVInferenceRow(types []table.ValueType, mapping []int, row csvRawRow) {
+	for srcIdx, dst := range mapping {
+		if dst < 0 || srcIdx >= len(row.record) {
+			continue
+		}
+		v := rowValueForInference(row, srcIdx)
+		if v.Type == table.TypeNull {
+			continue
+		}
+		types[dst] = csvWidenInferredType(types[dst], v.Type)
+	}
+}
+
+func rowValueForInference(row csvRawRow, srcIdx int) table.Value {
+	if srcIdx < len(row.parsed) {
+		return row.parsed[srcIdx]
+	}
+	return parseValue(strings.TrimSpace(row.record[srcIdx]))
+}
+
+func csvWidenInferredType(existing, incoming table.ValueType) table.ValueType {
+	if existing == table.TypeNull {
+		return incoming
+	}
+	if existing == incoming {
+		return existing
+	}
+	if (existing == table.TypeInt && incoming == table.TypeFloat) || (existing == table.TypeFloat && incoming == table.TypeInt) {
+		return table.TypeFloat
+	}
+	return table.TypeString
+}
+
+func addCSVTypedRow(t *table.Table, row csvRawRow, mapping []int, source string, columns []string, types []table.ValueType, cfg csvLoadConfig, badRecords *int) error {
+	vals, err := csvTypedRowValues(row, mapping, source, columns, types)
+	if err != nil {
+		(*badRecords)++
+		if *badRecords > cfg.maxBadRecords {
+			return err
+		}
+		return nil
+	}
+	t.AddRow(vals)
+	return nil
+}
+
+func csvTypedRowValues(row csvRawRow, mapping []int, source string, columns []string, types []table.ValueType) ([]table.Value, error) {
+	vals := make([]table.Value, len(columns))
+	for srcIdx, dst := range mapping {
+		if dst < 0 || srcIdx >= len(row.record) {
+			continue
+		}
+		cell := strings.TrimSpace(row.record[srcIdx])
+		v, err := csvCellValueAsType(row, srcIdx, cell, types[dst])
+		if err != nil {
+			return nil, csvTypeError(row, source, columns[dst], types[dst], cell)
+		}
+		vals[dst] = v
+	}
+	return vals, nil
+}
+
+func csvCellValueAsType(row csvRawRow, srcIdx int, cell string, typ table.ValueType) (table.Value, error) {
+	if srcIdx >= len(row.parsed) || typ == table.TypeString {
+		return parseCSVCellAsType(cell, typ)
+	}
+	return coerceParsedCSVValue(row.parsed[srcIdx], typ), nil
+}
+
+func coerceParsedCSVValue(v table.Value, typ table.ValueType) table.Value {
+	if v.Type == table.TypeNull {
+		return table.Null()
+	}
+	// Parsed sample rows already participated in type inference, so the only
+	// sample-time coercion needed is int -> float for mixed numeric samples.
+	if typ == table.TypeFloat && v.Type == table.TypeInt {
+		return table.FloatVal(float64(v.Int))
+	}
+	return v
+}
+
+func csvColumnMapping(columns, rowColumns []string) []int {
+	mapping := make([]int, len(rowColumns))
+	if sameColumns(columns, rowColumns) {
+		for i := range rowColumns {
+			mapping[i] = i
+		}
+		return mapping
+	}
+	index := make(map[string]int, len(columns))
+	for i, col := range columns {
+		index[col] = i
+	}
+	for i, col := range rowColumns {
+		dst, ok := index[col]
+		if !ok {
+			mapping[i] = -1
+		} else {
+			mapping[i] = dst
+		}
+	}
+	return mapping
+}
+
+func sameColumns(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func parseCSVCellAsType(cell string, typ table.ValueType) (table.Value, error) {
+	if cell == "" || strings.EqualFold(cell, "null") {
+		return table.Null(), nil
+	}
+	switch typ {
+	case table.TypeString:
+		return table.StrVal(cell), nil
+	case table.TypeInt:
+		v, err := strconv.ParseInt(cell, 10, 64)
+		if err != nil {
+			return table.Null(), err
+		}
+		return table.IntVal(v), nil
+	case table.TypeFloat:
+		v, err := strconv.ParseFloat(cell, 64)
+		if err != nil {
+			return table.Null(), err
+		}
+		return table.FloatVal(v), nil
+	case table.TypeBool:
+		switch strings.ToLower(cell) {
+		case "true":
+			return table.BoolVal(true), nil
+		case "false":
+			return table.BoolVal(false), nil
+		default:
+			return table.Null(), fmt.Errorf("invalid bool")
+		}
+	default:
+		return parseValue(cell), nil
+	}
+}
+
+func csvTypeError(row csvRawRow, source, column string, typ table.ValueType, value string) error {
+	loc := fmt.Sprintf("csv row %d", row.rowNum)
+	if source != "" {
+		loc = fmt.Sprintf("%s: %s", source, loc)
+	}
+	return fmt.Errorf("%s: column %q expected %s, got %q", loc, column, csvTypeName(typ), value)
+}
+
+func csvTypeName(typ table.ValueType) string {
+	switch typ {
+	case table.TypeInt:
+		return "int"
+	case table.TypeFloat:
+		return "float"
+	case table.TypeString:
+		return "string"
+	case table.TypeBool:
+		return "bool"
+	default:
+		return "null"
+	}
 }
 
 func hasNonEmptyColumnName(columns []string) bool {
@@ -677,65 +963,157 @@ func hasNonEmptyColumnName(columns []string) bool {
 }
 
 func loadCSVReader(r io.Reader, cfg csvLoadConfig) (*table.Table, error) {
-	reader := newCSVReader(r, cfg.delim)
+	if cfg.inferRows == -1 {
+		columns, group, err := collectCSVReaderRows(r, cfg)
+		if err != nil {
+			return nil, err
+		}
+		return materializeCSVGroups(columns, []csvRowGroup{group}, cfg)
+	}
+	return loadCSVReaderStreaming(r, cfg)
+}
 
+func loadCSVReaderStreaming(r io.Reader, cfg csvLoadConfig) (*table.Table, error) {
+	reader := newCSVReader(r, cfg.delim)
+	columns, buffered, startRow, empty, err := prepareCSVReader(reader, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if empty {
+		return table.NewTable(nil), nil
+	}
+
+	sampleRows := buffered
+	if cfg.inferRows > 0 {
+		rowNum := startRow
+		for len(sampleRows) < cfg.inferRows {
+			record, err := reader.Read()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return nil, fmt.Errorf("error reading CSV row: %w", err)
+			}
+			if err := validateCSVRecord(record, len(columns), cfg, rowNum); err != nil {
+				return nil, err
+			}
+			sampleRows = append(sampleRows, newCSVRawRow(record, rowNum, true))
+			rowNum++
+		}
+		startRow = rowNum
+	}
+
+	group := csvRowGroup{columns: append([]string(nil), columns...), source: cfg.source, rows: sampleRows}
+	types := inferCSVColumnTypes(columns, []csvRowGroup{group}, cfg.inferRows)
+	t := table.NewTableWithTypes(append([]string(nil), columns...), types)
+	mapping := csvColumnMapping(columns, columns)
+	badRecords := 0
+	for _, row := range sampleRows {
+		if err := addCSVTypedRow(t, row, mapping, cfg.source, columns, types, cfg, &badRecords); err != nil {
+			return nil, err
+		}
+	}
+
+	rowNum := startRow
+	for {
+		record, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("error reading CSV row: %w", err)
+		}
+		if err := validateCSVRecord(record, len(columns), cfg, rowNum); err != nil {
+			return nil, err
+		}
+		row := csvRawRow{record: record, rowNum: rowNum}
+		if err := addCSVTypedRow(t, row, mapping, cfg.source, columns, types, cfg, &badRecords); err != nil {
+			return nil, err
+		}
+		rowNum++
+	}
+	return t, nil
+}
+
+func prepareCSVReader(reader *csv.Reader, cfg csvLoadConfig) (columns []string, buffered []csvRawRow, startRow int, empty bool, err error) {
 	if len(cfg.columns) == 0 && !cfg.header {
 		first, firstRowNum, empty, err := readFirstNonBlankCSVRow(reader, 1)
 		if err != nil {
-			return nil, err
+			return nil, nil, 0, false, err
 		}
 		if empty {
-			return table.NewTable(nil), nil
+			return nil, nil, 0, true, nil
 		}
-		cfg.columns = synthesizeColumns(len(first))
-		if err := validateCSVRecord(first, len(cfg.columns), cfg, firstRowNum); err != nil {
-			return nil, err
+		columns = synthesizeColumns(len(first))
+		if err := validateCSVRecord(first, len(columns), cfg, firstRowNum); err != nil {
+			return nil, nil, 0, false, err
 		}
-		t := table.NewTable(cfg.columns)
-		t.AddRow(csvRowValues(first, cfg.columns))
-		rest, err := readCSVRows(reader, cfg.columns, cfg, firstRowNum+1)
-		if err != nil {
-			return nil, err
-		}
-		for row := 0; row < rest.NumRows; row++ {
-			vals := make([]table.Value, len(cfg.columns))
-			for i, col := range cfg.columns {
-				vals[i] = rest.Get(row, col)
-			}
-			t.AddRow(vals)
-		}
-		return t, nil
+		buffered = []csvRawRow{newCSVRawRow(first, firstRowNum, cfg.inferRows > 0)}
+		return columns, buffered, firstRowNum + 1, false, nil
 	}
 
 	if len(cfg.columns) == 0 && cfg.header {
 		header, headerRowNum, empty, err := readFirstNonBlankCSVRow(reader, 1)
 		if err != nil {
-			return nil, err
+			return nil, nil, 0, false, err
 		}
 		if empty {
-			return table.NewTable(nil), nil
+			return nil, nil, 0, true, nil
 		}
-		cfg.columns = trimmedCSVFields(header)
-		t, err := readCSVRows(reader, cfg.columns, cfg, headerRowNum+1)
-		if err != nil {
-			return nil, err
-		}
-		return t, nil
+		return trimmedCSVFields(header), nil, headerRowNum + 1, false, nil
 	}
 
-	return readCSVRows(reader, cfg.columns, cfg, 2)
+	return append([]string(nil), cfg.columns...), nil, 2, false, nil
 }
 
-func csvRowValues(record, columns []string) []table.Value {
-	vals := make([]table.Value, len(columns))
-	for i := range columns {
-		if i < len(record) {
-			vals[i] = parseValue(strings.TrimSpace(record[i]))
-		} else {
-			vals[i] = table.Null()
+func collectCSVReaderRows(r io.Reader, cfg csvLoadConfig) ([]string, csvRowGroup, error) {
+	reader := newCSVReader(r, cfg.delim)
+
+	if len(cfg.columns) == 0 && !cfg.header {
+		first, firstRowNum, empty, err := readFirstNonBlankCSVRow(reader, 1)
+		if err != nil {
+			return nil, csvRowGroup{}, err
 		}
+		if empty {
+			return nil, csvRowGroup{source: cfg.source}, nil
+		}
+		cfg.columns = synthesizeColumns(len(first))
+		if err := validateCSVRecord(first, len(cfg.columns), cfg, firstRowNum); err != nil {
+			return nil, csvRowGroup{}, err
+		}
+		rows := []csvRawRow{newCSVRawRow(first, firstRowNum, false)}
+		rest, err := collectCSVRows(reader, cfg.columns, cfg, firstRowNum+1)
+		if err != nil {
+			return nil, csvRowGroup{}, err
+		}
+		rows = append(rows, rest...)
+		cols := append([]string(nil), cfg.columns...)
+		return cols, csvRowGroup{columns: cols, source: cfg.source, rows: rows}, nil
 	}
-	return vals
+
+	if len(cfg.columns) == 0 && cfg.header {
+		header, headerRowNum, empty, err := readFirstNonBlankCSVRow(reader, 1)
+		if err != nil {
+			return nil, csvRowGroup{}, err
+		}
+		if empty {
+			return nil, csvRowGroup{source: cfg.source}, nil
+		}
+		cfg.columns = trimmedCSVFields(header)
+		rows, err := collectCSVRows(reader, cfg.columns, cfg, headerRowNum+1)
+		if err != nil {
+			return nil, csvRowGroup{}, err
+		}
+		cols := append([]string(nil), cfg.columns...)
+		return cols, csvRowGroup{columns: cols, source: cfg.source, rows: rows}, nil
+	}
+
+	rows, err := collectCSVRows(reader, cfg.columns, cfg, 2)
+	if err != nil {
+		return nil, csvRowGroup{}, err
+	}
+	cols := append([]string(nil), cfg.columns...)
+	return cols, csvRowGroup{columns: cols, source: cfg.source, rows: rows}, nil
 }
 
 // parseValue infers the type of a CSV cell value.

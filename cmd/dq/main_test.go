@@ -9,12 +9,29 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
 	dq "github.com/razeghi71/dq"
 	"github.com/razeghi71/dq/loader"
 )
+
+var (
+	cliBuildOnce sync.Once
+	cliBuildBin  string
+	cliBuildDir  string
+	cliBuildOut  []byte
+	cliBuildErr  error
+)
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if cliBuildDir != "" {
+		_ = os.RemoveAll(cliBuildDir)
+	}
+	os.Exit(code)
+}
 
 func gzipCLIBytes(t *testing.T, content string) []byte {
 	t.Helper()
@@ -60,12 +77,18 @@ func deflateCLIBytes(t *testing.T, content string) []byte {
 
 func buildCLI(t *testing.T) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "dq")
-	out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput()
-	if err != nil {
-		t.Fatalf("build cli: %v\n%s", err, out)
+	cliBuildOnce.Do(func() {
+		cliBuildDir, cliBuildErr = os.MkdirTemp("", "dq-cli-test-*")
+		if cliBuildErr != nil {
+			return
+		}
+		cliBuildBin = filepath.Join(cliBuildDir, "dq")
+		cliBuildOut, cliBuildErr = exec.Command("go", "build", "-o", cliBuildBin, ".").CombinedOutput()
+	})
+	if cliBuildErr != nil {
+		t.Fatalf("build cli: %v\n%s", cliBuildErr, cliBuildOut)
 	}
-	return bin
+	return cliBuildBin
 }
 
 func runCLIQuery(t *testing.T, bin, query string) []byte {

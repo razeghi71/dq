@@ -467,6 +467,25 @@ func NewTable(columns []string) *Table {
 	return t
 }
 
+// NewTableWithTypes creates an empty table with fixed initial column storage
+// types. Loaders use this after schema inference so all-null columns can still
+// report the inferred type.
+func NewTableWithTypes(columns []string, types []ValueType) *Table {
+	t := &Table{
+		Columns: make([]string, len(columns)),
+		cols:    make([]*Column, len(columns)),
+	}
+	copy(t.Columns, columns)
+	for i, name := range columns {
+		typ := TypeNull
+		if i < len(types) {
+			typ = types[i]
+		}
+		t.cols[i] = &Column{name: name, typ: typ}
+	}
+	return t
+}
+
 // ColIndex returns the index of a column by name, or -1.
 func (t *Table) ColIndex(name string) int {
 	for i, c := range t.Columns {
@@ -643,22 +662,22 @@ func (t *Table) ShallowClone(newColNames []string) *Table {
 	return result
 }
 
-// Concat combines tables by column union. Columns from the first table keep
-// their order; new columns from later tables are appended in sorted order.
-// Missing values are null-filled. Rows are copied via AddRow so column types widen.
-func Concat(tables []*Table) (*Table, error) {
-	if len(tables) == 0 {
-		return nil, fmt.Errorf("concat: no tables")
+// UnionColumns combines column sets using the same ordering policy as table
+// concatenation: the first set keeps its order, and new columns from later sets
+// are appended in sorted order.
+func UnionColumns(columnSets ...[]string) []string {
+	if len(columnSets) == 0 {
+		return nil
 	}
 
-	firstCols := append([]string(nil), tables[0].Columns...)
+	firstCols := append([]string(nil), columnSets[0]...)
 	firstSet := make(map[string]bool, len(firstCols))
 	for _, col := range firstCols {
 		firstSet[col] = true
 	}
 	extraSet := make(map[string]bool)
-	for _, tbl := range tables[1:] {
-		for _, col := range tbl.Columns {
+	for _, columns := range columnSets[1:] {
+		for _, col := range columns {
 			if !firstSet[col] && !extraSet[col] {
 				extraSet[col] = true
 			}
@@ -669,7 +688,22 @@ func Concat(tables []*Table) (*Table, error) {
 		extra = append(extra, col)
 	}
 	sort.Strings(extra)
-	unionCols := append(firstCols, extra...)
+	return append(firstCols, extra...)
+}
+
+// Concat combines tables by column union. Columns from the first table keep
+// their order; new columns from later tables are appended in sorted order.
+// Missing values are null-filled. Rows are copied via AddRow so column types widen.
+func Concat(tables []*Table) (*Table, error) {
+	if len(tables) == 0 {
+		return nil, fmt.Errorf("concat: no tables")
+	}
+
+	columnSets := make([][]string, len(tables))
+	for i, tbl := range tables {
+		columnSets[i] = tbl.Columns
+	}
+	unionCols := UnionColumns(columnSets...)
 
 	result := NewTable(unionCols)
 	for _, tbl := range tables {

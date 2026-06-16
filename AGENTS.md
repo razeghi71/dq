@@ -7,7 +7,7 @@ dq 'filename | op [args] | op2 [args] ... [| output_format]'
 ```
 
 * The entire query is passed as a **single-quoted string** to avoid shell interpretation of `|`, `{`, `}`, `>`, `<`, and backticks.
-* Takes a file (csv, avro, json, etc.) as input. Gzip-, Zstandard-, and zlib-wrapped deflate-compressed CSV/JSON/JSONL text files are supported via double extensions such as `.csv.gz` / `.jsonl.zst` / `.jsonl.deflate` or explicit `with compression=gzip` / `with compression=zstd` / `with compression=deflate`. Globs are supported (`logs/**/*.csv`, `orders/part-*.csv`) — matched files are concatenated. All matched files are loaded into memory before the pipeline runs. A zero-byte CSV (or BOM-/whitespace-only with no data rows) loads as an empty table (0 columns, 0 rows). Empty glob shards are skipped when establishing the column schema; the first non-empty shard defines the anchor columns. CSV rows must match the schema width by default (same rules for single files and glob shards); use `with allow_jagged_rows=true` for missing trailing columns (null-filled) and `with ignore_unknown_values=true` to drop extra columns. On glob sources, CSV-only options require `with format=csv` at parse time (e.g. `logs/part-* with format=csv, allow_jagged_rows=true`) — format cannot be inferred from the pattern alone. CSV glob shards without a detectable header row are read positionally under the first file's columns. Extended headers require shared column names plus new lowercase identifiers (`email`, not `Email`); renamed columns with no anchor overlap are positional.
+* Takes a file (csv, avro, json, etc.) as input. Gzip-, Zstandard-, and zlib-wrapped deflate-compressed CSV/JSON/JSONL text files are supported via double extensions such as `.csv.gz` / `.jsonl.zst` / `.jsonl.deflate` or explicit `with compression=gzip` / `with compression=zstd` / `with compression=deflate`. CSV column types are inferred from the first 50 data rows by default; use `with infer_rows=-1` to infer from all rows, `with infer_rows=0` to load all non-null CSV cells as strings, and `with max_bad_records=N` to skip up to `N` post-inference type-conversion failures. Globs are supported (`logs/**/*.csv`, `orders/part-*.csv`) — matched files are concatenated. All matched files are loaded into memory before the pipeline runs. A zero-byte CSV (or BOM-/whitespace-only with no data rows) loads as an empty table (0 columns, 0 rows). Empty glob shards are skipped when establishing the column schema; the first non-empty shard defines the anchor columns. CSV rows must match the schema width by default (same rules for single files and glob shards); use `with allow_jagged_rows=true` for missing trailing columns (null-filled) and `with ignore_unknown_values=true` to drop extra columns. On glob sources, CSV-only options require `with format=csv` at parse time (e.g. `logs/part-* with format=csv, allow_jagged_rows=true`) — format cannot be inferred from the pattern alone. CSV glob shards without a detectable header row are read positionally under the first file's columns. Extended headers require shared column names plus new lowercase identifiers (`email`, not `Email`); renamed columns with no anchor overlap are positional.
 * Optional **`with key=value, ...`** on the primary source or join file sets load format, compression, and CSV options (see Load options below).
 * Optional **output format command** at the end of the query (`table`, `csv`, `json`, `jsonl`, `avro`, `parquet`); omitted means pretty table output. Output commands can write to a path with `to`, and can split files with `with split_rows=N`.
 * Everything is **pipe-based** — each op takes a table and returns a table.
@@ -131,6 +131,9 @@ events.data with format=jsonl, compression=zstd | count
 events.data with format=jsonl, compression=deflate | count
 logs/part-* with format=csv | count
 logs/part-* with format=csv, allow_jagged_rows=true, ignore_unknown_values=true | count
+sales.csv with infer_rows=-1 | describe
+ids.csv with infer_rows=0 | json
+sales.csv with max_bad_records=10 | count
 - with format=csv | filter { age > 25 }
 - with format=csv, compression=gzip | count
 - with format=jsonl, compression=zstd | count
@@ -149,8 +152,44 @@ users.csv | join orders.data with format=csv, compression=deflate on user_id
 | `delim` | csv | string, e.g. `delim=";"` | Default `,`; only the first character is used as the separator |
 | `allow_jagged_rows` | csv | `true`, `false` | Default `false`; when `true`, rows with fewer fields than the schema get null-filled trailing columns |
 | `ignore_unknown_values` | csv | `true`, `false` | Default `false`; when `true`, extra fields beyond the schema are dropped |
+| `infer_rows` | csv | `-1` or integer `>= 0` | Default `50`; number of data rows sampled for CSV type inference. `-1` scans all data rows; `0` disables inference and loads every non-null CSV cell as `TypeString` |
+| `max_bad_records` | csv | integer `>= 0` | Default `0`; maximum number of post-inference type-conversion failures to skip. Each bad record skips the whole row |
 
-Format resolution: explicit `format=` → file extension → error (`use with format=...`). Literal gzip, zstd, and zlib-wrapped deflate double extensions infer both pieces: `.csv.gz` means `format=csv, compression=gzip`, `.jsonl.zst` means `format=jsonl, compression=zstd`, `.json.zstd` means `format=json, compression=zstd`, `.csv.deflate` means `format=csv, compression=deflate`, and `.jsonl.zlib` means `format=jsonl, compression=deflate`. `compression=deflate` means a zlib-wrapped deflate stream, not raw RFC1951 DEFLATE bytes. Use explicit `with compression=...` when the compressed file name is ambiguous or extensionless, e.g. `events.data with format=jsonl, compression=deflate`. Explicit `format=` overrides the inner suffix while suffix-based compression inference still applies, so `events.csv.deflate with format=jsonl` reads zlib-wrapped deflate JSONL. Stdin (`-`) requires `with format=...`; compressed stdin must be explicit (`- with format=csv, compression=gzip`, `- with format=jsonl, compression=zstd`, or `- with format=jsonl, compression=deflate`). Globs and extensionless paths cannot infer format at parse time — use `with format=...` before any CSV-only option (`header`, `delim`, `allow_jagged_rows`, `ignore_unknown_values`), e.g. `part-* with format=csv, allow_jagged_rows=true`. Use `with format=...` when a glob matches mixed or missing extensions at load time.
+Format resolution: explicit `format=` → file extension → error (`use with format=...`). Literal gzip, zstd, and zlib-wrapped deflate double extensions infer both pieces: `.csv.gz` means `format=csv, compression=gzip`, `.jsonl.zst` means `format=jsonl, compression=zstd`, `.json.zstd` means `format=json, compression=zstd`, `.csv.deflate` means `format=csv, compression=deflate`, and `.jsonl.zlib` means `format=jsonl, compression=deflate`. `compression=deflate` means a zlib-wrapped deflate stream, not raw RFC1951 DEFLATE bytes. Use explicit `with compression=...` when the compressed file name is ambiguous or extensionless, e.g. `events.data with format=jsonl, compression=deflate`. Explicit `format=` overrides the inner suffix while suffix-based compression inference still applies, so `events.csv.deflate with format=jsonl` reads zlib-wrapped deflate JSONL. Stdin (`-`) requires `with format=...`; compressed stdin must be explicit (`- with format=csv, compression=gzip`, `- with format=jsonl, compression=zstd`, or `- with format=jsonl, compression=deflate`). Globs and extensionless paths cannot infer format at parse time — use `with format=...` before any CSV-only option (`header`, `delim`, `allow_jagged_rows`, `ignore_unknown_values`, `infer_rows`, `max_bad_records`), e.g. `part-* with format=csv, allow_jagged_rows=true`. Use `with format=...` when a glob matches mixed or missing extensions at load time.
+
+### CSV type inference and bad records
+
+CSV cells are text, but `dq` loads CSV columns into typed table storage. The loader uses a DuckDB-style covering-type inference pass:
+
+1. Establish the CSV column schema and collect data rows.
+2. Infer each column from the first `infer_rows` data rows (`50` by default). `infer_rows=-1` samples all data rows. `infer_rows=0` skips inference and makes every column `TypeString`.
+3. Materialize every row against the fixed inferred schema.
+
+Inference chooses the narrowest compatible type that covers all sampled non-null values:
+
+| Sampled non-null values | Inferred type |
+|-------------------------|---------------|
+| no non-null values | `TypeString` |
+| all ints | `TypeInt` |
+| ints + floats, or all floats | `TypeFloat` |
+| all booleans | `TypeBool` |
+| strings mixed with anything | `TypeString` |
+| booleans mixed with numeric values | `TypeString` |
+
+This is not majority voting and not first-value strictness. If one sampled value is a string in an otherwise numeric-looking column, the column infers as `TypeString`.
+
+Numeric-looking values are parsed as numbers under normal inference, so text identifiers such as `007` load as integer `7`. Use `infer_rows=0` when CSV values must remain strings, such as zip codes, account IDs, or other identifiers with leading zeros.
+
+Columns with no sampled non-null values also infer as `TypeString`. This includes all-null CSV columns and header-only CSVs such as `a,b\n`: `describe` reports those columns as `string` at load time, with `row_count` reflecting the actual number of data rows.
+
+After inference, non-null values must parse as the inferred type. Empty cells and case-insensitive `null` remain null. A type-conversion failure is a bad record:
+
+* `max_bad_records=0` (default) fails the load on the first bad record.
+* `max_bad_records=N` skips up to `N` bad records; each bad record skips the whole row.
+* If the next bad record exceeds the limit, loading fails with the source path (when available), physical CSV row number, column name, expected type, and offending value.
+* `max_bad_records` does not apply to CSV row-width errors. Missing and extra fields are still controlled by `allow_jagged_rows=true` and `ignore_unknown_values=true`.
+
+For glob CSV sources, inference samples data rows across the deterministic expanded-file order after repeated headers and empty shards are handled. Header rows do not count toward `infer_rows`.
 
 Avro and Parquet internal compression codecs are discovered from the file metadata. Do not use load options such as `compression=snappy`, `compression=deflate`, `compression=zstd`, or `compression=brotli` for Avro/Parquet; those are not Avro/Parquet query syntax. The `compression=` load option means a file-level wrapper and is currently limited to gzip-, zstd-, or zlib-wrapped deflate-compressed CSV/JSON/JSONL text inputs, not `.avro.gz`, `.avro.zst`, `.avro.deflate`, `.parquet.gz`, `.parquet.zst`, or `.parquet.deflate`.
 
@@ -290,8 +329,9 @@ Rules:
 * `row_count` repeats the current table row count on every metadata row.
 * Type names are `null`, `int`, `float`, `string`, `bool`, `list`, and `record`.
 * Types are current table storage types after preceding pipeline stages, not source-declared types and not historical types from earlier stages.
+* Source loaders may set concrete storage types even when no non-null values exist. CSV inference uses `TypeString` for columns with no sampled non-null values, so freshly loaded all-null CSV columns and header-only CSV columns report `string`.
 * If a column widened to `string` and rows survive a later rebuilding operation, copied values remain `string`.
-* If no rows survive a rebuilding operation such as `filter { false }`, the rebuilt columns have no non-null values and report `null`.
+* If no rows survive a rebuilding operation such as `filter { false }`, the rebuilt columns have no surviving values to establish a type and currently report `null`. This is distinct from load-time CSV inference, where the loader may have already established a concrete storage type.
 * A zero-column table returns zero metadata rows. Use `count` if row cardinality must be visible for a zero-column table.
 * Nested values are reported only at the top level as `list` or `record`; `describe` does not recursively expand nested schemas.
 

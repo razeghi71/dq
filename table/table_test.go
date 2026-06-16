@@ -5,6 +5,18 @@ import (
 	"testing"
 )
 
+func requireColumnOrder(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("columns: got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("columns: got %v, want %v", got, want)
+		}
+	}
+}
+
 func TestColumnWidenIntToFloat(t *testing.T) {
 	c := &Column{name: "val", typ: TypeNull}
 	c.Append(IntVal(1))
@@ -85,6 +97,36 @@ func TestTableAddRowAndGetAt(t *testing.T) {
 	}
 	if tbl.GetAt(0, 0).Str != "Alice" || tbl.GetAt(1, 1).Int != 25 {
 		t.Errorf("unexpected values: %v %v", tbl.GetAt(0, 0), tbl.GetAt(1, 1))
+	}
+}
+
+func TestNewTableWithTypesPreservesDeclaredTypes(t *testing.T) {
+	tbl := NewTableWithTypes([]string{"id", "amount", "note", "active"}, []ValueType{
+		TypeInt,
+		TypeFloat,
+		TypeString,
+		TypeBool,
+	})
+	tbl.AddRow([]Value{Null(), Null(), Null(), Null()})
+
+	for i, want := range []ValueType{TypeInt, TypeFloat, TypeString, TypeBool} {
+		if got := tbl.Col(i).ColType(); got != want {
+			t.Fatalf("%s column type: got %v, want %v", tbl.Columns[i], got, want)
+		}
+		if !tbl.GetAt(0, i).IsNull() {
+			t.Fatalf("%s row 0: want null, got %v", tbl.Columns[i], tbl.GetAt(0, i))
+		}
+	}
+}
+
+func TestNewTableWithTypesDefaultsMissingTypesToNull(t *testing.T) {
+	tbl := NewTableWithTypes([]string{"known", "unknown"}, []ValueType{TypeString})
+
+	if got := tbl.Col(0).ColType(); got != TypeString {
+		t.Fatalf("known column type: got %v, want string", got)
+	}
+	if got := tbl.Col(1).ColType(); got != TypeNull {
+		t.Fatalf("unknown column type: got %v, want null", got)
 	}
 }
 
@@ -265,6 +307,36 @@ func TestShallowCloneRenamesOnly(t *testing.T) {
 	if renamed.Col(0) != tbl.Col(0) {
 		t.Error("ShallowClone should share column data")
 	}
+}
+
+func TestUnionColumnsKeepsAnchorAndSortsLaterExtras(t *testing.T) {
+	got := UnionColumns(
+		[]string{"id", "name"},
+		[]string{"id", "name", "zebra", "apple"},
+	)
+
+	requireColumnOrder(t, got, []string{"id", "name", "apple", "zebra"})
+}
+
+func TestUnionColumnsSortsAndDeduplicatesExtrasAcrossLaterSets(t *testing.T) {
+	got := UnionColumns(
+		[]string{"id", "name"},
+		[]string{"zebra", "apple", "id"},
+		[]string{"banana", "apple", "aardvark", "name"},
+	)
+
+	requireColumnOrder(t, got, []string{"id", "name", "aardvark", "apple", "banana", "zebra"})
+}
+
+func TestUnionColumnsDoesNotMutateInputs(t *testing.T) {
+	anchor := []string{"id", "name"}
+	later := []string{"zebra", "apple"}
+
+	got := UnionColumns(anchor, later)
+
+	requireColumnOrder(t, got, []string{"id", "name", "apple", "zebra"})
+	requireColumnOrder(t, anchor, []string{"id", "name"})
+	requireColumnOrder(t, later, []string{"zebra", "apple"})
 }
 
 func TestConcatIdenticalSchema(t *testing.T) {

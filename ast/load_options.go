@@ -51,6 +51,9 @@ func ValidateLoadOptions(opts LoadOptions) error {
 			return fmt.Errorf("with: compression=%s applies only to csv, json, and jsonl formats", opts.Compression)
 		}
 	}
+	if err := validateLoadOptionValues(opts, "with: "); err != nil {
+		return err
+	}
 	if opts.Format != "" && opts.Format != "csv" {
 		return validateCSVOnlyOptions(opts, opts.Format, "with: ")
 	}
@@ -79,11 +82,24 @@ func ValidateLoadOptionsForFilename(filename string, opts LoadOptions) error {
 
 // ValidateCSVOnlyOptionsForFormat checks CSV-only load options against a resolved format (load-time).
 func ValidateCSVOnlyOptionsForFormat(opts LoadOptions, format, prefix string) error {
+	if err := validateLoadOptionValues(opts, prefix); err != nil {
+		return err
+	}
 	return validateCSVOnlyOptions(opts, format, prefix)
 }
 
+func validateLoadOptionValues(opts LoadOptions, prefix string) error {
+	if opts.InferRows != nil && *opts.InferRows < -1 {
+		return fmt.Errorf("%sinfer_rows must be -1 or greater", prefix)
+	}
+	if opts.MaxBadRecords != nil && *opts.MaxBadRecords < 0 {
+		return fmt.Errorf("%smax_bad_records must be greater than or equal to 0", prefix)
+	}
+	return nil
+}
+
 func validateCSVOnlyOptions(opts LoadOptions, format, prefix string) error {
-	if opts.Header == nil && opts.Delim == "" && opts.AllowJaggedRows == nil && opts.IgnoreUnknownValues == nil {
+	if opts.Header == nil && opts.Delim == "" && opts.AllowJaggedRows == nil && opts.IgnoreUnknownValues == nil && opts.InferRows == nil && opts.MaxBadRecords == nil {
 		return nil
 	}
 	if format == "csv" {
@@ -101,7 +117,13 @@ func validateCSVOnlyOptions(opts LoadOptions, format, prefix string) error {
 	if opts.AllowJaggedRows != nil {
 		return fmt.Errorf("%sallow_jagged_rows applies only to csv format", prefix)
 	}
-	return fmt.Errorf("%signore_unknown_values applies only to csv format", prefix)
+	if opts.IgnoreUnknownValues != nil {
+		return fmt.Errorf("%signore_unknown_values applies only to csv format", prefix)
+	}
+	if opts.InferRows != nil {
+		return fmt.Errorf("%sinfer_rows applies only to csv format", prefix)
+	}
+	return fmt.Errorf("%smax_bad_records applies only to csv format", prefix)
 }
 
 func inferFormatFromFilename(filename string) string {

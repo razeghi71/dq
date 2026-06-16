@@ -870,6 +870,11 @@ func TestLoadCSVHeaderOnly(t *testing.T) {
 	if tbl.ColIndex("name") < 0 || tbl.ColIndex("age") < 0 {
 		t.Fatalf("expected name and age columns, got %v", tbl.Columns)
 	}
+	for _, col := range []string{"name", "age"} {
+		if got := tbl.Col(tbl.ColIndex(col)).ColType(); got != table.TypeString {
+			t.Fatalf("%s type: got %v, want string", col, got)
+		}
+	}
 }
 
 func csvWithUTF8BOM(content string) string {
