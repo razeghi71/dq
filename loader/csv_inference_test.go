@@ -13,10 +13,10 @@ func TestLoadCSVInferenceDefaultLateBadRecordErrors(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "late-bad.csv")
 	data := "id,amount\n"
-	for i := 1; i <= 50; i++ {
+	for i := 1; i <= 20480; i++ {
 		data += "1,10\n"
 	}
-	data += "51,abc\n"
+	data += "20481,abc\n"
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -25,17 +25,67 @@ func TestLoadCSVInferenceDefaultLateBadRecordErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected type-conversion load error")
 	}
-	for _, want := range []string{path, "csv row 52", `column "amount"`, "int", `"abc"`} {
+	for _, want := range []string{path, "csv row 20482", `column "amount"`, "int", `"abc"`} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q does not contain %q", err.Error(), want)
 		}
 	}
 }
 
+func TestLoadCSVDefaultInferRowsSamples20480Rows(t *testing.T) {
+	var data strings.Builder
+	data.WriteString("id,amount\n")
+	for i := 1; i <= 20479; i++ {
+		data.WriteString("1,10\n")
+	}
+	data.WriteString("20480,abc\n")
+	data.WriteString("20481,20\n")
+
+	tbl, err := LoadReader(strings.NewReader(data.String()), Options{Format: "csv"})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := tbl.Col(tbl.ColIndex("amount")).ColType(); got != table.TypeString {
+		t.Fatalf("amount type: got %v, want string because row 20480 participates in default inference", got)
+	}
+	if tbl.NumRows != 20481 {
+		t.Fatalf("row count: got %d, want 20481", tbl.NumRows)
+	}
+}
+
+func TestCSVNumericCandidateHelpers(t *testing.T) {
+	cases := []struct {
+		value       string
+		wantNumber  bool
+		wantInteger bool
+	}{
+		{value: "123", wantNumber: true, wantInteger: true},
+		{value: "-123", wantNumber: true, wantInteger: true},
+		{value: "+123", wantNumber: true, wantInteger: true},
+		{value: "12.5", wantNumber: true, wantInteger: false},
+		{value: "1e5", wantNumber: true, wantInteger: false},
+		{value: "NaN", wantNumber: true, wantInteger: false},
+		{value: "-", wantNumber: true, wantInteger: false},
+		{value: "city1", wantNumber: false, wantInteger: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.value, func(t *testing.T) {
+			if got := csvNumericCandidate(tc.value); got != tc.wantNumber {
+				t.Fatalf("csvNumericCandidate(%q): got %v, want %v", tc.value, got, tc.wantNumber)
+			}
+			if tc.wantNumber {
+				if got := csvIntegerCandidate(tc.value); got != tc.wantInteger {
+					t.Fatalf("csvIntegerCandidate(%q): got %v, want %v", tc.value, got, tc.wantInteger)
+				}
+			}
+		})
+	}
+}
+
 func TestLoadCSVInferenceLateFloatInIntColumnErrors(t *testing.T) {
 	var data strings.Builder
 	data.WriteString("amount\n")
-	for i := 1; i <= 50; i++ {
+	for i := 1; i <= 20480; i++ {
 		data.WriteString("10\n")
 	}
 	data.WriteString("2.5\n")
@@ -44,7 +94,7 @@ func TestLoadCSVInferenceLateFloatInIntColumnErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected float conversion error after int inference sample")
 	}
-	for _, want := range []string{"csv row 52", `column "amount"`, "int", `"2.5"`} {
+	for _, want := range []string{"csv row 20482", `column "amount"`, "int", `"2.5"`} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q does not contain %q", err.Error(), want)
 		}

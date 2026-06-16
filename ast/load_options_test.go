@@ -10,6 +10,10 @@ func boolPtr(b bool) *bool {
 	return &v
 }
 
+func intPtr(v int) *int {
+	return &v
+}
+
 func TestValidateLoadOptionsForFilenameUnknownExtension(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -70,6 +74,92 @@ func TestValidateLoadOptionsForFilenameCSVExtension(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := ValidateLoadOptionsForFilename(tc.filename, tc.opts); err != nil {
 				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateLoadOptionsForFilenameJSONInferenceOptions(t *testing.T) {
+	cases := []struct {
+		name     string
+		filename string
+		opts     LoadOptions
+	}{
+		{
+			name:     "json_infer_rows",
+			filename: "data.json",
+			opts:     LoadOptions{InferRows: intPtr(20480)},
+		},
+		{
+			name:     "json_max_bad_records",
+			filename: "data.json",
+			opts:     LoadOptions{MaxBadRecords: intPtr(1)},
+		},
+		{
+			name:     "jsonl_both_options",
+			filename: "data.jsonl",
+			opts:     LoadOptions{InferRows: intPtr(10), MaxBadRecords: intPtr(2)},
+		},
+		{
+			name:     "jsonl_compressed_suffix",
+			filename: "data.jsonl.gz",
+			opts:     LoadOptions{InferRows: intPtr(10), MaxBadRecords: intPtr(2)},
+		},
+		{
+			name:     "json_glob_explicit_format",
+			filename: "part-*",
+			opts:     LoadOptions{Format: "json", InferRows: intPtr(10), MaxBadRecords: intPtr(2)},
+		},
+		{
+			name:     "jsonl_glob_explicit_format",
+			filename: "part-*",
+			opts:     LoadOptions{Format: "jsonl", InferRows: intPtr(10), MaxBadRecords: intPtr(2)},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidateLoadOptionsForFilename(tc.filename, tc.opts); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateLoadOptionsRejectsJSONInferRowsZero(t *testing.T) {
+	for _, format := range []string{"json", "jsonl"} {
+		t.Run(format, func(t *testing.T) {
+			err := ValidateLoadOptions(LoadOptions{Format: format, InferRows: intPtr(0)})
+			if err == nil {
+				t.Fatal("expected infer_rows=0 error")
+			}
+			if !strings.Contains(err.Error(), "infer_rows=0") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateLoadOptionsRejectsInferenceOptionsForSchemaFormats(t *testing.T) {
+	cases := []struct {
+		name   string
+		format string
+		opts   LoadOptions
+		want   string
+	}{
+		{name: "avro_infer_rows", format: "avro", opts: LoadOptions{InferRows: intPtr(10)}, want: "infer_rows applies only"},
+		{name: "avro_max_bad_records", format: "avro", opts: LoadOptions{MaxBadRecords: intPtr(1)}, want: "max_bad_records applies only"},
+		{name: "parquet_infer_rows", format: "parquet", opts: LoadOptions{InferRows: intPtr(10)}, want: "infer_rows applies only"},
+		{name: "parquet_max_bad_records", format: "parquet", opts: LoadOptions{MaxBadRecords: intPtr(1)}, want: "max_bad_records applies only"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.opts.Format = tc.format
+			err := ValidateLoadOptions(tc.opts)
+			if err == nil {
+				t.Fatal("expected format restriction")
+			}
+			if !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tc.want)) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tc.want)
 			}
 		})
 	}

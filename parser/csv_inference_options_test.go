@@ -69,6 +69,39 @@ func TestParseCSVInferenceLoadOptions(t *testing.T) {
 	})
 }
 
+func TestParseJSONInferenceLoadOptions(t *testing.T) {
+	t.Run("json_source", func(t *testing.T) {
+		q, err := Parse(`data.json with infer_rows=20480, max_bad_records=2 | count`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertLoadIntOption(t, q.Source.Load, "InferRows", 20480)
+		assertLoadIntOption(t, q.Source.Load, "MaxBadRecords", 2)
+	})
+
+	t.Run("jsonl_source", func(t *testing.T) {
+		q, err := Parse(`data.jsonl with infer_rows=-1, max_bad_records=0 | describe`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertLoadIntOption(t, q.Source.Load, "InferRows", -1)
+		assertLoadIntOption(t, q.Source.Load, "MaxBadRecords", 0)
+	})
+
+	t.Run("jsonl_join_source", func(t *testing.T) {
+		q, err := Parse(`users.csv | join left events.jsonl with infer_rows=10, max_bad_records=1 on user_id`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		j, ok := q.Ops[0].(*ast.JoinOp)
+		if !ok {
+			t.Fatalf("expected JoinOp, got %T", q.Ops[0])
+		}
+		assertLoadIntOption(t, j.Load, "InferRows", 10)
+		assertLoadIntOption(t, j.Load, "MaxBadRecords", 1)
+	})
+}
+
 func TestParseCSVInferenceLoadOptionsRejected(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -81,16 +114,14 @@ func TestParseCSVInferenceLoadOptionsRejected(t *testing.T) {
 		{"max_bad_records_non_integer", `data.csv with max_bad_records=true | count`, "max_bad_records"},
 		{"duplicate_infer_rows", `data.csv with infer_rows=10, infer_rows=20 | count`, "duplicate"},
 		{"duplicate_max_bad_records", `data.csv with max_bad_records=0, max_bad_records=1 | count`, "duplicate"},
-		{"infer_rows_on_json", `data.json with infer_rows=10 | count`, "infer_rows applies only to csv"},
-		{"max_bad_records_on_json", `data.json with max_bad_records=1 | count`, "max_bad_records applies only to csv"},
-		{"infer_rows_on_jsonl", `data.jsonl with infer_rows=10 | count`, "infer_rows applies only to csv"},
-		{"max_bad_records_on_jsonl", `data.jsonl with max_bad_records=1 | count`, "max_bad_records applies only to csv"},
-		{"infer_rows_on_avro", `data.avro with infer_rows=10 | count`, "infer_rows applies only to csv"},
-		{"max_bad_records_on_avro", `data.avro with max_bad_records=1 | count`, "max_bad_records applies only to csv"},
-		{"infer_rows_on_parquet", `data.parquet with infer_rows=10 | count`, "infer_rows applies only to csv"},
-		{"max_bad_records_on_parquet", `data.parquet with max_bad_records=1 | count`, "max_bad_records applies only to csv"},
+		{"infer_rows_zero_on_json", `data.json with infer_rows=0 | count`, "infer_rows=0"},
+		{"infer_rows_zero_on_jsonl", `data.jsonl with infer_rows=0 | count`, "infer_rows=0"},
+		{"infer_rows_on_avro", `data.avro with infer_rows=10 | count`, "infer_rows applies only"},
+		{"max_bad_records_on_avro", `data.avro with max_bad_records=1 | count`, "max_bad_records applies only"},
+		{"infer_rows_on_parquet", `data.parquet with infer_rows=10 | count`, "infer_rows applies only"},
+		{"max_bad_records_on_parquet", `data.parquet with max_bad_records=1 | count`, "max_bad_records applies only"},
 		{"glob_unknown_extension_without_format", `part-*.dat with infer_rows=10 | count`, "with format"},
-		{"join_non_csv", `users.csv | join orders.json with infer_rows=10 on user_id`, "infer_rows applies only to csv"},
+		{"join_infer_rows_zero_on_json", `users.csv | join orders.json with infer_rows=0 on user_id`, "infer_rows=0"},
 	}
 
 	for _, tc := range cases {

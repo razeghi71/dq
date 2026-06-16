@@ -6,7 +6,7 @@ import (
 	"github.com/razeghi71/dq/ast"
 )
 
-const defaultCSVInferRows = 50
+const defaultInferRows = 20480
 
 // Options configures how a file or stdin stream is loaded.
 // Zero value keeps extension-based inference and CSV defaults.
@@ -17,7 +17,7 @@ type Options struct {
 	Delim               string
 	AllowJaggedRows     *bool
 	IgnoreUnknownValues *bool
-	InferRows           int  // csv only; default 50. Set InferRowsSet=true to use 0.
+	InferRows           int  // csv/json/jsonl; default 20480. Set InferRowsSet=true to use 0 for csv.
 	InferRowsSet        bool // distinguishes explicit infer_rows=0 from the default.
 	MaxBadRecords       int
 	MaxBadRecordsSet    bool
@@ -31,7 +31,7 @@ func normalizeOptions(o Options) Options {
 		o.Compression = strings.ToLower(o.Compression)
 	}
 	if !o.InferRowsSet && o.InferRows == 0 {
-		o.InferRows = defaultCSVInferRows
+		o.InferRows = defaultInferRows
 	}
 	return o
 }

@@ -389,12 +389,21 @@ dq 'nested.json | describe | select column, schema'
 ```
 
 Mixed numeric JSON values promote from int to float. Heterogeneous values inside a single JSON array are preserved and described as `mixed`, for example `[1, "two"]` has schema `list<mixed>`.
-Outside that single-array `mixed` case, incompatible native JSON types are load errors instead of silent string widening, including nested fields such as `s.x` or cross-row typed-list conflicts such as `orders[].amount`.
+Outside that single-array `mixed` case, incompatible native JSON types are bad records instead of silent string widening, including nested fields such as `s.x` or cross-row typed-list conflicts such as `orders[].amount`.
 Avro and Parquet are schema-bound readers and currently use the table append path; if inconsistent values are produced there, they follow normal permissive table widening rather than the JSON/JSONL strict recursive load checks.
+
+JSON/JSONL schema inference samples the first 20480 logical records by default. Use `infer_rows=-1` when late sparse fields matter more than startup cost, and `max_bad_records=N` to skip a limited number of malformed or schema-incompatible records:
+
+```bash
+dq 'events.jsonl with infer_rows=-1 | describe'
+dq 'events.jsonl with infer_rows=1000, max_bad_records=10 | count'
+```
+
+Late fields outside the sampled JSON/JSONL schema are bad records; they are not silently dropped.
 
 ### CSV type inference
 
-CSV has no native column types, so `dq` infers them from the first 50 data rows by default:
+CSV has no native column types, so `dq` infers them from the first 20480 data rows by default:
 
 ```bash
 dq 'sales.csv | describe'
@@ -420,7 +429,9 @@ dq 'users.csv | join left orders/part-*.csv on user_id'
 ```
 
 - Patterns are matched relative to the current working directory.
-- Matched files are loaded and concatenated (column union; missing values are null).
+- Matched files are loaded and concatenated.
+- CSV glob shards follow the CSV header rules below; compatible extended headers create a column union and missing values are null.
+- JSON/JSONL glob shards use one sampled schema in deterministic path order. Fields first seen after the sample are bad records; use `with format=jsonl, infer_rows=-1` (or a larger `infer_rows`) when sparse late fields should be part of the schema.
 - Matched paths are sorted lexicographically (use zero-padded partition names like `part-001` for correct order).
 - CSV shards after the first: repeated headers are skipped; reordered or extended headers are detected when the first row is clearly a header (shared column names, new lowercase identifiers such as `email`, not `Email`). Otherwise rows are read positionally under the first file's columns.
 - Positional shards: values map to the first file's columns by position. CSV row-width rules match single-file loading (strict by default): use `with format=csv, allow_jagged_rows=true` and/or `with format=csv, ignore_unknown_values=true` on globs (format is required at parse time for CSV-only options).

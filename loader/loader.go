@@ -2,6 +2,7 @@ package loader
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"compress/zlib"
 	"encoding/csv"
@@ -75,9 +76,13 @@ func loadFile(filename string, opts Options, csvColumns []string) (*table.Table,
 		cfg.compression = compression
 		return loadCSV(filename, cfg)
 	case "json":
-		return loadJSON(filename, compression)
+		cfg := jsonConfigFromOptions(opts, filename)
+		cfg.compression = compression
+		return loadJSON(filename, cfg)
 	case "jsonl":
-		return loadJSONL(filename, compression)
+		cfg := jsonConfigFromOptions(opts, filename)
+		cfg.compression = compression
+		return loadJSONL(filename, cfg)
 	case "avro":
 		if compression != "" {
 			return nil, fmt.Errorf("compression=%s applies only to csv, json, and jsonl formats", compression)
@@ -113,6 +118,9 @@ func loadGlob(pattern string, opts Options) (*table.Table, error) {
 	if resolved == "csv" {
 		return loadGlobCSV(pattern, matches, opts)
 	}
+	if resolved == "json" || resolved == "jsonl" {
+		return loadGlobJSON(pattern, matches, resolved, opts, compression)
+	}
 
 	var parts []*table.Table
 	partOpts := opts
@@ -125,54 +133,7 @@ func loadGlob(pattern string, opts Options) (*table.Table, error) {
 		}
 		parts = append(parts, tbl)
 	}
-	if resolved == "json" || resolved == "jsonl" {
-		return concatStrictSchemaTables(pattern, matches, parts)
-	}
 	return table.Concat(parts)
-}
-
-func concatStrictSchemaTables(pattern string, paths []string, tables []*table.Table) (*table.Table, error) {
-	columnSets := make([][]string, len(tables))
-	for i, tbl := range tables {
-		columnSets[i] = tbl.Columns
-	}
-	unionCols := table.UnionColumns(columnSets...)
-	schemas := make([]*table.TypeDescriptor, len(unionCols))
-	for i, col := range unionCols {
-		for partIdx, tbl := range tables {
-			idx := tbl.ColIndex(col)
-			var next *table.TypeDescriptor
-			if idx >= 0 {
-				next = tbl.Col(idx).RawSchema()
-			} else {
-				next = &table.TypeDescriptor{Kind: table.TypeNull, Nullable: true}
-			}
-			merged, err := table.MergeSchemasStrictAtPath(schemas[i], next, col)
-			if err != nil {
-				return nil, fmt.Errorf("loading glob %q: loading %q: %w", pattern, paths[partIdx], err)
-			}
-			schemas[i] = merged
-		}
-		schemas[i] = table.FinalizeSchema(schemas[i])
-	}
-
-	result := table.NewTableWithSchemas(unionCols, schemas)
-	for partIdx, tbl := range tables {
-		for row := 0; row < tbl.NumRows; row++ {
-			vals := make([]table.Value, len(unionCols))
-			for i, col := range unionCols {
-				if idx := tbl.ColIndex(col); idx >= 0 {
-					vals[i] = tbl.Col(idx).Get(row)
-				} else {
-					vals[i] = table.Null()
-				}
-			}
-			if err := result.AddRowTyped(vals); err != nil {
-				return nil, fmt.Errorf("loading glob %q: loading %q: row %d: %w", pattern, paths[partIdx], row+1, err)
-			}
-		}
-	}
-	return result, nil
 }
 
 func loadGlobCSV(pattern string, matches []string, opts Options) (*table.Table, error) {
@@ -281,9 +242,9 @@ func LoadReader(r io.Reader, opts Options) (*table.Table, error) {
 	case "csv":
 		return loadCSVReader(r, csvConfigFromOptions(opts, nil))
 	case "json":
-		return loadJSONReader(r)
+		return loadJSONReader(r, jsonConfigFromOptions(opts, ""))
 	case "jsonl":
-		return loadJSONLReader(r)
+		return loadJSONLReader(r, jsonConfigFromOptions(opts, ""))
 	default:
 		return nil, fmt.Errorf("LoadReader: unsupported format %q (supported: %s)", opts.Format, ast.StreamFormatsList())
 	}
@@ -299,6 +260,22 @@ type csvLoadConfig struct {
 	inferRows           int
 	maxBadRecords       int
 	source              string
+}
+
+type jsonLoadConfig struct {
+	compression   string
+	inferRows     int
+	maxBadRecords int
+	source        string
+}
+
+func jsonConfigFromOptions(opts Options, source string) jsonLoadConfig {
+	return jsonLoadConfig{
+		compression:   opts.Compression,
+		inferRows:     opts.InferRows,
+		maxBadRecords: opts.MaxBadRecords,
+		source:        source,
+	}
 }
 
 func csvConfigFromOptions(opts Options, columns []string) csvLoadConfig {
@@ -342,13 +319,13 @@ func validateOptionsForFormat(opts Options, format string) error {
 			return fmt.Errorf("compression=%s applies only to csv, json, and jsonl formats", opts.Compression)
 		}
 	}
-	return ast.ValidateCSVOnlyOptionsForFormat(ast.LoadOptions{
+	return ast.ValidateLoadOptionsForFormat(ast.LoadOptions{
 		Compression:         opts.Compression,
 		Header:              opts.Header,
 		Delim:               opts.Delim,
 		AllowJaggedRows:     opts.AllowJaggedRows,
 		IgnoreUnknownValues: opts.IgnoreUnknownValues,
-		InferRows:           intPtrIfSet(opts.InferRows, opts.InferRowsSet || opts.InferRows != defaultCSVInferRows),
+		InferRows:           intPtrIfSet(opts.InferRows, opts.InferRowsSet || opts.InferRows != defaultInferRows),
 		MaxBadRecords:       intPtrIfSet(opts.MaxBadRecords, opts.MaxBadRecordsSet || opts.MaxBadRecords != 0),
 	}, format, "")
 }
@@ -689,7 +666,7 @@ func collectCSVGlobShardRows(path string, anchor []string, cfg csvLoadConfig) ([
 		if err := validateCSVRecord(peek, len(anchor), cfg, peekRowNum); err != nil {
 			return nil, csvRowGroup{}, err
 		}
-		rows := []csvRawRow{newCSVRawRow(peek, peekRowNum, false)}
+		rows := []csvRawRow{newCSVRawRow(peek, peekRowNum)}
 		rest, err := collectCSVRows(reader, anchor, cfg, peekRowNum+1)
 		if err != nil {
 			return nil, csvRowGroup{}, err
@@ -733,7 +710,6 @@ func validateCSVRecord(record []string, numColumns int, cfg csvLoadConfig, rowNu
 
 type csvRawRow struct {
 	record []string
-	parsed []table.Value
 	rowNum int
 }
 
@@ -757,27 +733,14 @@ func collectCSVRows(reader *csv.Reader, columns []string, cfg csvLoadConfig, sta
 		if err := validateCSVRecord(record, len(columns), cfg, rowNum); err != nil {
 			return nil, err
 		}
-		rows = append(rows, newCSVRawRow(record, rowNum, false))
+		rows = append(rows, newCSVRawRow(record, rowNum))
 		rowNum++
 	}
 	return rows, nil
 }
 
-func newCSVRawRow(record []string, rowNum int, keepParsed bool) csvRawRow {
-	copied := append([]string(nil), record...)
-	row := csvRawRow{record: copied, rowNum: rowNum}
-	if keepParsed {
-		row.parsed = parseCSVRecordValues(copied)
-	}
-	return row
-}
-
-func parseCSVRecordValues(record []string) []table.Value {
-	values := make([]table.Value, len(record))
-	for i, cell := range record {
-		values[i] = parseValue(strings.TrimSpace(cell))
-	}
-	return values
+func newCSVRawRow(record []string, rowNum int) csvRawRow {
+	return csvRawRow{record: record, rowNum: rowNum}
 }
 
 func materializeCSVGroups(columns []string, groups []csvRowGroup, cfg csvLoadConfig) (*table.Table, error) {
@@ -833,6 +796,9 @@ func applyCSVInferenceRow(types []table.ValueType, mapping []int, row csvRawRow)
 		if dst < 0 || srcIdx >= len(row.record) {
 			continue
 		}
+		if types[dst] == table.TypeString {
+			continue
+		}
 		v := rowValueForInference(row, srcIdx)
 		if v.Type == table.TypeNull {
 			continue
@@ -842,9 +808,6 @@ func applyCSVInferenceRow(types []table.ValueType, mapping []int, row csvRawRow)
 }
 
 func rowValueForInference(row csvRawRow, srcIdx int) table.Value {
-	if srcIdx < len(row.parsed) {
-		return row.parsed[srcIdx]
-	}
 	return parseValue(strings.TrimSpace(row.record[srcIdx]))
 }
 
@@ -881,7 +844,7 @@ func csvTypedRowValues(row csvRawRow, mapping []int, source string, columns []st
 			continue
 		}
 		cell := strings.TrimSpace(row.record[srcIdx])
-		v, err := csvCellValueAsType(row, srcIdx, cell, types[dst])
+		v, err := csvCellValueAsType(cell, types[dst])
 		if err != nil {
 			return nil, csvTypeError(row, source, columns[dst], types[dst], cell)
 		}
@@ -890,23 +853,8 @@ func csvTypedRowValues(row csvRawRow, mapping []int, source string, columns []st
 	return vals, nil
 }
 
-func csvCellValueAsType(row csvRawRow, srcIdx int, cell string, typ table.ValueType) (table.Value, error) {
-	if srcIdx >= len(row.parsed) || typ == table.TypeString {
-		return parseCSVCellAsType(cell, typ)
-	}
-	return coerceParsedCSVValue(row.parsed[srcIdx], typ), nil
-}
-
-func coerceParsedCSVValue(v table.Value, typ table.ValueType) table.Value {
-	if v.Type == table.TypeNull {
-		return table.Null()
-	}
-	// Parsed sample rows already participated in type inference, so the only
-	// sample-time coercion needed is int -> float for mixed numeric samples.
-	if typ == table.TypeFloat && v.Type == table.TypeInt {
-		return table.FloatVal(float64(v.Int))
-	}
-	return v
+func csvCellValueAsType(cell string, typ table.ValueType) (table.Value, error) {
+	return parseCSVCellAsType(cell, typ)
 }
 
 func csvColumnMapping(columns, rowColumns []string) []int {
@@ -945,7 +893,7 @@ func sameColumns(a, b []string) bool {
 }
 
 func parseCSVCellAsType(cell string, typ table.ValueType) (table.Value, error) {
-	if cell == "" || strings.EqualFold(cell, "null") {
+	if isCSVNull(cell) {
 		return table.Null(), nil
 	}
 	switch typ {
@@ -964,14 +912,13 @@ func parseCSVCellAsType(cell string, typ table.ValueType) (table.Value, error) {
 		}
 		return table.FloatVal(v), nil
 	case table.TypeBool:
-		switch strings.ToLower(cell) {
-		case "true":
+		if strings.EqualFold(cell, "true") {
 			return table.BoolVal(true), nil
-		case "false":
-			return table.BoolVal(false), nil
-		default:
-			return table.Null(), fmt.Errorf("invalid bool")
 		}
+		if strings.EqualFold(cell, "false") {
+			return table.BoolVal(false), nil
+		}
+		return table.Null(), fmt.Errorf("invalid bool")
 	default:
 		return parseValue(cell), nil
 	}
@@ -1032,6 +979,15 @@ func loadCSVReaderStreaming(r io.Reader, cfg csvLoadConfig) (*table.Table, error
 
 	sampleRows := buffered
 	if cfg.inferRows > 0 {
+		initialCap := cfg.inferRows
+		if initialCap > defaultInferRows {
+			initialCap = defaultInferRows
+		}
+		if cap(sampleRows) < initialCap {
+			prealloc := make([]csvRawRow, 0, initialCap)
+			prealloc = append(prealloc, sampleRows...)
+			sampleRows = prealloc
+		}
 		rowNum := startRow
 		for len(sampleRows) < cfg.inferRows {
 			record, err := reader.Read()
@@ -1044,7 +1000,7 @@ func loadCSVReaderStreaming(r io.Reader, cfg csvLoadConfig) (*table.Table, error
 			if err := validateCSVRecord(record, len(columns), cfg, rowNum); err != nil {
 				return nil, err
 			}
-			sampleRows = append(sampleRows, newCSVRawRow(record, rowNum, true))
+			sampleRows = append(sampleRows, newCSVRawRow(record, rowNum))
 			rowNum++
 		}
 		startRow = rowNum
@@ -1095,7 +1051,7 @@ func prepareCSVReader(reader *csv.Reader, cfg csvLoadConfig) (columns []string, 
 		if err := validateCSVRecord(first, len(columns), cfg, firstRowNum); err != nil {
 			return nil, nil, 0, false, err
 		}
-		buffered = []csvRawRow{newCSVRawRow(first, firstRowNum, cfg.inferRows > 0)}
+		buffered = []csvRawRow{newCSVRawRow(first, firstRowNum)}
 		return columns, buffered, firstRowNum + 1, false, nil
 	}
 
@@ -1128,7 +1084,7 @@ func collectCSVReaderRows(r io.Reader, cfg csvLoadConfig) ([]string, csvRowGroup
 		if err := validateCSVRecord(first, len(cfg.columns), cfg, firstRowNum); err != nil {
 			return nil, csvRowGroup{}, err
 		}
-		rows := []csvRawRow{newCSVRawRow(first, firstRowNum, false)}
+		rows := []csvRawRow{newCSVRawRow(first, firstRowNum)}
 		rest, err := collectCSVRows(reader, cfg.columns, cfg, firstRowNum+1)
 		if err != nil {
 			return nil, csvRowGroup{}, err
@@ -1165,72 +1121,196 @@ func collectCSVReaderRows(r io.Reader, cfg csvLoadConfig) ([]string, csvRowGroup
 
 // parseValue infers the type of a CSV cell value.
 func parseValue(s string) table.Value {
-	if s == "" || strings.EqualFold(s, "null") {
+	if isCSVNull(s) {
 		return table.Null()
 	}
-
-	// Try integer
-	if v, err := strconv.ParseInt(s, 10, 64); err == nil {
-		return table.IntVal(v)
+	switch s[0] {
+	case 't', 'T':
+		if strings.EqualFold(s, "true") {
+			return table.BoolVal(true)
+		}
+	case 'f', 'F':
+		if strings.EqualFold(s, "false") {
+			return table.BoolVal(false)
+		}
 	}
-
-	// Try float
-	if v, err := strconv.ParseFloat(s, 64); err == nil {
-		return table.FloatVal(v)
-	}
-
-	// Try boolean
-	lower := strings.ToLower(s)
-	if lower == "true" {
-		return table.BoolVal(true)
-	}
-	if lower == "false" {
-		return table.BoolVal(false)
+	if csvNumericCandidate(s) {
+		if csvIntegerCandidate(s) {
+			if v, err := strconv.ParseInt(s, 10, 64); err == nil {
+				return table.IntVal(v)
+			}
+		}
+		if v, err := strconv.ParseFloat(s, 64); err == nil {
+			return table.FloatVal(v)
+		}
 	}
 
 	return table.StrVal(s)
 }
 
-func loadJSON(filename, compression string) (*table.Table, error) {
-	f, err := openInputReader(filename, compression)
+func isCSVNull(s string) bool {
+	return s == "" || (len(s) == 4 && (s[0] == 'n' || s[0] == 'N') && strings.EqualFold(s, "null"))
+}
+
+func csvNumericCandidate(s string) bool {
+	if s == "" {
+		return false
+	}
+	switch s[0] {
+	case '+', '-', '.', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		return true
+	case 'n', 'N', 'i', 'I':
+		return strings.EqualFold(s, "nan") || strings.EqualFold(s, "inf") || strings.EqualFold(s, "infinity")
+	default:
+		return false
+	}
+}
+
+func csvIntegerCandidate(s string) bool {
+	start := 0
+	if s[0] == '+' || s[0] == '-' {
+		start = 1
+	}
+	if start == len(s) {
+		return false
+	}
+	for _, r := range s[start:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+type jsonLogicalRecord struct {
+	fields []table.RecordField
+	loc    string
+	source string
+	err    error
+}
+
+type jsonSchemaInference struct {
+	columns  []string
+	schemas  []*table.TypeDescriptor
+	index    map[string]int
+	goodRows int
+}
+
+func loadGlobJSON(pattern string, matches []string, format string, opts Options, compression string) (*table.Table, error) {
+	var records []jsonLogicalRecord
+	for _, path := range matches {
+		cfg := jsonConfigFromOptions(opts, path)
+		cfg.compression = compression
+		var part []jsonLogicalRecord
+		var err error
+		switch format {
+		case "json":
+			part, err = collectJSONFileRecords(path, cfg)
+		case "jsonl":
+			part, err = collectJSONLFileRecords(path, cfg)
+		default:
+			return nil, fmt.Errorf("unsupported format %q (supported: json, jsonl)", format)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("loading glob %q: loading %q: %w", pattern, path, err)
+		}
+		records = append(records, part...)
+	}
+	cfg := jsonConfigFromOptions(opts, pattern)
+	return buildTableFromJSONRecords(records, cfg)
+}
+
+func loadJSON(filename string, cfg jsonLoadConfig) (*table.Table, error) {
+	records, err := collectJSONFileRecords(filename, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return buildTableFromJSONRecords(records, cfg)
+}
+
+func collectJSONFileRecords(filename string, cfg jsonLoadConfig) ([]jsonLogicalRecord, error) {
+	f, err := openInputReader(filename, cfg.compression)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	return loadJSONReader(f)
+	return collectJSONRecords(f, filename)
 }
 
-func loadJSONReader(r io.Reader) (*table.Table, error) {
+func loadJSONReader(r io.Reader, cfg jsonLoadConfig) (*table.Table, error) {
+	records, err := collectJSONRecords(r, cfg.source)
+	if err != nil {
+		return nil, err
+	}
+	return buildTableFromJSONRecords(records, cfg)
+}
+
+func collectJSONRecords(r io.Reader, source string) ([]jsonLogicalRecord, error) {
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read JSON: %w", err)
 	}
 
-	var records []map[string]interface{}
-	if err := json.Unmarshal(data, &records); err != nil {
+	var elems []interface{}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	if err := dec.Decode(&elems); err != nil {
 		return nil, fmt.Errorf("cannot parse JSON: %w (expected array of objects)", err)
 	}
-
-	locs := make([]string, len(records))
-	for i := range records {
-		locs[i] = fmt.Sprintf("row %d", i+1)
+	if err := requireJSONDecoderEOF(dec); err != nil {
+		return nil, fmt.Errorf("cannot parse JSON: %w (expected array of objects)", err)
 	}
-	return buildTableFromRecords(records, locs)
+	if elems == nil {
+		return nil, fmt.Errorf("cannot parse JSON: expected array of objects")
+	}
+
+	records := make([]jsonLogicalRecord, len(elems))
+	for i, elem := range elems {
+		loc := fmt.Sprintf("row %d", i+1)
+		rec, ok := elem.(map[string]interface{})
+		if !ok || rec == nil {
+			records[i] = jsonLogicalRecord{loc: loc, source: source, err: fmt.Errorf("expected JSON object")}
+			continue
+		}
+		fields, err := buildJSONRecordFields(rec)
+		if err != nil {
+			records[i] = jsonLogicalRecord{loc: loc, source: source, err: err}
+			continue
+		}
+		records[i] = jsonLogicalRecord{fields: fields, loc: loc, source: source}
+	}
+	return records, nil
 }
 
-func loadJSONL(filename, compression string) (*table.Table, error) {
-	f, err := openInputReader(filename, compression)
+func loadJSONL(filename string, cfg jsonLoadConfig) (*table.Table, error) {
+	records, err := collectJSONLFileRecords(filename, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return buildTableFromJSONRecords(records, cfg)
+}
+
+func collectJSONLFileRecords(filename string, cfg jsonLoadConfig) ([]jsonLogicalRecord, error) {
+	f, err := openInputReader(filename, cfg.compression)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	return loadJSONLReader(f)
+	return collectJSONLRecords(f, filename)
 }
 
-func loadJSONLReader(r io.Reader) (*table.Table, error) {
+func loadJSONLReader(r io.Reader, cfg jsonLoadConfig) (*table.Table, error) {
+	records, err := collectJSONLRecords(r, cfg.source)
+	if err != nil {
+		return nil, err
+	}
+	return buildTableFromJSONRecords(records, cfg)
+}
+
+func collectJSONLRecords(r io.Reader, source string) ([]jsonLogicalRecord, error) {
 	scanner := bufio.NewScanner(r)
-	var records []map[string]interface{}
-	var locs []string
+	scanner.Buffer(make([]byte, 64*1024), 64*1024*1024)
+	var records []jsonLogicalRecord
 	lineNum := 0
 	for scanner.Scan() {
 		lineNum++
@@ -1238,81 +1318,325 @@ func loadJSONLReader(r io.Reader) (*table.Table, error) {
 		if line == "" {
 			continue
 		}
-		var rec map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			return nil, fmt.Errorf("invalid JSON on line %d: %w", lineNum, err)
+		var value interface{}
+		dec := json.NewDecoder(strings.NewReader(line))
+		dec.UseNumber()
+		if err := dec.Decode(&value); err != nil {
+			records = append(records, jsonLogicalRecord{
+				loc:    fmt.Sprintf("line %d", lineNum),
+				source: source,
+				err:    fmt.Errorf("invalid JSON: %w", err),
+			})
+			continue
 		}
-		records = append(records, rec)
-		locs = append(locs, fmt.Sprintf("line %d", lineNum))
+		if err := requireJSONDecoderEOF(dec); err != nil {
+			records = append(records, jsonLogicalRecord{
+				loc:    fmt.Sprintf("line %d", lineNum),
+				source: source,
+				err:    fmt.Errorf("invalid JSON: %w", err),
+			})
+			continue
+		}
+		rec, ok := value.(map[string]interface{})
+		if !ok || rec == nil {
+			records = append(records, jsonLogicalRecord{
+				loc:    fmt.Sprintf("line %d", lineNum),
+				source: source,
+				err:    fmt.Errorf("expected JSON object"),
+			})
+			continue
+		}
+		fields, err := buildJSONRecordFields(rec)
+		if err != nil {
+			records = append(records, jsonLogicalRecord{
+				loc:    fmt.Sprintf("line %d", lineNum),
+				source: source,
+				err:    err,
+			})
+			continue
+		}
+		records = append(records, jsonLogicalRecord{
+			fields: fields,
+			loc:    fmt.Sprintf("line %d", lineNum),
+			source: source,
+		})
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("error reading JSONL: %w", err)
 	}
 
-	return buildTableFromRecords(records, locs)
+	return records, nil
 }
 
-func buildTableFromRecords(records []map[string]interface{}, locs []string) (*table.Table, error) {
+func requireJSONDecoderEOF(dec *json.Decoder) error {
+	var extra interface{}
+	err := dec.Decode(&extra)
+	if err == io.EOF {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("trailing JSON value after first value")
+}
+
+func buildTableFromJSONRecords(records []jsonLogicalRecord, cfg jsonLoadConfig) (*table.Table, error) {
 	if len(records) == 0 {
 		return table.NewTable(nil), nil
 	}
 
-	colSet := make(map[string]bool)
-	var columns []string
-	for _, rec := range records {
-		for k := range rec {
-			if !colSet[k] {
-				colSet[k] = true
-				columns = append(columns, k)
-			}
+	state := jsonSchemaInference{index: map[string]int{}}
+	skip := make([]bool, len(records))
+	inferredGood := make([]bool, len(records))
+	badRecords := 0
+	inferSeen := 0
+	for i, rec := range records {
+		if cfg.inferRows >= 0 && inferSeen >= cfg.inferRows {
+			break
 		}
+		inferSeen++
+		if rec.err != nil {
+			if err := countJSONBadRecord(rec, i, rec.err, cfg.maxBadRecords, &badRecords); err != nil {
+				return nil, err
+			}
+			skip[i] = true
+			continue
+		}
+		var err error
+		if cfg.maxBadRecords == 0 {
+			err = state.inferRecordInPlace(rec.fields)
+		} else {
+			err = state.inferRecord(rec.fields)
+		}
+		if err != nil {
+			if err := countJSONBadRecord(rec, i, err, cfg.maxBadRecords, &badRecords); err != nil {
+				return nil, err
+			}
+			skip[i] = true
+			continue
+		}
+		inferredGood[i] = true
 	}
 
-	schemas := make([]*table.TypeDescriptor, len(columns))
-	rows := make([][]table.Value, len(records))
-	for rowIdx, rec := range records {
-		vals := make([]table.Value, len(columns))
-		for i, col := range columns {
-			v := table.Null()
-			if raw, ok := rec[col]; ok && raw != nil {
-				v = anyToValue(raw)
-			}
-			vals[i] = v
-			merged, err := table.MergeValueSchemaStrictAtPath(schemas[i], v, col)
-			if err != nil {
-				return nil, jsonSchemaError(locs, rowIdx, err)
-			}
-			schemas[i] = merged
+	t := table.NewTableWithSchemas(state.columns, state.schemas)
+	for i, rec := range records {
+		if skip[i] {
+			continue
 		}
-		rows[rowIdx] = vals
-	}
-	t := table.NewTableWithSchemas(columns, schemas)
-	for rowIdx, vals := range rows {
-		if err := t.AddRowTyped(vals); err != nil {
-			return nil, jsonSchemaError(locs, rowIdx, err)
+		if rec.err != nil {
+			if err := countJSONBadRecord(rec, i, rec.err, cfg.maxBadRecords, &badRecords); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		vals, err := state.recordValues(rec.fields, !inferredGood[i])
+		if err == nil {
+			err = t.AddRowTyped(vals)
+		}
+		if err != nil {
+			if err := countJSONBadRecord(rec, i, err, cfg.maxBadRecords, &badRecords); err != nil {
+				return nil, err
+			}
+			continue
 		}
 	}
 
 	return t, nil
 }
 
-func jsonSchemaError(locs []string, rowIdx int, err error) error {
-	loc := fmt.Sprintf("row %d", rowIdx+1)
-	if rowIdx >= 0 && rowIdx < len(locs) && locs[rowIdx] != "" {
-		loc = locs[rowIdx]
+func (s *jsonSchemaInference) inferRecord(fields []table.RecordField) error {
+	nextColumns := append([]string(nil), s.columns...)
+	nextSchemas := append([]*table.TypeDescriptor(nil), s.schemas...)
+	nextIndex := make(map[string]int, len(s.index)+len(fields))
+	for k, v := range s.index {
+		nextIndex[k] = v
+	}
+
+	for i, col := range s.columns {
+		v := table.Null()
+		if field, ok := recordFieldByName(fields, col); ok {
+			v = field.Value
+		}
+		merged, err := table.MergeSchemasStrictAtPath(nextSchemas[i], table.InferValueSchema(v), col)
+		if err != nil {
+			return err
+		}
+		nextSchemas[i] = merged
+	}
+
+	for _, field := range fields {
+		if _, ok := nextIndex[field.Name]; ok {
+			continue
+		}
+		schema := table.InferValueSchema(field.Value)
+		if s.goodRows > 0 {
+			merged, err := table.MergeSchemasStrictAtPath(&table.TypeDescriptor{Kind: table.TypeNull, Nullable: true}, schema, field.Name)
+			if err != nil {
+				return err
+			}
+			schema = merged
+		}
+		nextIndex[field.Name] = len(nextColumns)
+		nextColumns = append(nextColumns, field.Name)
+		nextSchemas = append(nextSchemas, schema)
+	}
+
+	s.columns = nextColumns
+	s.schemas = nextSchemas
+	s.index = nextIndex
+	s.goodRows++
+	return nil
+}
+
+func (s *jsonSchemaInference) recordValues(fields []table.RecordField, rejectUnknown bool) ([]table.Value, error) {
+	if rejectUnknown {
+		for _, field := range fields {
+			if _, ok := s.index[field.Name]; !ok {
+				return nil, jsonUnknownFieldError{Path: field.Name}
+			}
+		}
+	}
+	vals := make([]table.Value, len(s.columns))
+	for i, col := range s.columns {
+		v := table.Null()
+		if field, ok := recordFieldByName(fields, col); ok {
+			v = field.Value
+			if rejectUnknown {
+				if err := rejectUnknownJSONFields(v, s.schemas[i], col); err != nil {
+					return nil, err
+				}
+			}
+		}
+		vals[i] = v
+	}
+	return vals, nil
+}
+
+type jsonUnknownFieldError struct {
+	Path string
+}
+
+func (e jsonUnknownFieldError) Error() string {
+	return fmt.Sprintf("%s unknown field outside inferred schema", e.Path)
+}
+
+func rejectUnknownJSONFields(v table.Value, schema *table.TypeDescriptor, path string) error {
+	schema = table.FinalizeSchema(schema)
+	if schema == nil || schema.Kind == table.TypeMixed || v.Type == table.TypeNull {
+		return nil
+	}
+	switch v.Type {
+	case table.TypeRecord:
+		if schema.Kind != table.TypeRecord {
+			return nil
+		}
+		for _, field := range v.Fields {
+			fieldSchema, ok := schemaFieldByName(schema.Fields, field.Name)
+			fieldPath := path + "." + field.Name
+			if !ok {
+				return jsonUnknownFieldError{Path: fieldPath}
+			}
+			if err := rejectUnknownJSONFields(field.Value, fieldSchema, fieldPath); err != nil {
+				return err
+			}
+		}
+	case table.TypeList:
+		if schema.Kind != table.TypeList {
+			return nil
+		}
+		for _, item := range v.List {
+			if err := rejectUnknownJSONFields(item, schema.Elem, path+"[]"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *jsonSchemaInference) inferRecordInPlace(fields []table.RecordField) error {
+	for i, col := range s.columns {
+		v := table.Null()
+		if field, ok := recordFieldByName(fields, col); ok {
+			v = field.Value
+		}
+		merged, err := table.MergeValueSchemaStrictAtPath(s.schemas[i], v, col)
+		if err != nil {
+			return err
+		}
+		s.schemas[i] = merged
+	}
+
+	for _, field := range fields {
+		if _, ok := s.index[field.Name]; ok {
+			continue
+		}
+		schema, err := table.MergeValueSchemaStrictAtPath(nil, field.Value, field.Name)
+		if err != nil {
+			return err
+		}
+		if s.goodRows > 0 {
+			schema.Nullable = true
+		}
+		s.index[field.Name] = len(s.columns)
+		s.columns = append(s.columns, field.Name)
+		s.schemas = append(s.schemas, schema)
+	}
+
+	s.goodRows++
+	return nil
+}
+
+func recordFieldByName(fields []table.RecordField, name string) (table.RecordField, bool) {
+	i := sort.Search(len(fields), func(i int) bool { return fields[i].Name >= name })
+	if i < len(fields) && fields[i].Name == name {
+		return fields[i], true
+	}
+	return table.RecordField{}, false
+}
+
+func schemaFieldByName(fields []table.FieldDescriptor, name string) (*table.TypeDescriptor, bool) {
+	i := sort.Search(len(fields), func(i int) bool { return fields[i].Name >= name })
+	if i < len(fields) && fields[i].Name == name {
+		return fields[i].Type, true
+	}
+	return nil, false
+}
+
+func countJSONBadRecord(rec jsonLogicalRecord, rowIdx int, err error, maxBadRecords int, badRecords *int) error {
+	*badRecords++
+	if *badRecords > maxBadRecords {
+		return jsonRecordError(rec, rowIdx, err)
+	}
+	return nil
+}
+
+func jsonRecordError(rec jsonLogicalRecord, rowIdx int, err error) error {
+	loc := rec.loc
+	if loc == "" {
+		loc = fmt.Sprintf("row %d", rowIdx+1)
+	}
+	if rec.source != "" {
+		return fmt.Errorf("%s: %s: %w", rec.source, loc, err)
 	}
 	return fmt.Errorf("%s: %w", loc, err)
 }
 
-// anyToValue converts any Go value (from JSON, Avro, Parquet generic reader) to a table.Value.
+// anyToValue converts generic Go values to table values without applying
+// format-specific wrapper conventions.
 func anyToValue(v interface{}) table.Value {
 	switch val := v.(type) {
 	case nil:
 		return table.Null()
 	case bool:
 		return table.BoolVal(val)
+	case json.Number:
+		v, err := jsonNumberToValue(val)
+		if err != nil {
+			return table.Null()
+		}
+		return v
 	case float64:
-		// JSON numbers are float64; check if it's actually an integer
+		// Non-JSON generic readers may surface numeric values as float64.
 		if val == float64(int64(val)) {
 			return table.IntVal(int64(val))
 		}
@@ -1334,15 +1658,34 @@ func anyToValue(v interface{}) table.Value {
 		}
 		return table.ListVal(elems)
 	case map[string]interface{}:
-		if elem, ok := val["element"]; ok && len(val) == 1 {
-			return anyToValue(elem)
-		}
 		fields := buildRecordFields(val)
 		return table.RecordVal(fields)
 	default:
 		b, _ := json.Marshal(val)
 		return table.StrVal(string(b))
 	}
+}
+
+func jsonNumberToValue(n json.Number) (table.Value, error) {
+	if i, err := n.Int64(); err == nil {
+		return table.IntVal(i), nil
+	}
+	if f, err := n.Float64(); err == nil {
+		return table.FloatVal(f), nil
+	}
+	return table.Null(), jsonNumberError{Value: n.String()}
+}
+
+type jsonNumberError struct {
+	Path  string
+	Value string
+}
+
+func (e jsonNumberError) Error() string {
+	if e.Path == "" {
+		return fmt.Sprintf("unrepresentable JSON number %q", e.Value)
+	}
+	return fmt.Sprintf("%s unrepresentable JSON number %q", e.Path, e.Value)
 }
 
 // buildRecordFields creates a sorted []RecordField from a map.
@@ -1357,6 +1700,111 @@ func buildRecordFields(m map[string]interface{}) []table.RecordField {
 		fields[i] = table.RecordField{Name: k, Value: anyToValue(m[k])}
 	}
 	return fields
+}
+
+func buildJSONRecordFields(m map[string]interface{}) ([]table.RecordField, error) {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	fields := make([]table.RecordField, len(keys))
+	for i, k := range keys {
+		v, err := jsonValueToValue(m[k], k)
+		if err != nil {
+			return nil, err
+		}
+		fields[i] = table.RecordField{Name: k, Value: v}
+	}
+	return fields, nil
+}
+
+func jsonValueToValue(v interface{}, path string) (table.Value, error) {
+	switch val := v.(type) {
+	case nil:
+		return table.Null(), nil
+	case bool:
+		return table.BoolVal(val), nil
+	case json.Number:
+		out, err := jsonNumberToValue(val)
+		if err != nil {
+			if numberErr, ok := err.(jsonNumberError); ok {
+				numberErr.Path = path
+				return table.Null(), numberErr
+			}
+			return table.Null(), err
+		}
+		return out, nil
+	case string:
+		return table.StrVal(val), nil
+	case []interface{}:
+		elems := make([]table.Value, len(val))
+		for i, elem := range val {
+			out, err := jsonValueToValue(elem, path+"[]")
+			if err != nil {
+				return table.Null(), err
+			}
+			elems[i] = out
+		}
+		return table.ListVal(elems), nil
+	case map[string]interface{}:
+		fields, err := buildJSONRecordFieldsAtPath(val, path)
+		if err != nil {
+			return table.Null(), err
+		}
+		return table.RecordVal(fields), nil
+	default:
+		b, _ := json.Marshal(val)
+		return table.StrVal(string(b)), nil
+	}
+}
+
+func buildJSONRecordFieldsAtPath(m map[string]interface{}, path string) ([]table.RecordField, error) {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	fields := make([]table.RecordField, len(keys))
+	for i, k := range keys {
+		fieldPath := k
+		if path != "" {
+			fieldPath = path + "." + k
+		}
+		v, err := jsonValueToValue(m[k], fieldPath)
+		if err != nil {
+			return nil, err
+		}
+		fields[i] = table.RecordField{Name: k, Value: v}
+	}
+	return fields, nil
+}
+
+func parquetValue(v any) table.Value {
+	switch val := v.(type) {
+	case []any:
+		elems := make([]table.Value, len(val))
+		for i, elem := range val {
+			elems[i] = parquetValue(elem)
+		}
+		return table.ListVal(elems)
+	case map[string]any:
+		if elem, ok := val["element"]; ok && len(val) == 1 {
+			return parquetValue(elem)
+		}
+		keys := make([]string, 0, len(val))
+		for k := range val {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		fields := make([]table.RecordField, len(keys))
+		for i, k := range keys {
+			fields[i] = table.RecordField{Name: k, Value: parquetValue(val[k])}
+		}
+		return table.RecordVal(fields)
+	default:
+		return anyToValue(v)
+	}
 }
 
 const parquetColumnOrderMetadataKey = "dq.column_order"
@@ -1609,7 +2057,7 @@ func loadParquet(filename string) (*table.Table, error) {
 			}
 			vals := make([]table.Value, len(columns))
 			for j, col := range columns {
-				vals[j] = anyToValue(row[col])
+				vals[j] = parquetValue(row[col])
 			}
 			t.AddRow(vals)
 		}

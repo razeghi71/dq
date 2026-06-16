@@ -7,7 +7,7 @@ dq 'filename | op [args] | op2 [args] ... [| output_format]'
 ```
 
 * The entire query is passed as a **single-quoted string** to avoid shell interpretation of `|`, `{`, `}`, `>`, `<`, and backticks.
-* Takes a file (csv, avro, json, etc.) as input. Gzip-, Zstandard-, and zlib-wrapped deflate-compressed CSV/JSON/JSONL text files are supported via double extensions such as `.csv.gz` / `.jsonl.zst` / `.jsonl.deflate` or explicit `with compression=gzip` / `with compression=zstd` / `with compression=deflate`. CSV column types are inferred from the first 50 data rows by default; use `with infer_rows=-1` to infer from all rows, `with infer_rows=0` to load all non-null CSV cells as strings, and `with max_bad_records=N` to skip up to `N` post-inference type-conversion failures. JSON and JSONL infer recursive schemas from native JSON values before materialization; compatible ints/floats promote to float, missing fields become nullable, and incompatible native types such as `{"s":{"x":1}}` followed by `{"s":{"x":"bad"}}` fail at load time with a path such as `s.x`. Globs are supported (`logs/**/*.csv`, `orders/part-*.csv`) — matched files are concatenated. All matched files are loaded into memory before the pipeline runs. A zero-byte CSV (or BOM-/whitespace-only with no data rows) loads as an empty table (0 columns, 0 rows). Empty glob shards are skipped when establishing the column schema; the first non-empty shard defines the anchor columns. CSV rows must match the schema width by default (same rules for single files and glob shards); use `with allow_jagged_rows=true` for missing trailing columns (null-filled) and `with ignore_unknown_values=true` to drop extra columns. On glob sources, CSV-only options require `with format=csv` at parse time (e.g. `logs/part-* with format=csv, allow_jagged_rows=true`) — format cannot be inferred from the pattern alone. CSV glob shards without a detectable header row are read positionally under the first file's columns. Extended headers require shared column names plus new lowercase identifiers (`email`, not `Email`); renamed columns with no anchor overlap are positional.
+* Takes a file (csv, avro, json, etc.) as input. Gzip-, Zstandard-, and zlib-wrapped deflate-compressed CSV/JSON/JSONL text files are supported via double extensions such as `.csv.gz` / `.jsonl.zst` / `.jsonl.deflate` or explicit `with compression=gzip` / `with compression=zstd` / `with compression=deflate`. CSV, JSON, and JSONL infer schemas from the first 20480 logical records by default; use `with infer_rows=-1` to infer from all rows, `with infer_rows=0` to load all non-null CSV cells as strings, and `with max_bad_records=N` to skip up to `N` bad logical records after or during inference. `infer_rows=0` is invalid for JSON/JSONL. JSON and JSONL infer recursive schemas from native JSON values before materialization; compatible ints/floats promote to float, missing fields become nullable, and incompatible native types such as `{"s":{"x":1}}` followed by `{"s":{"x":"bad"}}` are bad records with a path such as `s.x`. Globs are supported (`logs/**/*.csv`, `orders/part-*.csv`) — matched files are concatenated. All matched files are loaded into memory before the pipeline runs. A zero-byte CSV (or BOM-/whitespace-only with no data rows) loads as an empty table (0 columns, 0 rows). Empty glob shards are skipped when establishing the column schema; the first non-empty shard defines the anchor columns. CSV rows must match the schema width by default (same rules for single files and glob shards); use `with allow_jagged_rows=true` for missing trailing columns (null-filled) and `with ignore_unknown_values=true` to drop extra columns. On glob sources, CSV-only options require `with format=csv` at parse time (e.g. `logs/part-* with format=csv, allow_jagged_rows=true`) — format cannot be inferred from the pattern alone. CSV glob shards without a detectable header row are read positionally under the first file's columns. Extended headers require shared column names plus new lowercase identifiers (`email`, not `Email`); renamed columns with no anchor overlap are positional.
 * Optional **`with key=value, ...`** on the primary source or join file sets load format, compression, and CSV options (see Load options below).
 * Optional **output format command** at the end of the query (`table`, `csv`, `json`, `jsonl`, `avro`, `parquet`); omitted means pretty table output. Output commands can write to a path with `to`, and can split files with `with split_rows=N`.
 * Everything is **pipe-based** — each op takes a table and returns a table.
@@ -134,6 +134,8 @@ logs/part-* with format=csv, allow_jagged_rows=true, ignore_unknown_values=true 
 sales.csv with infer_rows=-1 | describe
 ids.csv with infer_rows=0 | json
 sales.csv with max_bad_records=10 | count
+events.jsonl with infer_rows=-1 | describe
+events.jsonl with infer_rows=1000, max_bad_records=10 | count
 - with format=csv | filter { age > 25 }
 - with format=csv, compression=gzip | count
 - with format=jsonl, compression=zstd | count
@@ -152,17 +154,17 @@ users.csv | join orders.data with format=csv, compression=deflate on user_id
 | `delim` | csv | string, e.g. `delim=";"` | Default `,`; only the first character is used as the separator |
 | `allow_jagged_rows` | csv | `true`, `false` | Default `false`; when `true`, rows with fewer fields than the schema get null-filled trailing columns |
 | `ignore_unknown_values` | csv | `true`, `false` | Default `false`; when `true`, extra fields beyond the schema are dropped |
-| `infer_rows` | csv | `-1` or integer `>= 0` | Default `50`; number of data rows sampled for CSV type inference. `-1` scans all data rows; `0` disables inference and loads every non-null CSV cell as `TypeString` |
-| `max_bad_records` | csv | integer `>= 0` | Default `0`; maximum number of post-inference type-conversion failures to skip. Each bad record skips the whole row |
+| `infer_rows` | csv/json/jsonl | `-1` or integer `>= 0` | Default `20480`; number of data/logical records sampled for type/schema inference. `-1` scans all records; `0` is CSV-only and loads every non-null CSV cell as `TypeString`; `0` is invalid for JSON/JSONL |
+| `max_bad_records` | csv/json/jsonl | integer `>= 0` | Default `0`; maximum number of bad logical records to skip. Each bad record skips the whole row/JSON record |
 
-Format resolution: explicit `format=` → file extension → error (`use with format=...`). Literal gzip, zstd, and zlib-wrapped deflate double extensions infer both pieces: `.csv.gz` means `format=csv, compression=gzip`, `.jsonl.zst` means `format=jsonl, compression=zstd`, `.json.zstd` means `format=json, compression=zstd`, `.csv.deflate` means `format=csv, compression=deflate`, and `.jsonl.zlib` means `format=jsonl, compression=deflate`. `compression=deflate` means a zlib-wrapped deflate stream, not raw RFC1951 DEFLATE bytes. Use explicit `with compression=...` when the compressed file name is ambiguous or extensionless, e.g. `events.data with format=jsonl, compression=deflate`. Explicit `format=` overrides the inner suffix while suffix-based compression inference still applies, so `events.csv.deflate with format=jsonl` reads zlib-wrapped deflate JSONL. Stdin (`-`) requires `with format=...`; compressed stdin must be explicit (`- with format=csv, compression=gzip`, `- with format=jsonl, compression=zstd`, or `- with format=jsonl, compression=deflate`). Globs and extensionless paths cannot infer format at parse time — use `with format=...` before any CSV-only option (`header`, `delim`, `allow_jagged_rows`, `ignore_unknown_values`, `infer_rows`, `max_bad_records`), e.g. `part-* with format=csv, allow_jagged_rows=true`. Use `with format=...` when a glob matches mixed or missing extensions at load time.
+Format resolution: explicit `format=` → file extension → error (`use with format=...`). Literal gzip, zstd, and zlib-wrapped deflate double extensions infer both pieces: `.csv.gz` means `format=csv, compression=gzip`, `.jsonl.zst` means `format=jsonl, compression=zstd`, `.json.zstd` means `format=json, compression=zstd`, `.csv.deflate` means `format=csv, compression=deflate`, and `.jsonl.zlib` means `format=jsonl, compression=deflate`. `compression=deflate` means a zlib-wrapped deflate stream, not raw RFC1951 DEFLATE bytes. Use explicit `with compression=...` when the compressed file name is ambiguous or extensionless, e.g. `events.data with format=jsonl, compression=deflate`. Explicit `format=` overrides the inner suffix while suffix-based compression inference still applies, so `events.csv.deflate with format=jsonl` reads zlib-wrapped deflate JSONL. Stdin (`-`) requires `with format=...`; compressed stdin must be explicit (`- with format=csv, compression=gzip`, `- with format=jsonl, compression=zstd`, or `- with format=jsonl, compression=deflate`). Globs and extensionless paths cannot infer format at parse time — use `with format=...` before format-specific options when the format is not clear, e.g. `part-* with format=csv, allow_jagged_rows=true` or `part-* with format=jsonl, infer_rows=1000`. Use `with format=...` when a glob matches mixed or missing extensions at load time.
 
 ### CSV type inference and bad records
 
 CSV cells are text, but `dq` loads CSV columns into typed table storage. The loader uses a DuckDB-style covering-type inference pass:
 
 1. Establish the CSV column schema and collect data rows.
-2. Infer each column from the first `infer_rows` data rows (`50` by default). `infer_rows=-1` samples all data rows. `infer_rows=0` skips inference and makes every column `TypeString`.
+2. Infer each column from the first `infer_rows` data rows (`20480` by default). `infer_rows=-1` samples all data rows. `infer_rows=0` skips inference and makes every column `TypeString`.
 3. Materialize every row against the fixed inferred schema.
 
 Inference chooses the narrowest compatible type that covers all sampled non-null values:
@@ -193,7 +195,19 @@ For glob CSV sources, inference samples data rows across the deterministic expan
 
 ### JSON and JSONL recursive schemas
 
-JSON and JSONL values carry native types, so `dq` infers a recursive schema from the parsed values before materializing rows. This prevents native JSON type conflicts from being silently widened to strings.
+JSON and JSONL values carry native types, so `dq` infers a recursive schema from sampled parsed values before materializing rows. This prevents native JSON type conflicts from being silently widened to strings.
+
+JSON/JSONL inference and bad-record controls:
+
+* `infer_rows` defaults to `20480` logical records. JSONL non-empty lines and JSON array elements count as logical records.
+* `infer_rows=N` samples the first `N` logical records in deterministic source order. Bad records inside the sample window count toward the fixed window; skipped bad sample records are not replaced by later records.
+* `infer_rows=-1` scans the full logical source before materialization, preserving full-source strict inference behavior.
+* `infer_rows=0` is invalid for JSON/JSONL because JSON values already have native types. CSV's "all strings" mode does not apply.
+* `max_bad_records=0` (default) fails on the first malformed or schema-incompatible logical record.
+* `max_bad_records=N` skips up to `N` bad logical records. Skipping is whole-record: the entire JSONL line or JSON array element is omitted.
+* Malformed JSONL lines count as bad records when line boundaries are recoverable. Malformed top-level JSON array syntax fails the whole JSON file.
+* Fields first seen after the sampled JSON/JSONL schema is fixed are bad records, including nested fields such as `profile.email`; they are not silently dropped and do not widen the schema. Use `infer_rows=-1` or a larger sample when late sparse fields are expected.
+* For JSON/JSONL globs, logical records are sampled across deterministic expanded-file order under one schema and one bad-record budget.
 
 Schema inference rules:
 
@@ -216,10 +230,10 @@ Rules:
 * Empty arrays do not determine element type. If every observed array is empty or null-only, the element type falls back to nullable string.
 * Compatible nested numeric values promote recursively (`int` + `float` -> `float`).
 * Heterogeneous values inside one JSON array are preserved instead of stringified. The affected schema position is `mixed`: `[1, "two"]` is `list<mixed>`, and `[{"amt":1}, {"amt":"x"}]` is `list<record<amt:mixed>>`.
-* Outside the single-array `mixed` case, incompatible native types are load errors, not automatic string widening. Examples: the same field as `int` vs `string` across rows, a field as `record` vs `int` across rows, or `orders[].amount` as numeric in one row's typed list and string in another row's typed list.
+* Outside the single-array `mixed` case, incompatible native types are bad records, not automatic string widening. Examples: the same field as `int` vs `string` across rows, a field as `record` vs `int` across rows, or `orders[].amount` as numeric in one row's typed list and string in another row's typed list.
 * The `mixed` marker is limited to heterogeneity observed within a single array value. A typed array field that is `list<int>` in one JSON/JSONL row and `list<string>` in another row remains a schema conflict.
-* JSON array load errors report a row index such as `row 2`; JSONL load errors report a line number such as `line 2`. Errors include the nested path, expected schema, and actual schema where possible.
-* This strict recursive conflict behavior is specific to JSON/JSONL loading. Avro and Parquet readers are schema-bound and currently materialize through the normal table append path, so any inconsistent values produced there follow permissive table widening rather than JSON/JSONL strict load errors.
+* JSON array bad-record errors report a row index such as `row 2`; JSONL bad-record errors report a line number such as `line 2`. Errors include the source path when available, nested path, expected schema, and actual schema where possible. When the bad-record limit is exceeded, the reported record is the record that exceeded the limit.
+* This recursive schema and bad-record behavior is specific to JSON/JSONL loading. Avro and Parquet readers are schema-bound and currently materialize through the normal table append path, so any inconsistent values produced there follow permissive table widening rather than JSON/JSONL strict checks.
 
 Examples:
 

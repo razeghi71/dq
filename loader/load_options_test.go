@@ -10,18 +10,20 @@ import (
 	"github.com/razeghi71/dq/ast"
 )
 
-func TestLoadOptionsDefaultCSVInferRows(t *testing.T) {
+func TestLoadOptionsDefaultInferRows(t *testing.T) {
+	const wantDefaultInferRows = 20480
+
 	opts := normalizeOptions(Options{})
-	if opts.InferRows != defaultCSVInferRows {
-		t.Fatalf("default infer rows: got %d, want %d", opts.InferRows, defaultCSVInferRows)
+	if opts.InferRows != wantDefaultInferRows {
+		t.Fatalf("default infer rows: got %d, want %d", opts.InferRows, wantDefaultInferRows)
 	}
 	if opts.InferRowsSet {
 		t.Fatal("default infer rows should not mark InferRowsSet")
 	}
 
 	fromAST := FromAST(ast.LoadOptions{})
-	if fromAST.InferRows != defaultCSVInferRows {
-		t.Fatalf("FromAST default infer rows: got %d, want %d", fromAST.InferRows, defaultCSVInferRows)
+	if fromAST.InferRows != wantDefaultInferRows {
+		t.Fatalf("FromAST default infer rows: got %d, want %d", fromAST.InferRows, wantDefaultInferRows)
 	}
 	if fromAST.InferRowsSet {
 		t.Fatal("FromAST default infer rows should not mark InferRowsSet")
@@ -58,74 +60,76 @@ func TestLoadOptionsExplicitMaxBadRecordsZeroSurvivesFromAST(t *testing.T) {
 	}
 }
 
-func TestLoadOptionsRejectsMaxBadRecordsOnNonCSVWhenExplicitZero(t *testing.T) {
-	_, err := LoadReader(strings.NewReader(`[{"x":1}]`), Options{
-		Format:           "json",
-		MaxBadRecords:    0,
-		MaxBadRecordsSet: true,
-	})
-	if err == nil {
-		t.Fatal("expected max_bad_records=0 to be rejected for json")
+func TestLoadOptionsAllowJSONInferenceOptions(t *testing.T) {
+	cases := []struct {
+		name   string
+		format string
+		input  string
+	}{
+		{name: "json", format: "json", input: `[{"x":1}]`},
+		{name: "jsonl", format: "jsonl", input: "{\"x\":1}\n"},
 	}
-	if !strings.Contains(err.Error(), "max_bad_records applies only to csv format") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestLoadOptionsRejectsMaxBadRecordsOnNonCSVWhenNonZero(t *testing.T) {
-	_, err := LoadReader(strings.NewReader(`[{"x":1}]`), Options{
-		Format:        "json",
-		MaxBadRecords: 1,
-	})
-	if err == nil {
-		t.Fatal("expected max_bad_records=1 to be rejected for json")
-	}
-	if !strings.Contains(err.Error(), "max_bad_records applies only to csv format") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestLoadOptionsRejectsInferRowsOnNonCSVWhenNonDefault(t *testing.T) {
-	_, err := LoadReader(strings.NewReader(`[{"x":1}]`), Options{
-		Format:    "json",
-		InferRows: 1,
-	})
-	if err == nil {
-		t.Fatal("expected infer_rows=1 to be rejected for json")
-	}
-	if !strings.Contains(err.Error(), "infer_rows applies only to csv format") {
-		t.Fatalf("unexpected error: %v", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl, err := LoadReader(strings.NewReader(tc.input), Options{
+				Format:           tc.format,
+				InferRows:        1,
+				InferRowsSet:     true,
+				MaxBadRecords:    0,
+				MaxBadRecordsSet: true,
+			})
+			if err != nil {
+				t.Fatalf("load %s with inference options: %v", tc.format, err)
+			}
+			if tbl.NumRows != 1 || tbl.Get(0, "x").Int != 1 {
+				t.Fatalf("unexpected table: %s", tbl.String())
+			}
+		})
 	}
 }
 
-func TestLoadOptionsRejectsInferRowsOnNonCSVWhenExplicitDefault(t *testing.T) {
-	_, err := LoadReader(strings.NewReader(`[{"x":1}]`), Options{
-		Format:       "json",
-		InferRows:    defaultCSVInferRows,
-		InferRowsSet: true,
-	})
-	if err == nil {
-		t.Fatal("expected explicit infer_rows=default to be rejected for json")
-	}
-	if !strings.Contains(err.Error(), "infer_rows applies only to csv format") {
-		t.Fatalf("unexpected error: %v", err)
+func TestLoadOptionsRejectsJSONInferRowsZero(t *testing.T) {
+	for _, format := range []string{"json", "jsonl"} {
+		t.Run(format, func(t *testing.T) {
+			_, err := LoadReader(strings.NewReader(`[{"x":1}]`), Options{
+				Format:       format,
+				InferRows:    0,
+				InferRowsSet: true,
+			})
+			if err == nil {
+				t.Fatal("expected infer_rows=0 to be rejected")
+			}
+			if !strings.Contains(err.Error(), "infer_rows=0") || !strings.Contains(err.Error(), format) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
 	}
 }
 
-func TestLoadOptionsRejectsInvalidDirectCSVInferenceValues(t *testing.T) {
+func TestLoadOptionsRejectsInvalidDirectInferenceValues(t *testing.T) {
 	cases := []struct {
 		name string
 		opts Options
 		want string
 	}{
 		{
-			name: "infer_rows_too_negative",
+			name: "csv_infer_rows_too_negative",
 			opts: Options{Format: "csv", InferRows: -2},
 			want: "infer_rows must be -1 or greater",
 		},
 		{
-			name: "max_bad_records_negative",
+			name: "csv_max_bad_records_negative",
 			opts: Options{Format: "csv", MaxBadRecords: -1},
+			want: "max_bad_records must be greater than or equal to 0",
+		},
+		{
+			name: "json_infer_rows_too_negative",
+			opts: Options{Format: "json", InferRows: -2},
+			want: "infer_rows must be -1 or greater",
+		},
+		{
+			name: "jsonl_max_bad_records_negative",
+			opts: Options{Format: "jsonl", MaxBadRecords: -1},
 			want: "max_bad_records must be greater than or equal to 0",
 		},
 	}

@@ -115,9 +115,9 @@ func TestIntegrationCSVInferRowsAndBadRecords(t *testing.T) {
 		})
 	})
 
-	t.Run("default_errors_on_late_bad_record_after_50_data_rows", func(t *testing.T) {
-		path := writeCSVInferenceFile(t, dir, "late-bad.csv", csvInferenceRows("id,amount\n", 51, map[int]string{51: "51,abc"}))
-		expectCSVInferenceLoadError(t, path, "row 52", "amount", "int", "abc")
+	t.Run("default_errors_on_late_bad_record_after_20480_data_rows", func(t *testing.T) {
+		path := writeCSVInferenceFile(t, dir, "late-bad.csv", csvInferenceRows("id,amount\n", 20481, map[int]string{20481: "20481,abc"}))
+		expectCSVInferenceLoadError(t, path, "row 20482", "amount", "int", "abc")
 	})
 
 	t.Run("infer_all_rows_sees_late_string_and_infers_string", func(t *testing.T) {
@@ -139,11 +139,11 @@ func TestIntegrationCSVInferRowsAndBadRecords(t *testing.T) {
 
 	t.Run("max_bad_records_skips_whole_bad_rows", func(t *testing.T) {
 		path := writeCSVInferenceFile(t, dir, "skip-one.csv", csvInferenceRows("id,amount\n", 52, map[int]string{51: "51,abc"}))
-		result := loadAndQuery(t, path+" with max_bad_records=1", "count")
+		result := loadAndQuery(t, path+" with infer_rows=50, max_bad_records=1", "count")
 		if got := result.GetAt(0, 0).Int; got != 51 {
 			t.Fatalf("row count after skipping one bad row: got %d, want 51", got)
 		}
-		result = loadAndQuery(t, path+" with max_bad_records=1", "transform one = 1 | group one | reduce total = sum(amount) | remove grouped | select total")
+		result = loadAndQuery(t, path+" with infer_rows=50, max_bad_records=1", "transform one = 1 | group one | reduce total = sum(amount) | remove grouped | select total")
 		if got := result.GetAt(0, result.ColIndex("total")).Int; got != 13270 {
 			t.Fatalf("sum after skipping whole bad row: got %d, want 13270", got)
 		}
@@ -154,7 +154,7 @@ func TestIntegrationCSVInferRowsAndBadRecords(t *testing.T) {
 			51: "51,abc",
 			52: "52,def",
 		}))
-		expectCSVInferenceLoadError(t, path+" with max_bad_records=1", "row 53", "amount", "int", "def")
+		expectCSVInferenceLoadError(t, path+" with infer_rows=50, max_bad_records=1", "row 53", "amount", "int", "def")
 	})
 }
 
@@ -210,8 +210,8 @@ func TestIntegrationCSVInferenceCompressedInputs(t *testing.T) {
 			if err := os.WriteFile(path, tc.data, 0o644); err != nil {
 				t.Fatal(err)
 			}
-			expectCSVInferenceLoadError(t, path, "row 52", "amount", "abc")
-			result := loadAndQuery(t, path+" with max_bad_records=1", "count")
+			expectCSVInferenceLoadError(t, path+" with infer_rows=50", "row 52", "amount", "abc")
+			result := loadAndQuery(t, path+" with infer_rows=50, max_bad_records=1", "count")
 			if got := result.GetAt(0, 0).Int; got != 50 {
 				t.Fatalf("count after skipping compressed bad row: got %d, want 50", got)
 			}
@@ -224,10 +224,10 @@ func TestIntegrationCSVInferenceGlobAndStdin(t *testing.T) {
 		dir := t.TempDir()
 		writeCSVInferenceFile(t, dir, "a.csv", csvInferenceRows("id,amount\n", 50, nil))
 		writeCSVInferenceFile(t, dir, "b.csv", "id,amount\n51,abc\n52,520\n")
-		glob := filepath.Join(dir, "*.csv") + " with format=csv"
+		glob := filepath.Join(dir, "*.csv") + " with format=csv, infer_rows=50"
 
 		expectCSVInferenceLoadError(t, glob, "row 2", "amount", "abc")
-		assertCSVInferenceDescribe(t, glob+", infer_rows=-1", map[string]describeMeta{
+		assertCSVInferenceDescribe(t, filepath.Join(dir, "*.csv")+" with format=csv, infer_rows=-1", map[string]describeMeta{
 			"id":     {typ: "int", rows: 52},
 			"amount": {typ: "string", rows: 52},
 		})

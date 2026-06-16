@@ -92,8 +92,8 @@ type LoadOptions struct {
 	Delim               string // csv only; "" = comma
 	AllowJaggedRows     *bool  // csv only; nil = default (false)
 	IgnoreUnknownValues *bool  // csv only; nil = default (false)
-	InferRows           *int   // csv only; nil = default (50), -1 = all rows, 0 = all strings
-	MaxBadRecords       *int   // csv only; nil = default (0)
+	InferRows           *int   // csv/json/jsonl; nil = default (20480), -1 = all rows, 0 = csv all strings
+	MaxBadRecords       *int   // csv/json/jsonl; nil = default (0)
 }
 
 // --- Operations (pipeline stages) ---

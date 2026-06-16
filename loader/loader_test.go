@@ -736,7 +736,7 @@ func TestLoadJSONLInvalidLineNumberIncludesBlankLines(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected invalid JSONL error")
 	}
-	if !strings.Contains(err.Error(), "invalid JSON on line 3") {
+	if !strings.Contains(err.Error(), "line 3") || !strings.Contains(err.Error(), "invalid JSON") {
 		t.Fatalf("expected physical line 3 in error, got %v", err)
 	}
 }
@@ -1378,7 +1378,10 @@ func TestAnyToValueAdditionalTypes(t *testing.T) {
 	if got := anyToValue([]interface{}{float64(1), "x"}); got.Type != table.TypeList || len(got.List) != 2 || got.List[0].Int != 1 || got.List[1].Str != "x" {
 		t.Fatalf("slice: want [1,x], got %v", got)
 	}
-	if got := anyToValue(map[string]interface{}{"element": int64(9)}); got.Type != table.TypeInt || got.Int != 9 {
+	if got := anyToValue(map[string]interface{}{"element": int64(9)}); got.Type != table.TypeRecord || len(got.Fields) != 1 || got.Fields[0].Name != "element" || got.Fields[0].Value.Int != 9 {
+		t.Fatalf("generic element field: want record<element:9>, got %v", got)
+	}
+	if got := parquetValue(map[string]interface{}{"element": int64(9)}); got.Type != table.TypeInt || got.Int != 9 {
 		t.Fatalf("parquet element wrapper: want 9, got %v", got)
 	}
 	if got := anyToValue(struct{ X int }{X: 1}); got.Type != table.TypeString || got.Str != `{"X":1}` {

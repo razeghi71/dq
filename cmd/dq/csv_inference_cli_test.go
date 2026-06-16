@@ -39,14 +39,14 @@ func TestCLICSVInferenceBadRecordsEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	path := writeCLICSVInferenceFile(t, dir, "late-bad.csv", cliCSVInferenceRows("id,amount\n", 52, map[int]string{51: "51,abc"}))
 
-	out := runCLIQueryExpectError(t, bin, path+" | count")
+	out := runCLIQueryExpectError(t, bin, path+" with infer_rows=50 | count")
 	for _, part := range []string{"load error", "row 52", "amount", "int", "abc"} {
 		if !strings.Contains(strings.ToLower(string(out)), strings.ToLower(part)) {
 			t.Fatalf("expected error containing %q, got:\n%s", part, out)
 		}
 	}
 
-	out = runCLIQuery(t, bin, path+" with max_bad_records=1 | count | json")
+	out = runCLIQuery(t, bin, path+" with infer_rows=50, max_bad_records=1 | count | json")
 	var rows []map[string]int64
 	if err := json.Unmarshal(out, &rows); err != nil {
 		t.Fatalf("json output: %v\n%s", err, out)
@@ -59,6 +59,18 @@ func TestCLICSVInferenceBadRecordsEndToEnd(t *testing.T) {
 func TestCLICSVInferenceModesEndToEnd(t *testing.T) {
 	bin := buildCLI(t)
 	dir := t.TempDir()
+
+	t.Run("default_samples_more_than_50_rows", func(t *testing.T) {
+		path := writeCLICSVInferenceFile(t, dir, "default-sample.csv", cliCSVInferenceRows("id,amount\n", 51, map[int]string{51: "51,abc"}))
+		out := runCLIQuery(t, bin, path+" | describe | filter { column == \"amount\" } | json")
+		var rows []map[string]any
+		if err := json.Unmarshal(out, &rows); err != nil {
+			t.Fatalf("json output: %v\n%s", err, out)
+		}
+		if len(rows) != 1 || rows[0]["type"] != "string" || rows[0]["row_count"].(float64) != 51 {
+			t.Fatalf("amount describe row: got %#v, want string type over 51 rows", rows)
+		}
+	})
 
 	t.Run("infer_all_rows_falls_back_to_string", func(t *testing.T) {
 		path := writeCLICSVInferenceFile(t, dir, "infer-all.csv", cliCSVInferenceRows("id,amount\n", 51, map[int]string{51: "51,abc"}))
@@ -110,7 +122,7 @@ func TestCLICSVInferenceCompressedInputsEndToEnd(t *testing.T) {
 			if err := os.WriteFile(path, tc.data, 0o644); err != nil {
 				t.Fatal(err)
 			}
-			out := runCLIQuery(t, bin, path+" with max_bad_records=1 | count | json")
+			out := runCLIQuery(t, bin, path+" with infer_rows=50, max_bad_records=1 | count | json")
 			var rows []map[string]int64
 			if err := json.Unmarshal(out, &rows); err != nil {
 				t.Fatalf("json output: %v\n%s", err, out)
@@ -122,17 +134,17 @@ func TestCLICSVInferenceCompressedInputsEndToEnd(t *testing.T) {
 	}
 }
 
-func TestCLICSVInferenceOptionsRejectedForNonCSVFormats(t *testing.T) {
+func TestCLIInferenceOptionsRejectedForSchemaFormats(t *testing.T) {
 	bin := buildCLI(t)
 	cases := []struct {
 		name  string
 		query string
 		want  string
 	}{
-		{"json_infer_rows", "../../testdata/users.json with infer_rows=1 | count", "infer_rows applies only to csv"},
-		{"jsonl_max_bad_records", "../../testdata/users.jsonl with max_bad_records=1 | count", "max_bad_records applies only to csv"},
-		{"avro_infer_rows", "../../testdata/users.avro with infer_rows=1 | count", "infer_rows applies only to csv"},
-		{"parquet_max_bad_records", "../../testdata/users.parquet with max_bad_records=1 | count", "max_bad_records applies only to csv"},
+		{"avro_infer_rows", "../../testdata/users.avro with infer_rows=1 | count", "infer_rows applies only"},
+		{"avro_max_bad_records", "../../testdata/users.avro with max_bad_records=1 | count", "max_bad_records applies only"},
+		{"parquet_infer_rows", "../../testdata/users.parquet with infer_rows=1 | count", "infer_rows applies only"},
+		{"parquet_max_bad_records", "../../testdata/users.parquet with max_bad_records=1 | count", "max_bad_records applies only"},
 	}
 
 	for _, tc := range cases {

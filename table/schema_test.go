@@ -478,6 +478,33 @@ func TestNewTableWithSchemasColumnSchemaAndAddRowTyped(t *testing.T) {
 	}
 }
 
+func TestAddRowTypedUpdatesSchemaNullabilityForAcceptedNulls(t *testing.T) {
+	tbl := NewTableWithSchemas([]string{"id", "s", "orders"}, []*TypeDescriptor{
+		td(TypeInt),
+		recordOf(field("x", td(TypeInt))),
+		listOf(recordOf(field("amount", td(TypeInt)))),
+	})
+
+	if err := tbl.AddRowTyped([]Value{
+		IntVal(1),
+		RecordVal([]RecordField{{Name: "x", Value: IntVal(2)}}),
+		ListVal([]Value{RecordVal([]RecordField{{Name: "amount", Value: IntVal(3)}})}),
+	}); err != nil {
+		t.Fatalf("initial AddRowTyped returned error: %v", err)
+	}
+	if err := tbl.AddRowTyped([]Value{
+		Null(),
+		RecordVal(nil),
+		ListVal([]Value{RecordVal(nil)}),
+	}); err != nil {
+		t.Fatalf("null AddRowTyped returned error: %v", err)
+	}
+
+	requireSchemaString(t, tbl.Col(0).Schema(), "int?")
+	requireSchemaString(t, tbl.Col(1).Schema(), "record<x:int?>")
+	requireSchemaString(t, tbl.Col(2).Schema(), "list<record<amount:int?>>")
+}
+
 func TestAddRowTypedReportsCoerceFailureDuringMaterialization(t *testing.T) {
 	schema := recordOf(field("x", td(TypeInt)))
 	tbl := NewTableWithSchemas([]string{"s"}, []*TypeDescriptor{schema})

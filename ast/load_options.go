@@ -36,7 +36,7 @@ func IsSupportedLoadFormat(format string) bool {
 	return isSupportedFormat(supportedLoadFormats, format)
 }
 
-// ValidateLoadOptions checks format and CSV-only options when format is explicit.
+// ValidateLoadOptions checks format and format-specific options when format is explicit.
 func ValidateLoadOptions(opts LoadOptions) error {
 	if opts.Format != "" {
 		if !IsSupportedLoadFormat(opts.Format) {
@@ -54,8 +54,8 @@ func ValidateLoadOptions(opts LoadOptions) error {
 	if err := validateLoadOptionValues(opts, "with: "); err != nil {
 		return err
 	}
-	if opts.Format != "" && opts.Format != "csv" {
-		return validateCSVOnlyOptions(opts, opts.Format, "with: ")
+	if opts.Format != "" {
+		return validateFormatSpecificOptions(opts, opts.Format, "with: ")
 	}
 	return nil
 }
@@ -77,15 +77,22 @@ func ValidateLoadOptionsForFilename(filename string, opts LoadOptions) error {
 			return fmt.Errorf("with: compression=%s applies only to csv, json, and jsonl formats", opts.Compression)
 		}
 	}
-	return validateCSVOnlyOptions(opts, format, "with: ")
+	return validateFormatSpecificOptions(opts, format, "with: ")
 }
 
-// ValidateCSVOnlyOptionsForFormat checks CSV-only load options against a resolved format (load-time).
-func ValidateCSVOnlyOptionsForFormat(opts LoadOptions, format, prefix string) error {
+// ValidateLoadOptionsForFormat checks load options against a resolved format (load-time).
+func ValidateLoadOptionsForFormat(opts LoadOptions, format, prefix string) error {
 	if err := validateLoadOptionValues(opts, prefix); err != nil {
 		return err
 	}
-	return validateCSVOnlyOptions(opts, format, prefix)
+	return validateFormatSpecificOptions(opts, format, prefix)
+}
+
+// ValidateCSVOnlyOptionsForFormat checks load options against a resolved format.
+//
+// Deprecated: use ValidateLoadOptionsForFormat.
+func ValidateCSVOnlyOptionsForFormat(opts LoadOptions, format, prefix string) error {
+	return ValidateLoadOptionsForFormat(opts, format, prefix)
 }
 
 func validateLoadOptionValues(opts LoadOptions, prefix string) error {
@@ -98,15 +105,15 @@ func validateLoadOptionValues(opts LoadOptions, prefix string) error {
 	return nil
 }
 
-func validateCSVOnlyOptions(opts LoadOptions, format, prefix string) error {
+func validateFormatSpecificOptions(opts LoadOptions, format, prefix string) error {
 	if opts.Header == nil && opts.Delim == "" && opts.AllowJaggedRows == nil && opts.IgnoreUnknownValues == nil && opts.InferRows == nil && opts.MaxBadRecords == nil {
-		return nil
-	}
-	if format == "csv" {
 		return nil
 	}
 	if format == "" || !IsSupportedLoadFormat(format) {
 		return fmt.Errorf("%scannot determine file format: use with format=... in query (%s)", prefix, LoadFormatsList())
+	}
+	if format == "csv" {
+		return nil
 	}
 	if opts.Header != nil {
 		return fmt.Errorf("%sheader applies only to csv format", prefix)
@@ -120,10 +127,16 @@ func validateCSVOnlyOptions(opts LoadOptions, format, prefix string) error {
 	if opts.IgnoreUnknownValues != nil {
 		return fmt.Errorf("%signore_unknown_values applies only to csv format", prefix)
 	}
-	if opts.InferRows != nil {
-		return fmt.Errorf("%sinfer_rows applies only to csv format", prefix)
+	if format == "json" || format == "jsonl" {
+		if opts.InferRows != nil && *opts.InferRows == 0 {
+			return fmt.Errorf("%sinfer_rows=0 is invalid for %s format", prefix, format)
+		}
+		return nil
 	}
-	return fmt.Errorf("%smax_bad_records applies only to csv format", prefix)
+	if opts.InferRows != nil {
+		return fmt.Errorf("%sinfer_rows applies only to csv, json, and jsonl formats", prefix)
+	}
+	return fmt.Errorf("%smax_bad_records applies only to csv, json, and jsonl formats", prefix)
 }
 
 func inferFormatFromFilename(filename string) string {

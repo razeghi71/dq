@@ -627,10 +627,13 @@ func (t *Table) AddRow(values []Value) {
 }
 
 // AddRowTyped appends a row after validating values against existing column
-// schemas. It never widens columns; every non-null value must already fit the
-// column schema and concrete storage type. Use AddRow for permissive widening.
+// schemas. It never widens concrete types; every non-null value must already fit
+// the column schema and storage type. Accepted nulls are merged into the schema
+// so describe can report top-level and nested nullability accurately. Use AddRow
+// for permissive widening.
 func (t *Table) AddRowTyped(values []Value) error {
 	coerced := make([]Value, len(t.cols))
+	nextSchemas := make([]*TypeDescriptor, len(t.cols))
 	for i, col := range t.cols {
 		v := Null()
 		if i < len(values) {
@@ -643,9 +646,19 @@ func (t *Table) AddRowTyped(values []Value) error {
 		if cv.Type != TypeNull && col.typ == TypeNull {
 			return fmt.Errorf("column %q has no concrete type for non-null %s value", col.name, TypeName(cv.Type))
 		}
+		if col.schema != nil {
+			nextSchema, err := MergeValueSchemaStrictAtPath(cloneTypeDescriptor(col.schema), cv, col.name)
+			if err != nil {
+				return err
+			}
+			nextSchemas[i] = nextSchema
+		}
 		coerced[i] = cv
 	}
 	for i, col := range t.cols {
+		if nextSchemas[i] != nil {
+			col.schema = nextSchemas[i]
+		}
 		col.appendCoerced(coerced[i])
 	}
 	t.NumRows++
