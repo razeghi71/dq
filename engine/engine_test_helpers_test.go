@@ -11,6 +11,12 @@ type describeMeta struct {
 	rows int64
 }
 
+type describeSchemaMeta struct {
+	typ    string
+	rows   int64
+	schema string
+}
+
 // typedValuesTable is a single-row table with one value of each scalar and container type.
 func typedValuesTable() *table.Table {
 	tbl := table.NewTable([]string{"s", "xs", "n", "price", "rec", "flag", "nilcol"})
@@ -49,11 +55,11 @@ func assertIntColByName(t *testing.T, result *table.Table, nameCol, intCol strin
 
 func assertDescribeRows(t *testing.T, result *table.Table, want map[string]describeMeta) {
 	t.Helper()
-	if len(result.Columns) != 3 ||
+	if (len(result.Columns) != 3 && len(result.Columns) != 4) ||
 		result.Columns[0] != "column" ||
 		result.Columns[1] != "type" ||
 		result.Columns[2] != "row_count" {
-		t.Fatalf("describe columns: got %v, want [column type row_count]", result.Columns)
+		t.Fatalf("describe columns: got %v, want [column type row_count] with optional schema column", result.Columns)
 	}
 	if result.NumRows != len(want) {
 		t.Fatalf("describe row count: got %d, want %d; table=%s", result.NumRows, len(want), result.String())
@@ -68,6 +74,47 @@ func assertDescribeRows(t *testing.T, result *table.Table, want map[string]descr
 			t.Fatalf("describe row %d has wrong value types: column=%v type=%v row_count=%v", i, col.Type, typ.Type, rows.Type)
 		}
 		got[col.Str] = describeMeta{typ: typ.Str, rows: rows.Int}
+	}
+	for name, w := range want {
+		g, ok := got[name]
+		if !ok {
+			t.Errorf("describe missing column %q; got %v", name, got)
+			continue
+		}
+		if g != w {
+			t.Errorf("describe %q: got %+v, want %+v", name, g, w)
+		}
+	}
+	for name := range got {
+		if _, ok := want[name]; !ok {
+			t.Errorf("describe unexpected column %q; got %v", name, got)
+		}
+	}
+}
+
+func assertDescribeSchemaRows(t *testing.T, result *table.Table, want map[string]describeSchemaMeta) {
+	t.Helper()
+	if len(result.Columns) != 4 ||
+		result.Columns[0] != "column" ||
+		result.Columns[1] != "type" ||
+		result.Columns[2] != "row_count" ||
+		result.Columns[3] != "schema" {
+		t.Fatalf("describe columns: got %v, want [column type row_count schema]", result.Columns)
+	}
+	if result.NumRows != len(want) {
+		t.Fatalf("describe row count: got %d, want %d; table=%s", result.NumRows, len(want), result.String())
+	}
+
+	got := make(map[string]describeSchemaMeta, result.NumRows)
+	for i := 0; i < result.NumRows; i++ {
+		col := result.GetAt(i, 0)
+		typ := result.GetAt(i, 1)
+		rows := result.GetAt(i, 2)
+		schema := result.GetAt(i, 3)
+		if col.Type != table.TypeString || typ.Type != table.TypeString || rows.Type != table.TypeInt || schema.Type != table.TypeString {
+			t.Fatalf("describe row %d has wrong value types: column=%v type=%v row_count=%v schema=%v", i, col.Type, typ.Type, rows.Type, schema.Type)
+		}
+		got[col.Str] = describeSchemaMeta{typ: typ.Str, rows: rows.Int, schema: schema.Str}
 	}
 	for name, w := range want {
 		g, ok := got[name]

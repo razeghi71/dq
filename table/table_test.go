@@ -100,6 +100,49 @@ func TestTableAddRowAndGetAt(t *testing.T) {
 	}
 }
 
+func TestListToTableHappyPathAndErrors(t *testing.T) {
+	tbl, err := ListToTable(ListVal([]Value{
+		RecordVal([]RecordField{{Name: "id", Value: IntVal(1)}, {Name: "name", Value: StrVal("a")}}),
+		RecordVal([]RecordField{{Name: "id", Value: IntVal(2)}}),
+	}))
+	if err != nil {
+		t.Fatalf("ListToTable returned error: %v", err)
+	}
+	requireColumnOrder(t, tbl.Columns, []string{"id", "name"})
+	if tbl.NumRows != 2 {
+		t.Fatalf("rows: got %d, want 2", tbl.NumRows)
+	}
+	if got := tbl.Get(1, "name"); !got.IsNull() {
+		t.Fatalf("missing record field: got %v, want null", got)
+	}
+
+	empty, err := ListToTable(ListVal(nil))
+	if err != nil {
+		t.Fatalf("empty ListToTable returned error: %v", err)
+	}
+	if empty.NumRows != 0 || len(empty.Columns) != 0 {
+		t.Fatalf("empty table: got %d rows and columns %v", empty.NumRows, empty.Columns)
+	}
+
+	for _, tc := range []struct {
+		name string
+		v    Value
+	}{
+		{name: "not list", v: IntVal(1)},
+		{name: "first element not record", v: ListVal([]Value{IntVal(1)})},
+		{name: "later element not record", v: ListVal([]Value{
+			RecordVal([]RecordField{{Name: "id", Value: IntVal(1)}}),
+			StrVal("bad"),
+		})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := ListToTable(tc.v); err == nil {
+				t.Fatal("expected ListToTable error")
+			}
+		})
+	}
+}
+
 func TestNewTableWithTypesPreservesDeclaredTypes(t *testing.T) {
 	tbl := NewTableWithTypes([]string{"id", "amount", "note", "active"}, []ValueType{
 		TypeInt,

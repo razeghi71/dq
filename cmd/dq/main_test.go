@@ -914,6 +914,23 @@ func TestCLIDescribeDefaultTable(t *testing.T) {
 	}
 }
 
+func TestCLIDescribeSchemaDefaultTable(t *testing.T) {
+	bin := buildCLI(t)
+	out := runCLIQuery(t, bin, "../../testdata/nested.json | describe")
+	s := string(out)
+	for _, want := range []string{
+		"schema",
+		"address",
+		"record<city:string, street:string, zip:string>",
+		"orders",
+		"list<record<amount:float, order_id:int, status:string>>",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("describe schema table output missing %q:\n%s", want, s)
+		}
+	}
+}
+
 func TestCLIDescribeJSONCanBeFiltered(t *testing.T) {
 	bin := buildCLI(t)
 	cmd := exec.Command(bin, `../../testdata/users.csv | describe | filter { type == "string" } | sort column | json`)
@@ -939,6 +956,34 @@ func TestCLIDescribeJSONCanBeFiltered(t *testing.T) {
 	}
 }
 
+func TestCLIDescribeSchemaJSONForNestedInputFormats(t *testing.T) {
+	bin := buildCLI(t)
+	files := []struct {
+		name string
+		path string
+	}{
+		{"json", "../../testdata/nested.json"},
+		{"jsonl", "../../testdata/nested.jsonl"},
+		{"avro", "../../testdata/nested.avro"},
+		{"parquet", "../../testdata/nested.parquet"},
+	}
+	for _, file := range files {
+		t.Run(file.name, func(t *testing.T) {
+			out := runCLIQuery(t, bin, file.path+" | describe | json")
+			rows := cliDescribeRowsByColumn(t, out)
+			if got := rows["address"]["schema"]; got != "record<city:string, street:string, zip:string>" {
+				t.Fatalf("address schema: got %#v", got)
+			}
+			if got := rows["orders"]["schema"]; got != "list<record<amount:float, order_id:int, status:string>>" {
+				t.Fatalf("orders schema: got %#v", got)
+			}
+			if got := rows["profile"]["schema"]; got != "record<history:list<record<date:string, events:list<string>>>, stats:record<logins:int, score:float>>" {
+				t.Fatalf("profile schema: got %#v", got)
+			}
+		})
+	}
+}
+
 func TestCLIDescribeAfterFilterCSV(t *testing.T) {
 	bin := buildCLI(t)
 	cmd := exec.Command(bin, `../../testdata/users.csv | filter { city == "NY" } | describe | csv`)
@@ -956,6 +1001,23 @@ func TestCLIDescribeAfterFilterCSV(t *testing.T) {
 	for _, want := range wantLines {
 		if !strings.Contains(got, want) {
 			t.Fatalf("CSV describe output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestCLIDescribeSchemaCSVOutput(t *testing.T) {
+	bin := buildCLI(t)
+	out := runCLIQuery(t, bin, `../../testdata/users.csv | describe | csv`)
+	got := strings.TrimSpace(string(out))
+	wantLines := []string{
+		"column,type,row_count,schema",
+		"name,string,6,string",
+		"age,int,6,int",
+		"city,string,6,string",
+	}
+	for _, want := range wantLines {
+		if !strings.Contains(got, want) {
+			t.Fatalf("CSV describe schema output missing %q:\n%s", want, got)
 		}
 	}
 }
@@ -980,6 +1042,24 @@ func TestCLIDescribeStdinJSONL(t *testing.T) {
 	}
 }
 
+func TestCLIDescribeSchemaConflictFails(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mixed.jsonl")
+	data := "{\"id\":1,\"s\":{\"x\":1}}\n{\"id\":2,\"s\":{\"x\":\"bad\"}}\n"
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bin := buildCLI(t)
+	out := runCLIQueryExpectError(t, bin, path+" | describe | json")
+	msg := strings.ToLower(string(out))
+	for _, want := range []string{"line 2", "s.x", "int", "string"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("expected CLI schema error to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
 func TestCLIDescribeRejectsArguments(t *testing.T) {
 	bin := buildCLI(t)
 	cmd := exec.Command(bin, "../../testdata/users.csv | describe stats")
@@ -990,6 +1070,23 @@ func TestCLIDescribeRejectsArguments(t *testing.T) {
 	if !strings.Contains(string(out), "parse error") || !strings.Contains(string(out), "unexpected token") {
 		t.Fatalf("expected unexpected-token parse error, got:\n%s", out)
 	}
+}
+
+func cliDescribeRowsByColumn(t *testing.T, out []byte) map[string]map[string]any {
+	t.Helper()
+	var rows []map[string]any
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatalf("invalid describe JSON: %v\n%s", err, out)
+	}
+	got := make(map[string]map[string]any, len(rows))
+	for _, row := range rows {
+		col, ok := row["column"].(string)
+		if !ok {
+			t.Fatalf("describe row has non-string column: %#v", row)
+		}
+		got[col] = row
+	}
+	return got
 }
 
 func TestCLIOutputFormatAvro(t *testing.T) {

@@ -159,6 +159,17 @@ func TestDescribeTypedValues(t *testing.T) {
 	}
 }
 
+func TestDescribeSchemaForConstructedRecord(t *testing.T) {
+	result := runQuery(t, usersTable(), `transform profile = struct(name = name, age = age, meta = struct(city = city)) | select profile | describe`)
+	assertDescribeSchemaRows(t, result, map[string]describeSchemaMeta{
+		"profile": {
+			typ:    "record",
+			rows:   6,
+			schema: "record<age:int, meta:record<city:string>, name:string>",
+		},
+	})
+}
+
 func TestDescribeAfterFilterFalseReportsNullTypes(t *testing.T) {
 	result := runQuery(t, usersTable(), "filter { false } | describe")
 	assertDescribeRows(t, result, map[string]describeMeta{

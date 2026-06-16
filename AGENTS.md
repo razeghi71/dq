@@ -7,7 +7,7 @@ dq 'filename | op [args] | op2 [args] ... [| output_format]'
 ```
 
 * The entire query is passed as a **single-quoted string** to avoid shell interpretation of `|`, `{`, `}`, `>`, `<`, and backticks.
-* Takes a file (csv, avro, json, etc.) as input. Gzip-, Zstandard-, and zlib-wrapped deflate-compressed CSV/JSON/JSONL text files are supported via double extensions such as `.csv.gz` / `.jsonl.zst` / `.jsonl.deflate` or explicit `with compression=gzip` / `with compression=zstd` / `with compression=deflate`. CSV column types are inferred from the first 50 data rows by default; use `with infer_rows=-1` to infer from all rows, `with infer_rows=0` to load all non-null CSV cells as strings, and `with max_bad_records=N` to skip up to `N` post-inference type-conversion failures. Globs are supported (`logs/**/*.csv`, `orders/part-*.csv`) — matched files are concatenated. All matched files are loaded into memory before the pipeline runs. A zero-byte CSV (or BOM-/whitespace-only with no data rows) loads as an empty table (0 columns, 0 rows). Empty glob shards are skipped when establishing the column schema; the first non-empty shard defines the anchor columns. CSV rows must match the schema width by default (same rules for single files and glob shards); use `with allow_jagged_rows=true` for missing trailing columns (null-filled) and `with ignore_unknown_values=true` to drop extra columns. On glob sources, CSV-only options require `with format=csv` at parse time (e.g. `logs/part-* with format=csv, allow_jagged_rows=true`) — format cannot be inferred from the pattern alone. CSV glob shards without a detectable header row are read positionally under the first file's columns. Extended headers require shared column names plus new lowercase identifiers (`email`, not `Email`); renamed columns with no anchor overlap are positional.
+* Takes a file (csv, avro, json, etc.) as input. Gzip-, Zstandard-, and zlib-wrapped deflate-compressed CSV/JSON/JSONL text files are supported via double extensions such as `.csv.gz` / `.jsonl.zst` / `.jsonl.deflate` or explicit `with compression=gzip` / `with compression=zstd` / `with compression=deflate`. CSV column types are inferred from the first 50 data rows by default; use `with infer_rows=-1` to infer from all rows, `with infer_rows=0` to load all non-null CSV cells as strings, and `with max_bad_records=N` to skip up to `N` post-inference type-conversion failures. JSON and JSONL infer recursive schemas from native JSON values before materialization; compatible ints/floats promote to float, missing fields become nullable, and incompatible native types such as `{"s":{"x":1}}` followed by `{"s":{"x":"bad"}}` fail at load time with a path such as `s.x`. Globs are supported (`logs/**/*.csv`, `orders/part-*.csv`) — matched files are concatenated. All matched files are loaded into memory before the pipeline runs. A zero-byte CSV (or BOM-/whitespace-only with no data rows) loads as an empty table (0 columns, 0 rows). Empty glob shards are skipped when establishing the column schema; the first non-empty shard defines the anchor columns. CSV rows must match the schema width by default (same rules for single files and glob shards); use `with allow_jagged_rows=true` for missing trailing columns (null-filled) and `with ignore_unknown_values=true` to drop extra columns. On glob sources, CSV-only options require `with format=csv` at parse time (e.g. `logs/part-* with format=csv, allow_jagged_rows=true`) — format cannot be inferred from the pattern alone. CSV glob shards without a detectable header row are read positionally under the first file's columns. Extended headers require shared column names plus new lowercase identifiers (`email`, not `Email`); renamed columns with no anchor overlap are positional.
 * Optional **`with key=value, ...`** on the primary source or join file sets load format, compression, and CSV options (see Load options below).
 * Optional **output format command** at the end of the query (`table`, `csv`, `json`, `jsonl`, `avro`, `parquet`); omitted means pretty table output. Output commands can write to a path with `to`, and can split files with `with split_rows=N`.
 * Everything is **pipe-based** — each op takes a table and returns a table.
@@ -191,6 +191,58 @@ After inference, non-null values must parse as the inferred type. Empty cells an
 
 For glob CSV sources, inference samples data rows across the deterministic expanded-file order after repeated headers and empty shards are handled. Header rows do not count toward `infer_rows`.
 
+### JSON and JSONL recursive schemas
+
+JSON and JSONL values carry native types, so `dq` infers a recursive schema from the parsed values before materializing rows. This prevents native JSON type conflicts from being silently widened to strings.
+
+Schema inference rules:
+
+| Values | Inferred schema |
+|--------|-----------------|
+| ints only | `int` |
+| ints + floats | `float` |
+| floats only | `float` |
+| strings only | `string` |
+| booleans only | `bool` |
+| objects | `record<...>` with fields merged by name |
+| arrays | `list<...>` with homogeneous elements merged recursively |
+| heterogeneous values inside one array | `mixed` at the affected element or field |
+| null / missing only | nullable string fallback when finalized |
+
+Rules:
+* JSON object fields match by name, not position. Field order in `schema` strings is deterministic by field name.
+* Missing object fields and explicit nulls both materialize as `null` and mark the field nullable.
+* Missing top-level columns also materialize as `null` for that row.
+* Empty arrays do not determine element type. If every observed array is empty or null-only, the element type falls back to nullable string.
+* Compatible nested numeric values promote recursively (`int` + `float` -> `float`).
+* Heterogeneous values inside one JSON array are preserved instead of stringified. The affected schema position is `mixed`: `[1, "two"]` is `list<mixed>`, and `[{"amt":1}, {"amt":"x"}]` is `list<record<amt:mixed>>`.
+* Outside the single-array `mixed` case, incompatible native types are load errors, not automatic string widening. Examples: the same field as `int` vs `string` across rows, a field as `record` vs `int` across rows, or `orders[].amount` as numeric in one row's typed list and string in another row's typed list.
+* The `mixed` marker is limited to heterogeneity observed within a single array value. A typed array field that is `list<int>` in one JSON/JSONL row and `list<string>` in another row remains a schema conflict.
+* JSON array load errors report a row index such as `row 2`; JSONL load errors report a line number such as `line 2`. Errors include the nested path, expected schema, and actual schema where possible.
+* This strict recursive conflict behavior is specific to JSON/JSONL loading. Avro and Parquet readers are schema-bound and currently materialize through the normal table append path, so any inconsistent values produced there follow permissive table widening rather than JSON/JSONL strict load errors.
+
+Examples:
+
+```jsonl
+{"s":{"x":1}}
+{"s":{"y":"yes"}}
+```
+
+This loads as `schema = record<x:int?, y:string?>`.
+
+```jsonl
+{"xs":[1,"two"]}
+```
+
+This loads as `schema = list<mixed>` and preserves both the integer and string elements.
+
+```jsonl
+{"s":{"x":1}}
+{"s":{"x":"bad"}}
+```
+
+This fails at load time with a path such as `s.x` because JSON number and string values are distinct native types.
+
 Avro and Parquet internal compression codecs are discovered from the file metadata. Do not use load options such as `compression=snappy`, `compression=deflate`, `compression=zstd`, or `compression=brotli` for Avro/Parquet; those are not Avro/Parquet query syntax. The `compression=` load option means a file-level wrapper and is currently limited to gzip-, zstd-, or zlib-wrapped deflate-compressed CSV/JSON/JSONL text inputs, not `.avro.gz`, `.avro.zst`, `.avro.deflate`, `.parquet.gz`, `.parquet.zst`, or `.parquet.deflate`.
 
 ---
@@ -305,7 +357,7 @@ In `filter`, a row is kept only when the expression is explicitly `true`; `false
 
 ### 1. `describe`
 
-Return cheap metadata for the current materialized table. The output has one row per input column and three columns: `column`, `type`, and `row_count`.
+Return cheap metadata for the current materialized table. The output has one row per input column and four columns: `column`, `type`, `row_count`, and `schema`.
 
 ```
 dq 'users.csv | describe'
@@ -316,11 +368,11 @@ dq 'users.csv | describe | filter { type == "string" }'
 Output:
 
 ```
-column | type   | row_count
------- | ------ | ---------
-name   | string | 6
-age    | int    | 6
-city   | string | 6
+column | type   | row_count | schema
+------ | ------ | --------- | ------
+name   | string | 6         | string
+age    | int    | 6         | int
+city   | string | 6         | string
 ```
 
 Rules:
@@ -328,12 +380,15 @@ Rules:
 * It takes no arguments.
 * `row_count` repeats the current table row count on every metadata row.
 * Type names are `null`, `int`, `float`, `string`, `bool`, `list`, and `record`.
+* `type` is the top-level storage type. For nested values it remains `list` or `record`.
+* `schema` is a deterministic recursive type string for the current column schema. Examples: `string`, `int`, `record<city:string, zip:string>`, `list<record<amount:float, order_id:int>>`.
+* Nullable schema positions are suffixed with `?`, such as `record<x:int?, y:string?>?`. Missing JSON/JSONL object fields and explicit nulls both materialize as null and make the affected schema position nullable.
 * Types are current table storage types after preceding pipeline stages, not source-declared types and not historical types from earlier stages.
 * Source loaders may set concrete storage types even when no non-null values exist. CSV inference uses `TypeString` for columns with no sampled non-null values, so freshly loaded all-null CSV columns and header-only CSV columns report `string`.
 * If a column widened to `string` and rows survive a later rebuilding operation, copied values remain `string`.
 * If no rows survive a rebuilding operation such as `filter { false }`, the rebuilt columns have no surviving values to establish a type and currently report `null`. This is distinct from load-time CSV inference, where the loader may have already established a concrete storage type.
 * A zero-column table returns zero metadata rows. Use `count` if row cardinality must be visible for a zero-column table.
-* Nested values are reported only at the top level as `list` or `record`; `describe` does not recursively expand nested schemas.
+* `describe` keeps one row per top-level column. It does not emit one row per nested field; use the `schema` string to inspect nested fields.
 
 ### 2. `head n`
 

@@ -17,6 +17,7 @@ const (
 	TypeBool
 	TypeList   // List  []Value
 	TypeRecord // Fields []RecordField
+	TypeMixed  // schema-only marker for heterogeneous nested list elements
 )
 
 // RecordField is a named field in a record value.
@@ -290,6 +291,7 @@ func ListToTable(v Value) (*Table, error) {
 type Column struct {
 	name    string
 	typ     ValueType
+	schema  *TypeDescriptor
 	nulls   []bool          // true = null at that row index
 	ints    []int64         // TypeInt
 	floats  []float64       // TypeFloat
@@ -324,6 +326,7 @@ func (c *Column) Get(i int) Value {
 
 // Append adds a value to the column, widening the column type if necessary.
 func (c *Column) Append(v Value) {
+	c.mergeSchema(v)
 	if v.Type == TypeNull {
 		c.appendNull()
 		return
@@ -347,6 +350,71 @@ func (c *Column) Append(v Value) {
 		c.lists = append(c.lists, v.List)
 	case TypeRecord:
 		c.records = append(c.records, v.Fields)
+	}
+}
+
+func (c *Column) mergeSchema(v Value) {
+	if v.Type == TypeNull {
+		if c.schema == nil {
+			c.schema = &TypeDescriptor{Kind: TypeNull, Nullable: true}
+			return
+		}
+		c.schema.Nullable = true
+		return
+	}
+
+	if v.Type != TypeList && v.Type != TypeRecord {
+		c.mergeScalarSchema(v.Type)
+		return
+	}
+
+	if c.schema != nil {
+		switch c.schema.Kind {
+		case TypeString:
+			return
+		case TypeNull:
+			c.schema = &TypeDescriptor{Kind: v.Type, Nullable: true}
+			return
+		case TypeInt, TypeFloat, TypeBool:
+			c.schema = &TypeDescriptor{Kind: TypeString, Nullable: c.schema.Nullable}
+			return
+		}
+	}
+
+	next, err := MergeSchemasPermissive(c.schema, InferValueSchema(v))
+	if err != nil {
+		c.schema = ScalarSchema(TypeString)
+		return
+	}
+	c.schema = next
+}
+
+func (c *Column) mergeScalarSchema(kind ValueType) {
+	if c.schema == nil {
+		c.schema = &TypeDescriptor{Kind: kind}
+		return
+	}
+	nullable := c.schema.Nullable
+	switch c.schema.Kind {
+	case TypeNull:
+		c.schema = &TypeDescriptor{Kind: kind, Nullable: true}
+	case kind:
+		return
+	case TypeInt:
+		if kind == TypeFloat {
+			c.schema = &TypeDescriptor{Kind: TypeFloat, Nullable: nullable}
+			return
+		}
+		c.schema = &TypeDescriptor{Kind: TypeString, Nullable: nullable}
+	case TypeFloat:
+		if kind == TypeInt {
+			return
+		}
+		c.schema = &TypeDescriptor{Kind: TypeString, Nullable: nullable}
+	case TypeString:
+		return
+	default:
+		c.schema = &TypeDescriptor{Kind: TypeString, Nullable: nullable}
 	}
 }
 
@@ -444,6 +512,28 @@ func (c *Column) Len() int { return len(c.nulls) }
 // ColType returns the column's ValueType.
 func (c *Column) ColType() ValueType { return c.typ }
 
+// Schema returns the column's recursive type descriptor, when known.
+func (c *Column) Schema() *TypeDescriptor {
+	if c == nil {
+		return nil
+	}
+	if c.schema != nil {
+		return FinalizeSchema(c.schema)
+	}
+	if c.typ == TypeNull {
+		return &TypeDescriptor{Kind: TypeNull}
+	}
+	return ScalarSchema(c.typ)
+}
+
+// RawSchema returns the column descriptor before null-only portions are finalized.
+func (c *Column) RawSchema() *TypeDescriptor {
+	if c == nil {
+		return nil
+	}
+	return cloneTypeDescriptor(c.schema)
+}
+
 // ColName returns the column's name.
 func (c *Column) ColName() string { return c.name }
 
@@ -481,7 +571,26 @@ func NewTableWithTypes(columns []string, types []ValueType) *Table {
 		if i < len(types) {
 			typ = types[i]
 		}
-		t.cols[i] = &Column{name: name, typ: typ}
+		t.cols[i] = &Column{name: name, typ: typ, schema: ScalarSchema(typ)}
+	}
+	return t
+}
+
+// NewTableWithSchemas creates an empty table with fixed recursive column schemas.
+func NewTableWithSchemas(columns []string, schemas []*TypeDescriptor) *Table {
+	t := &Table{
+		Columns: make([]string, len(columns)),
+		cols:    make([]*Column, len(columns)),
+	}
+	copy(t.Columns, columns)
+	for i, name := range columns {
+		var schema *TypeDescriptor
+		typ := TypeNull
+		if i < len(schemas) && schemas[i] != nil {
+			schema = cloneTypeDescriptor(schemas[i])
+			typ = FinalizeSchema(schema).Kind
+		}
+		t.cols[i] = &Column{name: name, typ: typ, schema: schema}
 	}
 	return t
 }
@@ -515,6 +624,58 @@ func (t *Table) AddRow(values []Value) {
 		}
 	}
 	t.NumRows++
+}
+
+// AddRowTyped appends a row after validating values against existing column
+// schemas. It never widens columns; every non-null value must already fit the
+// column schema and concrete storage type. Use AddRow for permissive widening.
+func (t *Table) AddRowTyped(values []Value) error {
+	coerced := make([]Value, len(t.cols))
+	for i, col := range t.cols {
+		v := Null()
+		if i < len(values) {
+			v = values[i]
+		}
+		cv, err := CoerceValueToSchemaAtPath(v, col.schema, col.name)
+		if err != nil {
+			return err
+		}
+		if cv.Type != TypeNull && col.typ == TypeNull {
+			return fmt.Errorf("column %q has no concrete type for non-null %s value", col.name, TypeName(cv.Type))
+		}
+		coerced[i] = cv
+	}
+	for i, col := range t.cols {
+		col.appendCoerced(coerced[i])
+	}
+	t.NumRows++
+	return nil
+}
+
+func (c *Column) appendCoerced(v Value) {
+	if v.Type == TypeNull {
+		c.appendNull()
+		return
+	}
+	if c.typ == TypeFloat && v.Type == TypeInt {
+		v = FloatVal(float64(v.Int))
+	}
+	c.nulls = append(c.nulls, false)
+	switch c.typ {
+	case TypeInt:
+		c.ints = append(c.ints, v.Int)
+	case TypeFloat:
+		f, _ := v.AsFloat()
+		c.floats = append(c.floats, f)
+	case TypeString:
+		c.strs = append(c.strs, v.AsString())
+	case TypeBool:
+		c.bools = append(c.bools, v.Bool)
+	case TypeList:
+		c.lists = append(c.lists, v.List)
+	case TypeRecord:
+		c.records = append(c.records, v.Fields)
+	}
 }
 
 // GetAt returns the Value at row row, column col (by index).
@@ -553,7 +714,7 @@ func (t *Table) SliceRows(from, to int) *Table {
 
 func sliceColumn(c *Column, from, to int) *Column {
 	n := to - from
-	nc := &Column{name: c.name, typ: c.typ, nulls: make([]bool, n)}
+	nc := &Column{name: c.name, typ: c.typ, schema: FinalizeSchema(c.schema), nulls: make([]bool, n)}
 	copy(nc.nulls, c.nulls[from:to])
 	switch c.typ {
 	case TypeInt:
@@ -595,7 +756,7 @@ func (t *Table) ApplyPermutation(perm []int) *Table {
 
 func permuteColumn(c *Column, perm []int) *Column {
 	n := len(perm)
-	nc := &Column{name: c.name, typ: c.typ, nulls: make([]bool, n)}
+	nc := &Column{name: c.name, typ: c.typ, schema: FinalizeSchema(c.schema), nulls: make([]bool, n)}
 	for i, p := range perm {
 		nc.nulls[i] = c.nulls[p]
 	}
@@ -738,7 +899,7 @@ func (t *Table) Clone() *Table {
 
 func cloneColumn(c *Column) *Column {
 	n := c.Len()
-	nc := &Column{name: c.name, typ: c.typ, nulls: make([]bool, n)}
+	nc := &Column{name: c.name, typ: c.typ, schema: FinalizeSchema(c.schema), nulls: make([]bool, n)}
 	copy(nc.nulls, c.nulls)
 	switch c.typ {
 	case TypeInt:

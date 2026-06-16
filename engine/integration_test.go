@@ -466,12 +466,175 @@ func assertNestedDescribeQueries(t *testing.T, file string) {
 		})
 	})
 
+	t.Run("describe_recursive_schema", func(t *testing.T) {
+		result := loadAndQuery(t, file, "describe")
+		assertDescribeSchemaRows(t, result, map[string]describeSchemaMeta{
+			"id": {
+				typ:    "int",
+				rows:   3,
+				schema: "int",
+			},
+			"name": {
+				typ:    "string",
+				rows:   3,
+				schema: "string",
+			},
+			"address": {
+				typ:    "record",
+				rows:   3,
+				schema: "record<city:string, street:string, zip:string>",
+			},
+			"tags": {
+				typ:    "list",
+				rows:   3,
+				schema: "list<string>",
+			},
+			"orders": {
+				typ:    "list",
+				rows:   3,
+				schema: "list<record<amount:float, order_id:int, status:string>>",
+			},
+			"profile": {
+				typ:    "record",
+				rows:   3,
+				schema: "record<history:list<record<date:string, events:list<string>>>, stats:record<logins:int, score:float>>",
+			},
+		})
+	})
+
+	t.Run("describe_schema_can_be_filtered_and_selected", func(t *testing.T) {
+		result := loadAndQuery(t, file, `describe | filter { schema == "record<city:string, street:string, zip:string>" } | select column, schema`)
+		if result.NumRows != 1 {
+			t.Fatalf("expected one schema match, got %d: %s", result.NumRows, result.String())
+		}
+		if got := result.Get(0, "column").Str; got != "address" {
+			t.Fatalf("schema filter matched %q, want address", got)
+		}
+		if got := result.Get(0, "schema").Str; got != "record<city:string, street:string, zip:string>" {
+			t.Fatalf("schema: got %q", got)
+		}
+	})
+
+	t.Run("describe_schema_after_dot_projection_and_empty_head", func(t *testing.T) {
+		result := loadAndQuery(t, file, "select address.city, profile.stats.logins | head 0 | describe")
+		assertDescribeSchemaRows(t, result, map[string]describeSchemaMeta{
+			"address_city": {
+				typ:    "string",
+				rows:   0,
+				schema: "string",
+			},
+			"profile_stats_logins": {
+				typ:    "int",
+				rows:   0,
+				schema: "int",
+			},
+		})
+	})
+
+	t.Run("describe_schema_after_rename_and_head", func(t *testing.T) {
+		result := loadAndQuery(t, file, "rename address=addr | head 1 | describe")
+		assertDescribeSchemaRows(t, result, map[string]describeSchemaMeta{
+			"id": {
+				typ:    "int",
+				rows:   1,
+				schema: "int",
+			},
+			"name": {
+				typ:    "string",
+				rows:   1,
+				schema: "string",
+			},
+			"addr": {
+				typ:    "record",
+				rows:   1,
+				schema: "record<city:string, street:string, zip:string>",
+			},
+			"tags": {
+				typ:    "list",
+				rows:   1,
+				schema: "list<string>",
+			},
+			"orders": {
+				typ:    "list",
+				rows:   1,
+				schema: "list<record<amount:float, order_id:int, status:string>>",
+			},
+			"profile": {
+				typ:    "record",
+				rows:   1,
+				schema: "record<history:list<record<date:string, events:list<string>>>, stats:record<logins:int, score:float>>",
+			},
+		})
+	})
+
 	t.Run("describe_after_nested_transform", func(t *testing.T) {
 		result := loadAndQuery(t, file, "transform city = address.city, order_count = list_len(orders) | select city, order_count | describe")
 		assertDescribeRows(t, result, map[string]describeMeta{
 			"city":        {typ: "string", rows: 3},
 			"order_count": {typ: "int", rows: 3},
 		})
+	})
+}
+
+func TestIntegrationDescribeSchemaForFlatFormats(t *testing.T) {
+	for _, file := range flatUserFormatFiles() {
+		t.Run(file.name, func(t *testing.T) {
+			result := loadAndQuery(t, file.file, "describe")
+			rows := int64(6)
+			if file.name == "json" || file.name == "jsonl" {
+				rows = 3
+			}
+			assertDescribeSchemaRows(t, result, map[string]describeSchemaMeta{
+				"name": {typ: "string", rows: rows, schema: "string"},
+				"age":  {typ: "int", rows: rows, schema: "int"},
+				"city": {typ: "string", rows: rows, schema: "string"},
+			})
+		})
+	}
+}
+
+func TestIntegrationDescribeSchemaForSparseJSONRecords(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		name string
+		path string
+		data string
+	}{
+		{
+			name: "json",
+			path: filepath.Join(dir, "sparse.json"),
+			data: `[{"id":1,"s":{"x":1}},{"id":2,"s":{"y":"yes"}},{"id":3,"s":null}]`,
+		},
+		{
+			name: "jsonl",
+			path: filepath.Join(dir, "sparse.jsonl"),
+			data: "{\"id\":1,\"s\":{\"x\":1}}\n{\"id\":2,\"s\":{\"y\":\"yes\"}}\n{\"id\":3,\"s\":null}\n",
+		},
+	}
+	for _, tc := range cases {
+		if err := os.WriteFile(tc.path, []byte(tc.data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			result := loadAndQuery(t, tc.path, "describe")
+			assertDescribeSchemaRows(t, result, map[string]describeSchemaMeta{
+				"id": {typ: "int", rows: 3, schema: "int"},
+				"s":  {typ: "record", rows: 3, schema: "record<x:int?, y:string?>?"},
+			})
+		})
+	}
+}
+
+func TestIntegrationDescribeSchemaNullOnlyNestedFieldFallback(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nulls.jsonl")
+	if err := os.WriteFile(path, []byte("{\"s\":{\"x\":null}}\n{\"s\":{}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := loadAndQuery(t, path, "describe")
+	assertDescribeSchemaRows(t, result, map[string]describeSchemaMeta{
+		"s": {typ: "record", rows: 2, schema: "record<x:string?>"},
 	})
 }
 

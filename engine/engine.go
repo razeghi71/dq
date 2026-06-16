@@ -121,6 +121,26 @@ func rowVals(t *table.Table, i int) []table.Value {
 	return vals
 }
 
+func columnSchemas(t *table.Table) []*table.TypeDescriptor {
+	schemas := make([]*table.TypeDescriptor, len(t.Columns))
+	for i := range t.Columns {
+		schemas[i] = t.Col(i).Schema()
+	}
+	return schemas
+}
+
+func schemaForPath(t *table.Table, path []string) *table.TypeDescriptor {
+	idx := t.ColIndex(path[0])
+	if idx < 0 {
+		return nil
+	}
+	schema := t.Col(idx).Schema()
+	if len(path) == 1 {
+		return schema
+	}
+	return table.SchemaAtPath(schema, path[1:])
+}
+
 func execHead(o *ast.HeadOp, t *table.Table) *table.Table {
 	n := o.N
 	if n > t.NumRows {
@@ -208,7 +228,11 @@ func execSelect(o *ast.SelectOp, t *table.Table) (*table.Table, error) {
 		resultCols = append(resultCols, name)
 	}
 
-	result := table.NewTable(resultCols)
+	schemas := make([]*table.TypeDescriptor, len(o.Columns))
+	for i, path := range o.Columns {
+		schemas[i] = schemaForPath(t, path)
+	}
+	result := table.NewTableWithSchemas(resultCols, schemas)
 	for i := 0; i < t.NumRows; i++ {
 		vals := make([]table.Value, len(o.Columns))
 		for j, path := range o.Columns {
@@ -290,7 +314,7 @@ func execGroup(o *ast.GroupOp, t *table.Table) (*table.Table, error) {
 
 	// Build result table: key columns + list column
 	resultCols := append(append([]string{}, keyColNames...), o.NestedName)
-	result := table.NewTable(resultCols)
+	result := table.NewTableWithSchemas(resultCols, nil)
 	for _, g := range groups {
 		vals := make([]table.Value, len(g.key)+1)
 		copy(vals, g.key)
@@ -320,7 +344,14 @@ func execTransform(o *ast.TransformOp, t *table.Table) (*table.Table, error) {
 		assignTargets[i] = idx
 	}
 
-	result := table.NewTable(newCols)
+	schemas := columnSchemas(t)
+	for len(schemas) < len(newCols) {
+		schemas = append(schemas, nil)
+	}
+	for _, target := range assignTargets {
+		schemas[target] = nil
+	}
+	result := table.NewTableWithSchemas(newCols, schemas)
 	for i := 0; i < t.NumRows; i++ {
 		vals := make([]table.Value, len(newCols))
 		// Copy existing column values
@@ -370,7 +401,14 @@ func execReduce(o *ast.ReduceOp, t *table.Table) (*table.Table, error) {
 		assignTargets[i] = idx
 	}
 
-	result := table.NewTable(newCols)
+	schemas := columnSchemas(t)
+	for len(schemas) < len(newCols) {
+		schemas = append(schemas, nil)
+	}
+	for _, target := range assignTargets {
+		schemas[target] = nil
+	}
+	result := table.NewTableWithSchemas(newCols, schemas)
 	for i := 0; i < t.NumRows; i++ {
 		nested := t.Col(nestedIdx).Get(i)
 		if nested.Type != table.TypeList {
@@ -409,12 +447,13 @@ func execCount(t *table.Table) *table.Table {
 }
 
 func execDescribe(t *table.Table) *table.Table {
-	result := table.NewTable([]string{"column", "type", "row_count"})
+	result := table.NewTable([]string{"column", "type", "row_count", "schema"})
 	for i, name := range t.Columns {
 		result.AddRow([]table.Value{
 			table.StrVal(name),
 			table.StrVal(table.TypeName(t.Col(i).ColType())),
 			table.IntVal(int64(t.NumRows)),
+			table.StrVal(t.Col(i).Schema().String()),
 		})
 	}
 	return result

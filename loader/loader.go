@@ -125,7 +125,54 @@ func loadGlob(pattern string, opts Options) (*table.Table, error) {
 		}
 		parts = append(parts, tbl)
 	}
+	if resolved == "json" || resolved == "jsonl" {
+		return concatStrictSchemaTables(pattern, matches, parts)
+	}
 	return table.Concat(parts)
+}
+
+func concatStrictSchemaTables(pattern string, paths []string, tables []*table.Table) (*table.Table, error) {
+	columnSets := make([][]string, len(tables))
+	for i, tbl := range tables {
+		columnSets[i] = tbl.Columns
+	}
+	unionCols := table.UnionColumns(columnSets...)
+	schemas := make([]*table.TypeDescriptor, len(unionCols))
+	for i, col := range unionCols {
+		for partIdx, tbl := range tables {
+			idx := tbl.ColIndex(col)
+			var next *table.TypeDescriptor
+			if idx >= 0 {
+				next = tbl.Col(idx).RawSchema()
+			} else {
+				next = &table.TypeDescriptor{Kind: table.TypeNull, Nullable: true}
+			}
+			merged, err := table.MergeSchemasStrictAtPath(schemas[i], next, col)
+			if err != nil {
+				return nil, fmt.Errorf("loading glob %q: loading %q: %w", pattern, paths[partIdx], err)
+			}
+			schemas[i] = merged
+		}
+		schemas[i] = table.FinalizeSchema(schemas[i])
+	}
+
+	result := table.NewTableWithSchemas(unionCols, schemas)
+	for partIdx, tbl := range tables {
+		for row := 0; row < tbl.NumRows; row++ {
+			vals := make([]table.Value, len(unionCols))
+			for i, col := range unionCols {
+				if idx := tbl.ColIndex(col); idx >= 0 {
+					vals[i] = tbl.Col(idx).Get(row)
+				} else {
+					vals[i] = table.Null()
+				}
+			}
+			if err := result.AddRowTyped(vals); err != nil {
+				return nil, fmt.Errorf("loading glob %q: loading %q: row %d: %w", pattern, paths[partIdx], row+1, err)
+			}
+		}
+	}
+	return result, nil
 }
 
 func loadGlobCSV(pattern string, matches []string, opts Options) (*table.Table, error) {
@@ -1164,7 +1211,11 @@ func loadJSONReader(r io.Reader) (*table.Table, error) {
 		return nil, fmt.Errorf("cannot parse JSON: %w (expected array of objects)", err)
 	}
 
-	return buildTableFromRecords(records), nil
+	locs := make([]string, len(records))
+	for i := range records {
+		locs[i] = fmt.Sprintf("row %d", i+1)
+	}
+	return buildTableFromRecords(records, locs)
 }
 
 func loadJSONL(filename, compression string) (*table.Table, error) {
@@ -1179,6 +1230,7 @@ func loadJSONL(filename, compression string) (*table.Table, error) {
 func loadJSONLReader(r io.Reader) (*table.Table, error) {
 	scanner := bufio.NewScanner(r)
 	var records []map[string]interface{}
+	var locs []string
 	lineNum := 0
 	for scanner.Scan() {
 		lineNum++
@@ -1191,17 +1243,18 @@ func loadJSONLReader(r io.Reader) (*table.Table, error) {
 			return nil, fmt.Errorf("invalid JSON on line %d: %w", lineNum, err)
 		}
 		records = append(records, rec)
+		locs = append(locs, fmt.Sprintf("line %d", lineNum))
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("error reading JSONL: %w", err)
 	}
 
-	return buildTableFromRecords(records), nil
+	return buildTableFromRecords(records, locs)
 }
 
-func buildTableFromRecords(records []map[string]interface{}) *table.Table {
+func buildTableFromRecords(records []map[string]interface{}, locs []string) (*table.Table, error) {
 	if len(records) == 0 {
-		return table.NewTable(nil)
+		return table.NewTable(nil), nil
 	}
 
 	colSet := make(map[string]bool)
@@ -1215,21 +1268,40 @@ func buildTableFromRecords(records []map[string]interface{}) *table.Table {
 		}
 	}
 
-	t := table.NewTable(columns)
-	for _, rec := range records {
+	schemas := make([]*table.TypeDescriptor, len(columns))
+	rows := make([][]table.Value, len(records))
+	for rowIdx, rec := range records {
 		vals := make([]table.Value, len(columns))
 		for i, col := range columns {
-			v, ok := rec[col]
-			if !ok || v == nil {
-				vals[i] = table.Null()
-				continue
+			v := table.Null()
+			if raw, ok := rec[col]; ok && raw != nil {
+				v = anyToValue(raw)
 			}
-			vals[i] = anyToValue(v)
+			vals[i] = v
+			merged, err := table.MergeValueSchemaStrictAtPath(schemas[i], v, col)
+			if err != nil {
+				return nil, jsonSchemaError(locs, rowIdx, err)
+			}
+			schemas[i] = merged
 		}
-		t.AddRow(vals)
+		rows[rowIdx] = vals
+	}
+	t := table.NewTableWithSchemas(columns, schemas)
+	for rowIdx, vals := range rows {
+		if err := t.AddRowTyped(vals); err != nil {
+			return nil, jsonSchemaError(locs, rowIdx, err)
+		}
 	}
 
-	return t
+	return t, nil
+}
+
+func jsonSchemaError(locs []string, rowIdx int, err error) error {
+	loc := fmt.Sprintf("row %d", rowIdx+1)
+	if rowIdx >= 0 && rowIdx < len(locs) && locs[rowIdx] != "" {
+		loc = locs[rowIdx]
+	}
+	return fmt.Errorf("%s: %w", loc, err)
 }
 
 // anyToValue converts any Go value (from JSON, Avro, Parquet generic reader) to a table.Value.

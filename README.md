@@ -79,14 +79,15 @@ For the detailed language and design contract, see `AGENTS.md`.
 
 ## Operations
 
-### `describe` - Show columns, types, and row count
+### `describe` - Show columns, types, row count, and schema
 
-Returns one metadata row per column: `column`, `type`, and `row_count`.
+Returns one metadata row per column: `column`, `type`, `row_count`, and `schema`.
 
 ```bash
 dq 'users.csv | describe'
 dq 'users.csv | filter { city == "NY" } | describe | json'
 dq 'users.csv | describe | filter { type == "string" }'
+dq 'nested.json | describe | select column, schema'
 ```
 
 ### `head` / `tail` - Get rows from the start or end
@@ -282,6 +283,7 @@ dq 'data.json | filter { address.city == "Chicago" }'
 dq 'data.json | transform city = address.city | select name, city'
 dq 'data.json | select name, address.city'                    # -> column address_city
 dq 'data.json | group address.city | reduce n = count() | remove grouped'
+dq 'data.json | describe | select column, schema'             # inspect nested field types
 ```
 
 Use `struct(field = expr, ...)` in expressions to build nested records row-by-row:
@@ -377,6 +379,18 @@ dq 'data.dat with format=csv | head 5'
 cat users.csv | dq '- with format=csv | count'
 dq 'users.csv | join orders.dat with format=csv, delim=";" on user_id'
 ```
+
+JSON and JSONL carry native types, including nested records and lists. `dq` preserves those nested schemas and reports them through `describe`:
+
+```bash
+dq 'nested.json | describe | select column, schema'
+# address -> record<city:string, street:string, zip:string>
+# orders  -> list<record<amount:float, order_id:int, status:string>>
+```
+
+Mixed numeric JSON values promote from int to float. Heterogeneous values inside a single JSON array are preserved and described as `mixed`, for example `[1, "two"]` has schema `list<mixed>`.
+Outside that single-array `mixed` case, incompatible native JSON types are load errors instead of silent string widening, including nested fields such as `s.x` or cross-row typed-list conflicts such as `orders[].amount`.
+Avro and Parquet are schema-bound readers and currently use the table append path; if inconsistent values are produced there, they follow normal permissive table widening rather than the JSON/JSONL strict recursive load checks.
 
 ### CSV type inference
 
