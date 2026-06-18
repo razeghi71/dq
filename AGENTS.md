@@ -271,6 +271,30 @@ applies to column lists, assignment/binding lists, function argument lists,
 `upper(name,)`, `coalesce(a, b,)`, `select name,`, `list(1,)`, and
 `struct(a = 1,)` are parse errors.
 
+### Parser fail-closed and spans
+
+The parser must fail closed: if a token belongs to an expression, operation, or
+output stage, it must either be consumed intentionally or reported as a parse or
+lex error. In particular, lexer errors discovered during lookahead are fatal
+even when the grammar would otherwise appear complete. A query such as
+`users.csv | transform out = age % 2 | json` must not run as
+`transform out = age` and must not silently drop the `| json` output stage.
+
+Expression parse sites have explicit legal boundaries:
+
+* `filter { expr }` ends at `}`.
+* `transform` and `reduce` assignment RHS expressions end at `,`, `|`, or EOF.
+* Function arguments, `list(...)` elements, `struct(...)` field values, and
+  parenthesized expressions end at their delimiter or closing `)`.
+
+The AST stores source spans for syntactic nodes used in later diagnostics.
+Spans are byte offsets into the original query string with exclusive `End`.
+`lexer.Token.Pos`, `lexer.Token.End`, and AST spans must stay byte-based rather
+than rune-based so escaped strings and Unicode input can be highlighted against
+the original query bytes. Token end offsets are explicit; do not derive token
+ends from decoded token values because `"a\n"` and backtick/Unicode identifiers
+can have source lengths that differ from their decoded values.
+
 ### Lists (comma-separated)
 
 Separate columns or sort keys with **commas**. A single item needs no comma.

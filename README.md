@@ -40,6 +40,17 @@ dq 'data.dat [with format=..., delim=..., ...] | operation1 | operation2 | ... [
 
 Wrap queries in single quotes so your shell doesn't interpret `|`, `{`, `}`, or `>`.
 
+## Syntax Is Strict
+
+`dq` does not guess when a query has extra tokens or unknown operators. Output format commands must be last, comma-separated lists cannot have trailing commas, and malformed expressions fail instead of running a shortened query.
+
+```bash
+dq 'users.csv | transform x = age * 2 | json'      # valid
+dq 'users.csv | transform x = age % 2 | json'      # error: % is not an operator
+dq 'users.csv | transform x = upper(name,) | json' # error: trailing comma
+dq 'users.csv | csv | head 1'                      # error: output format is not last
+```
+
 ## MCP / AI Agents
 
 `dq` can run as a local MCP server for agent tools that support stdio MCP:

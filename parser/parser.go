@@ -14,6 +14,7 @@ type Parser struct {
 	lexer  *lexer.Lexer
 	buf    []lexer.Token // lookahead buffer
 	lexErr error         // first lexer error encountered
+	last   lexer.Token   // last consumed token
 }
 
 // Parse parses a full query string into a Query AST.
@@ -25,6 +26,9 @@ func Parse(input string) (*ast.Query, error) {
 			return nil, fmt.Errorf("lex error: %w", p.lexErr)
 		}
 		return nil, err
+	}
+	if p.lexErr != nil {
+		return nil, fmt.Errorf("lex error: %w", p.lexErr)
 	}
 	return q, nil
 }
@@ -57,9 +61,98 @@ func (p *Parser) advance() lexer.Token {
 	if len(p.buf) > 0 {
 		tok := p.buf[0]
 		p.buf = p.buf[1:]
+		p.last = tok
 		return tok
 	}
 	return lexer.Token{Type: lexer.TokenEOF}
+}
+
+func tokenSpan(tok lexer.Token) ast.PackedSpan {
+	return ast.PackSpan(tok.Pos, int(tok.End))
+}
+
+func packedSpanStart(sp ast.PackedSpan) int {
+	return int(uint32(uint64(sp) >> 32))
+}
+
+func packedSpanEnd(sp ast.PackedSpan) int {
+	return int(uint32(uint64(sp)))
+}
+
+func exprPackedSpan(expr ast.Expr) ast.PackedSpan {
+	switch e := expr.(type) {
+	case *ast.LiteralExpr:
+		if e == nil {
+			return 0
+		}
+		return e.SourceSpan
+	case *ast.ColumnExpr:
+		if e == nil {
+			return 0
+		}
+		return e.SourceSpan
+	case *ast.BinaryExpr:
+		if e == nil {
+			return 0
+		}
+		return e.SourceSpan
+	case *ast.UnaryExpr:
+		if e == nil {
+			return 0
+		}
+		return e.SourceSpan
+	case *ast.FuncCallExpr:
+		if e == nil {
+			return 0
+		}
+		return e.SourceSpan
+	case *ast.StructExpr:
+		if e == nil {
+			return 0
+		}
+		return e.SourceSpan
+	case *ast.ListExpr:
+		if e == nil {
+			return 0
+		}
+		return e.SourceSpan
+	case *ast.IsNullExpr:
+		if e == nil {
+			return 0
+		}
+		return e.SourceSpan
+	default:
+		if expr == nil {
+			return 0
+		}
+		return expr.Span().Pack()
+	}
+}
+
+func exprSpanEnd(expr ast.Expr) int {
+	return packedSpanEnd(exprPackedSpan(expr))
+}
+
+func spanFromExprs(left, right ast.Expr) ast.PackedSpan {
+	leftSpan := exprPackedSpan(left)
+	rightSpan := exprPackedSpan(right)
+	return ast.PackSpan(packedSpanStart(leftSpan), packedSpanEnd(rightSpan))
+}
+
+func spanFrom(start, end lexer.Token) ast.PackedSpan {
+	return ast.PackSpan(start.Pos, int(end.End))
+}
+
+func spanFromStartToExpr(start lexer.Token, expr ast.Expr) ast.PackedSpan {
+	return ast.PackSpan(start.Pos, exprSpanEnd(expr))
+}
+
+func (p *Parser) spanFrom(start lexer.Token) ast.PackedSpan {
+	end := int(p.last.End)
+	if end < int(start.End) {
+		end = int(start.End)
+	}
+	return ast.PackSpan(start.Pos, end)
 }
 
 func (p *Parser) expect(tt lexer.TokenType) (lexer.Token, error) {
@@ -234,6 +327,8 @@ func (p *Parser) parseSource() (*ast.SourceOp, error) {
 	if err != nil {
 		return nil, err
 	}
+	sourceStart := tok.Pos
+	sourceEnd := int(tok.End)
 	var filename string
 	switch tok.Type {
 	case lexer.TokenStdin:
@@ -254,7 +349,10 @@ func (p *Parser) parseSource() (*ast.SourceOp, error) {
 	if err := ast.ValidateLoadOptionsForFilename(filename, load); err != nil {
 		return nil, err
 	}
-	return &ast.SourceOp{Filename: filename, Load: load}, nil
+	if int(p.last.End) > sourceEnd {
+		sourceEnd = int(p.last.End)
+	}
+	return &ast.SourceOp{Filename: filename, Load: load, SourceSpan: ast.PackSpan(sourceStart, sourceEnd)}, nil
 }
 
 var loadOptionKeys = map[string]bool{
@@ -413,7 +511,7 @@ func (p *Parser) parseOp() (ast.Op, error) {
 }
 
 func (p *Parser) parseHead() (ast.Op, error) {
-	p.advance() // consume "head"
+	start := p.advance() // consume "head"
 	n := 10
 	if p.peek().Type == lexer.TokenInt {
 		var err error
@@ -422,11 +520,11 @@ func (p *Parser) parseHead() (ast.Op, error) {
 			return nil, fmt.Errorf("head: %w", err)
 		}
 	}
-	return &ast.HeadOp{N: n}, nil
+	return &ast.HeadOp{N: n, SourceSpan: p.spanFrom(start)}, nil
 }
 
 func (p *Parser) parseTail() (ast.Op, error) {
-	p.advance() // consume "tail"
+	start := p.advance() // consume "tail"
 	n := 10
 	if p.peek().Type == lexer.TokenInt {
 		var err error
@@ -435,11 +533,11 @@ func (p *Parser) parseTail() (ast.Op, error) {
 			return nil, fmt.Errorf("tail: %w", err)
 		}
 	}
-	return &ast.TailOp{N: n}, nil
+	return &ast.TailOp{N: n, SourceSpan: p.spanFrom(start)}, nil
 }
 
 func (p *Parser) parseSort() (ast.Op, error) {
-	p.advance() // consume "sort"
+	start := p.advance() // consume "sort"
 	var keys []ast.SortKey
 	for {
 		desc := false
@@ -478,11 +576,11 @@ func (p *Parser) parseSort() (ast.Op, error) {
 	if len(keys) == 0 {
 		return nil, fmt.Errorf("sort: expected at least one column")
 	}
-	return &ast.SortOp{Keys: keys}, nil
+	return &ast.SortOp{Keys: keys, SourceSpan: p.spanFrom(start)}, nil
 }
 
 func (p *Parser) parseSelect() (ast.Op, error) {
-	p.advance() // consume "select"
+	start := p.advance() // consume "select"
 	cols, err := p.parseColumnList()
 	if err != nil {
 		return nil, fmt.Errorf("select: %w", err)
@@ -490,26 +588,24 @@ func (p *Parser) parseSelect() (ast.Op, error) {
 	if len(cols) == 0 {
 		return nil, fmt.Errorf("select: expected at least one column")
 	}
-	return &ast.SelectOp{Columns: cols}, nil
+	return &ast.SelectOp{Columns: cols, SourceSpan: p.spanFrom(start)}, nil
 }
 
 func (p *Parser) parseFilter() (ast.Op, error) {
-	p.advance() // consume "filter"
+	start := p.advance() // consume "filter"
 	if _, err := p.expect(lexer.TokenLBrace); err != nil {
 		return nil, fmt.Errorf("filter: %w", err)
 	}
-	expr, err := p.parseExpr()
+	expr, err := p.parseExprBefore(lexer.TokenRBrace)
 	if err != nil {
 		return nil, fmt.Errorf("filter: %w", err)
 	}
-	if _, err := p.expect(lexer.TokenRBrace); err != nil {
-		return nil, fmt.Errorf("filter: %w", err)
-	}
-	return &ast.FilterOp{Expr: expr}, nil
+	p.advance() // consume }
+	return &ast.FilterOp{Expr: expr, SourceSpan: p.spanFrom(start)}, nil
 }
 
 func (p *Parser) parseGroup() (ast.Op, error) {
-	p.advance() // consume "group"
+	start := p.advance() // consume "group"
 	cols, err := p.parseColumnListUntilAs()
 	if err != nil {
 		return nil, fmt.Errorf("group: %w", err)
@@ -528,20 +624,20 @@ func (p *Parser) parseGroup() (ast.Op, error) {
 		nestedName = nameTok.Val
 	}
 
-	return &ast.GroupOp{Columns: cols, NestedName: nestedName}, nil
+	return &ast.GroupOp{Columns: cols, NestedName: nestedName, SourceSpan: p.spanFrom(start)}, nil
 }
 
 func (p *Parser) parseTransform() (ast.Op, error) {
-	p.advance() // consume "transform"
+	start := p.advance() // consume "transform"
 	assignments, err := p.parseAssignments()
 	if err != nil {
 		return nil, fmt.Errorf("transform: %w", err)
 	}
-	return &ast.TransformOp{Assignments: assignments}, nil
+	return &ast.TransformOp{Assignments: assignments, SourceSpan: p.spanFrom(start)}, nil
 }
 
 func (p *Parser) parseReduce() (ast.Op, error) {
-	p.advance() // consume "reduce"
+	start := p.advance() // consume "reduce"
 	nestedName := "grouped"
 
 	if p.peek().Type == lexer.TokenIdent {
@@ -558,30 +654,30 @@ func (p *Parser) parseReduce() (ast.Op, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reduce: %w", err)
 	}
-	return &ast.ReduceOp{NestedName: nestedName, Assignments: assignments}, nil
+	return &ast.ReduceOp{NestedName: nestedName, Assignments: assignments, SourceSpan: p.spanFrom(start)}, nil
 }
 
 func (p *Parser) parseCount() (ast.Op, error) {
-	p.advance() // consume "count"
-	return &ast.CountOp{}, nil
+	start := p.advance() // consume "count"
+	return &ast.CountOp{SourceSpan: p.spanFrom(start)}, nil
 }
 
 func (p *Parser) parseDescribe() (ast.Op, error) {
-	p.advance() // consume "describe"
-	return &ast.DescribeOp{}, nil
+	start := p.advance() // consume "describe"
+	return &ast.DescribeOp{SourceSpan: p.spanFrom(start)}, nil
 }
 
 func (p *Parser) parseDistinct() (ast.Op, error) {
-	p.advance() // consume "distinct"
+	start := p.advance() // consume "distinct"
 	cols, err := p.parseColumnList()
 	if err != nil {
 		return nil, fmt.Errorf("distinct: %w", err)
 	}
-	return &ast.DistinctOp{Columns: cols}, nil
+	return &ast.DistinctOp{Columns: cols, SourceSpan: p.spanFrom(start)}, nil
 }
 
 func (p *Parser) parseRename() (ast.Op, error) {
-	p.advance() // consume "rename"
+	start := p.advance() // consume "rename"
 	var pairs []ast.RenamePair
 	for p.peek().Type == lexer.TokenIdent || p.peek().Type == lexer.TokenBacktickIdent {
 		oldTok := p.advance()
@@ -604,7 +700,7 @@ func (p *Parser) parseRename() (ast.Op, error) {
 	if len(pairs) == 0 {
 		return nil, fmt.Errorf("rename: expected at least one old=new pair")
 	}
-	return &ast.RenameOp{Pairs: pairs}, nil
+	return &ast.RenameOp{Pairs: pairs, SourceSpan: p.spanFrom(start)}, nil
 }
 
 var joinKinds = map[string]bool{
@@ -615,7 +711,7 @@ var joinKinds = map[string]bool{
 }
 
 func (p *Parser) parseJoin() (ast.Op, error) {
-	p.advance() // consume "join"
+	start := p.advance() // consume "join"
 
 	// ScanSource reads directly from the lexer; any buffered lookahead token
 	// has already been consumed from the input and would be silently lost.
@@ -641,7 +737,7 @@ func (p *Parser) parseJoin() (ast.Op, error) {
 				return nil, fmt.Errorf("join: %w", err)
 			}
 			if fileTok.Type == lexer.TokenIdent && fileTok.Val == "on" {
-				filename = lexer.Token{Type: lexer.TokenIdent, Val: kindWord, Pos: filename.Pos}
+				filename = lexer.Token{Type: lexer.TokenIdent, Val: kindWord, Pos: filename.Pos, End: filename.End}
 				kind = "inner"
 				seenOn = true
 			} else if fileTok.Type == lexer.TokenIdent || fileTok.Type == lexer.TokenStdin {
@@ -689,7 +785,7 @@ func (p *Parser) parseJoin() (ast.Op, error) {
 		return nil, fmt.Errorf("join: expected at least one join key")
 	}
 
-	return &ast.JoinOp{Kind: kind, Filename: filename.Val, Keys: keys, Load: load}, nil
+	return &ast.JoinOp{Kind: kind, Filename: filename.Val, Keys: keys, Load: load, SourceSpan: p.spanFrom(start)}, nil
 }
 
 func (p *Parser) parseJoinKeys() ([]ast.JoinKey, error) {
@@ -783,7 +879,7 @@ func (p *Parser) parseColumnListUntilAs() ([][]string, error) {
 }
 
 func (p *Parser) parseRemove() (ast.Op, error) {
-	p.advance() // consume "remove"
+	start := p.advance() // consume "remove"
 	cols, err := p.parseColumnList()
 	if err != nil {
 		return nil, fmt.Errorf("remove: %w", err)
@@ -796,7 +892,7 @@ func (p *Parser) parseRemove() (ast.Op, error) {
 			return nil, fmt.Errorf("remove: dot paths not supported, got %q", strings.Join(path, "."))
 		}
 	}
-	return &ast.RemoveOp{Columns: cols}, nil
+	return &ast.RemoveOp{Columns: cols, SourceSpan: p.spanFrom(start)}, nil
 }
 
 // --- Helpers ---
@@ -827,14 +923,18 @@ func (p *Parser) parseAssignments() ([]ast.Assignment, error) {
 			return nil, fmt.Errorf("expected '=' after column %q: %w", colTok.Val, err)
 		}
 
-		expr, err := p.parseExpr()
+		expr, boundary, err := p.parseAssignmentExpr()
 		if err != nil {
 			return nil, fmt.Errorf("in assignment for %q: %w", colTok.Val, err)
 		}
 
-		assignments = append(assignments, ast.Assignment{Column: colTok.Val, Expr: expr})
+		assignments = append(assignments, ast.Assignment{
+			Column:     colTok.Val,
+			Expr:       expr,
+			SourceSpan: ast.PackSpan(colTok.Pos, exprSpanEnd(expr)),
+		})
 
-		if p.peek().Type != lexer.TokenComma {
+		if boundary != lexer.TokenComma {
 			break
 		}
 		p.advance() // consume comma
@@ -858,6 +958,38 @@ const (
 
 func (p *Parser) parseExpr() (ast.Expr, error) {
 	return p.parseExprPrec(precOr)
+}
+
+func (p *Parser) parseExprBefore(terminator lexer.TokenType) (ast.Expr, error) {
+	expr, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	tok := p.peek()
+	if p.lexErr != nil {
+		return nil, p.lexErr
+	}
+	if tok.Type == terminator {
+		return expr, nil
+	}
+	return nil, fmt.Errorf("unexpected token %s (%q) after expression at position %d", tok.Type, tok.Val, tok.Pos)
+}
+
+func (p *Parser) parseAssignmentExpr() (ast.Expr, lexer.TokenType, error) {
+	expr, err := p.parseExpr()
+	if err != nil {
+		return nil, 0, err
+	}
+	tok := p.peek()
+	if p.lexErr != nil {
+		return nil, 0, p.lexErr
+	}
+	switch tok.Type {
+	case lexer.TokenComma, lexer.TokenPipe, lexer.TokenEOF:
+		return expr, tok.Type, nil
+	default:
+		return nil, 0, fmt.Errorf("unexpected token %s (%q) after expression at position %d", tok.Type, tok.Val, tok.Pos)
+	}
 }
 
 func (p *Parser) parseExprPrec(minPrec int) (ast.Expr, error) {
@@ -891,7 +1023,7 @@ func (p *Parser) parseExprPrec(minPrec int) (ast.Expr, error) {
 		if (op == "==" || op == "!=") && (isNullLiteral(left) || isNullLiteral(right)) {
 			return nil, nullComparisonError(op, left, right)
 		}
-		left = &ast.BinaryExpr{Op: op, Left: left, Right: right}
+		left = &ast.BinaryExpr{Op: op, Left: left, Right: right, SourceSpan: spanFromExprs(left, right)}
 	}
 
 	if minPrec <= precIsNull {
@@ -914,7 +1046,8 @@ func (p *Parser) parsePostfixIsNull(left ast.Expr) (ast.Expr, bool, error) {
 		p.advance() // consume "not"
 		negated = true
 	}
-	if _, err := p.expect(lexer.TokenNull); err != nil {
+	nullTok, err := p.expect(lexer.TokenNull)
+	if err != nil {
 		return nil, false, fmt.Errorf("expected 'null' after 'is%s'", func() string {
 			if negated {
 				return " not"
@@ -922,7 +1055,7 @@ func (p *Parser) parsePostfixIsNull(left ast.Expr) (ast.Expr, bool, error) {
 			return ""
 		}())
 	}
-	return &ast.IsNullExpr{Operand: left, Negated: negated}, true, nil
+	return &ast.IsNullExpr{Operand: left, Negated: negated, SourceSpan: ast.PackSpan(packedSpanStart(exprPackedSpan(left)), int(nullTok.End))}, true, nil
 }
 
 func isNullLiteral(e ast.Expr) bool {
@@ -986,7 +1119,7 @@ func (p *Parser) advanceBinaryOp(op string) {
 
 func (p *Parser) parseUnary() (ast.Expr, error) {
 	if p.peek().Type == lexer.TokenNot {
-		p.advance()
+		opTok := p.advance()
 		operand, err := p.parseUnary()
 		if err != nil {
 			return nil, err
@@ -994,15 +1127,15 @@ func (p *Parser) parseUnary() (ast.Expr, error) {
 		if isNullLiteral(operand) {
 			return nil, fmt.Errorf(`use "is not null" for null checks, not "not null"`)
 		}
-		return &ast.UnaryExpr{Op: "not", Operand: operand}, nil
+		return &ast.UnaryExpr{Op: "not", Operand: operand, SourceSpan: spanFromStartToExpr(opTok, operand)}, nil
 	}
 	if p.peek().Type == lexer.TokenMinus {
-		p.advance()
+		opTok := p.advance()
 		operand, err := p.parseUnary()
 		if err != nil {
 			return nil, err
 		}
-		return &ast.UnaryExpr{Op: "-", Operand: operand}, nil
+		return &ast.UnaryExpr{Op: "-", Operand: operand, SourceSpan: spanFromStartToExpr(opTok, operand)}, nil
 	}
 	primary, err := p.parsePrimary()
 	if err != nil {
@@ -1033,7 +1166,7 @@ func (p *Parser) parsePrimary() (ast.Expr, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid integer %q: %w", tok.Val, err)
 		}
-		return &ast.LiteralExpr{Kind: "int", Int: v}, nil
+		return &ast.LiteralExpr{Kind: "int", Int: v, SourceSpan: tokenSpan(tok)}, nil
 
 	case lexer.TokenFloat:
 		p.advance()
@@ -1041,26 +1174,27 @@ func (p *Parser) parsePrimary() (ast.Expr, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid float %q: %w", tok.Val, err)
 		}
-		return &ast.LiteralExpr{Kind: "float", Float: v}, nil
+		return &ast.LiteralExpr{Kind: "float", Float: v, SourceSpan: tokenSpan(tok)}, nil
 
 	case lexer.TokenString:
 		p.advance()
-		return &ast.LiteralExpr{Kind: "string", Str: tok.Val}, nil
+		return &ast.LiteralExpr{Kind: "string", Str: tok.Val, SourceSpan: tokenSpan(tok)}, nil
 
 	case lexer.TokenTrue:
 		p.advance()
-		return &ast.LiteralExpr{Kind: "bool", Bool: true}, nil
+		return &ast.LiteralExpr{Kind: "bool", Bool: true, SourceSpan: tokenSpan(tok)}, nil
 
 	case lexer.TokenFalse:
 		p.advance()
-		return &ast.LiteralExpr{Kind: "bool", Bool: false}, nil
+		return &ast.LiteralExpr{Kind: "bool", Bool: false, SourceSpan: tokenSpan(tok)}, nil
 
 	case lexer.TokenNull:
 		p.advance()
-		return &ast.LiteralExpr{Kind: "null"}, nil
+		return &ast.LiteralExpr{Kind: "null", SourceSpan: tokenSpan(tok)}, nil
 
 	case lexer.TokenBacktickIdent:
-		p.advance()
+		firstTok := p.advance()
+		lastTok := firstTok
 		path := []string{tok.Val}
 		for p.peek().Type == lexer.TokenDot {
 			p.advance() // consume .
@@ -1068,22 +1202,24 @@ func (p *Parser) parsePrimary() (ast.Expr, error) {
 			if seg.Type != lexer.TokenIdent && seg.Type != lexer.TokenBacktickIdent {
 				return nil, fmt.Errorf("expected field name after '.', got %s (%q)", seg.Type, seg.Val)
 			}
+			lastTok = seg
 			path = append(path, seg.Val)
 		}
-		return &ast.ColumnExpr{Path: path}, nil
+		return &ast.ColumnExpr{Path: path, SourceSpan: spanFrom(firstTok, lastTok)}, nil
 
 	case lexer.TokenIdent:
-		p.advance()
+		firstTok := p.advance()
 		// Check if it's a function call
 		if p.peek().Type == lexer.TokenLParen {
 			if strings.EqualFold(tok.Val, "struct") {
-				return p.parseStructExpr()
+				return p.parseStructExpr(firstTok)
 			}
 			if strings.EqualFold(tok.Val, "list") {
-				return p.parseListExpr()
+				return p.parseListExpr(firstTok)
 			}
-			return p.parseFuncCall(tok.Val)
+			return p.parseFuncCall(firstTok)
 		}
+		lastTok := firstTok
 		path := []string{tok.Val}
 		for p.peek().Type == lexer.TokenDot {
 			p.advance() // consume .
@@ -1091,9 +1227,10 @@ func (p *Parser) parsePrimary() (ast.Expr, error) {
 			if seg.Type != lexer.TokenIdent && seg.Type != lexer.TokenBacktickIdent {
 				return nil, fmt.Errorf("expected field name after '.', got %s (%q)", seg.Type, seg.Val)
 			}
+			lastTok = seg
 			path = append(path, seg.Val)
 		}
-		return &ast.ColumnExpr{Path: path}, nil
+		return &ast.ColumnExpr{Path: path, SourceSpan: spanFrom(firstTok, lastTok)}, nil
 
 	case lexer.TokenLParen:
 		p.advance() // consume (
@@ -1111,7 +1248,7 @@ func (p *Parser) parsePrimary() (ast.Expr, error) {
 	}
 }
 
-func (p *Parser) parseStructExpr() (ast.Expr, error) {
+func (p *Parser) parseStructExpr(nameTok lexer.Token) (ast.Expr, error) {
 	p.advance() // consume (
 
 	var fields []ast.StructField
@@ -1135,7 +1272,11 @@ func (p *Parser) parseStructExpr() (ast.Expr, error) {
 			if err != nil {
 				return nil, fmt.Errorf("in struct field %q: %w", nameTok.Val, err)
 			}
-			fields = append(fields, ast.StructField{Name: nameTok.Val, Expr: expr})
+			fields = append(fields, ast.StructField{
+				Name:       nameTok.Val,
+				Expr:       expr,
+				SourceSpan: ast.PackSpan(nameTok.Pos, exprSpanEnd(expr)),
+			})
 
 			if p.peek().Type != lexer.TokenComma {
 				break
@@ -1147,14 +1288,15 @@ func (p *Parser) parseStructExpr() (ast.Expr, error) {
 		}
 	}
 
-	if _, err := p.expect(lexer.TokenRParen); err != nil {
+	rparen, err := p.expect(lexer.TokenRParen)
+	if err != nil {
 		return nil, fmt.Errorf("in struct: %w", err)
 	}
 
-	return &ast.StructExpr{Fields: fields}, nil
+	return &ast.StructExpr{Fields: fields, SourceSpan: ast.PackSpan(nameTok.Pos, int(rparen.End))}, nil
 }
 
-func (p *Parser) parseListExpr() (ast.Expr, error) {
+func (p *Parser) parseListExpr(nameTok lexer.Token) (ast.Expr, error) {
 	p.advance() // consume (
 
 	var elements []ast.Expr
@@ -1176,16 +1318,17 @@ func (p *Parser) parseListExpr() (ast.Expr, error) {
 		}
 	}
 
-	if _, err := p.expect(lexer.TokenRParen); err != nil {
+	rparen, err := p.expect(lexer.TokenRParen)
+	if err != nil {
 		return nil, fmt.Errorf("in list: %w", err)
 	}
 
-	return &ast.ListExpr{Elements: elements}, nil
+	return &ast.ListExpr{Elements: elements, SourceSpan: ast.PackSpan(nameTok.Pos, int(rparen.End))}, nil
 }
 
-func (p *Parser) parseFuncCall(name string) (ast.Expr, error) {
+func (p *Parser) parseFuncCall(nameTok lexer.Token) (ast.Expr, error) {
 	p.advance() // consume (
-	name = strings.ToLower(name)
+	name := strings.ToLower(nameTok.Val)
 
 	var args []ast.Expr
 	if p.peek().Type != lexer.TokenRParen {
@@ -1205,9 +1348,10 @@ func (p *Parser) parseFuncCall(name string) (ast.Expr, error) {
 		}
 	}
 
-	if _, err := p.expect(lexer.TokenRParen); err != nil {
+	rparen, err := p.expect(lexer.TokenRParen)
+	if err != nil {
 		return nil, fmt.Errorf("in function %s: %w", name, err)
 	}
 
-	return &ast.FuncCallExpr{Name: name, Args: args}, nil
+	return &ast.FuncCallExpr{Name: name, Args: args, SourceSpan: ast.PackSpan(nameTok.Pos, int(rparen.End))}, nil
 }

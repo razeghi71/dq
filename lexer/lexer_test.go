@@ -1,6 +1,7 @@
 package lexer
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -157,6 +158,157 @@ func TestLexStringEscape(t *testing.T) {
 	}
 	if tokens[0].Val != `hello "world"` {
 		t.Errorf("expected 'hello \"world\"', got %q", tokens[0].Val)
+	}
+}
+
+func TestLexTokenSpansAreByteOffsets(t *testing.T) {
+	input := "é \"a\\n\" `å b`"
+	tokens, err := Lex(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tokens) != 4 {
+		t.Fatalf("expected 3 tokens plus EOF, got %#v", tokens)
+	}
+
+	want := []struct {
+		i     int
+		start int
+		end   int
+	}{
+		{0, strings.Index(input, "é"), strings.Index(input, "é") + len("é")},
+		{1, strings.Index(input, `"a\n"`), strings.Index(input, `"a\n"`) + len(`"a\n"`)},
+		{2, strings.Index(input, "`å b`"), strings.Index(input, "`å b`") + len("`å b`")},
+		{3, len(input), len(input)},
+	}
+	for _, w := range want {
+		if tokens[w.i].Pos != w.start || int(tokens[w.i].End) != w.end {
+			t.Fatalf("token %d span: got [%d,%d), want [%d,%d)", w.i, tokens[w.i].Pos, tokens[w.i].End, w.start, w.end)
+		}
+	}
+	if tokens[1].Val != "a\n" {
+		t.Fatalf("string token should keep decoded value, got %q", tokens[1].Val)
+	}
+	if tokens[2].Val != "å b" {
+		t.Fatalf("backtick token should keep decoded value, got %q", tokens[2].Val)
+	}
+}
+
+func TestLexUnicodePathOperatorsAndNumbers(t *testing.T) {
+	input := "é | { } ( -5 ) , a.b + c - d * e / f = g == h != i < j > k <= l >= m \"x\" `å` ٢.٣ // comment\nβ"
+	tokens, err := Lex(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []TokenType{
+		TokenIdent, TokenPipe, TokenLBrace, TokenRBrace, TokenLParen, TokenInt, TokenRParen,
+		TokenComma, TokenIdent, TokenDot, TokenIdent, TokenPlus, TokenIdent, TokenMinus,
+		TokenIdent, TokenStar, TokenIdent, TokenSlash, TokenIdent, TokenEquals, TokenIdent,
+		TokenEq, TokenIdent, TokenNeq, TokenIdent, TokenLt, TokenIdent, TokenGt, TokenIdent,
+		TokenLte, TokenIdent, TokenGte, TokenIdent, TokenString, TokenBacktickIdent,
+		TokenFloat, TokenIdent, TokenEOF,
+	}
+	if len(tokens) != len(want) {
+		t.Fatalf("expected %d tokens, got %d: %#v", len(want), len(tokens), tokens)
+	}
+	for i, tt := range want {
+		if tokens[i].Type != tt {
+			t.Fatalf("token %d: expected %s, got %s (%q)", i, tt, tokens[i].Type, tokens[i].Val)
+		}
+	}
+	if tokens[5].Val != "-5" {
+		t.Fatalf("expected negative number token -5, got %q", tokens[5].Val)
+	}
+	if tokens[33].Val != "x" {
+		t.Fatalf("expected string token x, got %q", tokens[33].Val)
+	}
+	if tokens[34].Val != "å" {
+		t.Fatalf("expected backtick token å, got %q", tokens[34].Val)
+	}
+	if tokens[35].Val != "٢.٣" {
+		t.Fatalf("expected unicode float token ٢.٣, got %q", tokens[35].Val)
+	}
+	if tokens[36].Val != "β" {
+		t.Fatalf("expected identifier after comment, got %q", tokens[36].Val)
+	}
+}
+
+func TestLexUnicodeDigitNumbers(t *testing.T) {
+	tokens, err := Lex("-١ ٢.٣")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []struct {
+		tt  TokenType
+		val string
+	}{
+		{TokenInt, "-١"},
+		{TokenFloat, "٢.٣"},
+		{TokenEOF, ""},
+	}
+	if len(tokens) != len(want) {
+		t.Fatalf("expected %d tokens, got %d: %#v", len(want), len(tokens), tokens)
+	}
+	for i, w := range want {
+		if tokens[i].Type != w.tt || tokens[i].Val != w.val {
+			t.Fatalf("token %d: got %s %q, want %s %q", i, tokens[i].Type, tokens[i].Val, w.tt, w.val)
+		}
+	}
+}
+
+func TestScanSourceUnicodePaths(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+		start int
+		end   int
+	}{
+		{
+			name:  "unquoted",
+			input: "dåtå.csv | count",
+			want:  "dåtå.csv",
+			start: 0,
+			end:   len("dåtå.csv"),
+		},
+		{
+			name:  "quoted",
+			input: `"dåtå.csv" | count`,
+			want:  "dåtå.csv",
+			start: 0,
+			end:   len(`"dåtå.csv"`),
+		},
+		{
+			name:  "backtick",
+			input: "`dåtå.csv` | count",
+			want:  "dåtå.csv",
+			start: 0,
+			end:   len("`dåtå.csv`"),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			l := NewLexer(tc.input)
+			tok, err := l.ScanSource()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tok.Type != TokenIdent || tok.Val != tc.want {
+				t.Fatalf("source token: got %s %q, want IDENT %q", tok.Type, tok.Val, tc.want)
+			}
+			if tok.Pos != tc.start || int(tok.End) != tc.end {
+				t.Fatalf("source span: got [%d,%d), want [%d,%d)", tok.Pos, tok.End, tc.start, tc.end)
+			}
+			pipe, err := l.Next()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pipe.Type != TokenPipe {
+				t.Fatalf("expected pipe after source, got %s (%q)", pipe.Type, pipe.Val)
+			}
+		})
 	}
 }
 
