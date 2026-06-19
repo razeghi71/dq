@@ -134,6 +134,35 @@ func TestCLICSVInferenceCompressedInputsEndToEnd(t *testing.T) {
 	}
 }
 
+func TestCLICSVGlobInferenceUsesSingleSampleAndBadRecordBudgetEndToEnd(t *testing.T) {
+	bin := buildCLI(t)
+	dir := t.TempDir()
+	writeCLICSVInferenceFile(t, dir, "a.csv", "id,amount\n1,10\n2,20\n")
+	writeCLICSVInferenceFile(t, dir, "b.csv", "id,amount\n3,abc\n4,40\n")
+
+	glob := filepath.Join(dir, "*.csv") + " with format=csv, infer_rows=2"
+	out := runCLIQueryExpectError(t, bin, glob+" | count")
+	for _, part := range []string{"row 2", "amount", "int", "abc"} {
+		if !strings.Contains(strings.ToLower(string(out)), strings.ToLower(part)) {
+			t.Fatalf("expected error containing %q, got:\n%s", part, out)
+		}
+	}
+
+	out = runCLIQuery(t, bin, glob+", max_bad_records=1 | select id, amount | sort id | json")
+	var rows []map[string]int64
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatalf("json output: %v\n%s", err, out)
+	}
+	want := []map[string]int64{
+		{"id": 1, "amount": 10},
+		{"id": 2, "amount": 20},
+		{"id": 4, "amount": 40},
+	}
+	if fmt.Sprint(rows) != fmt.Sprint(want) {
+		t.Fatalf("glob rows after skipped cross-shard bad row: got %#v, want %#v", rows, want)
+	}
+}
+
 func TestCLIInferenceOptionsRejectedForSchemaFormats(t *testing.T) {
 	bin := buildCLI(t)
 	cases := []struct {

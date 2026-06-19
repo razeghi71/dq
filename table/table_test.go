@@ -143,6 +143,97 @@ func TestListToTableHappyPathAndErrors(t *testing.T) {
 	}
 }
 
+func TestListToTableWithSchemaPreservesUnionBranchValues(t *testing.T) {
+	unionSchema := &TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+		{Kind: TypeInt},
+		{Kind: TypeString},
+	}}
+	recordSchema := &TypeDescriptor{Kind: TypeRecord, Fields: []FieldDescriptor{
+		{Name: "k", Type: &TypeDescriptor{Kind: TypeString}},
+		{Name: "u", Type: unionSchema},
+	}}
+	tbl, err := ListToTableWithSchema(ListVal([]Value{
+		RecordVal([]RecordField{{Name: "k", Value: StrVal("a")}, {Name: "u", Value: IntVal(7)}}),
+		RecordVal([]RecordField{{Name: "k", Value: StrVal("a")}, {Name: "u", Value: StrVal("seven")}}),
+	}), recordSchema)
+	if err != nil {
+		t.Fatalf("ListToTableWithSchema returned error: %v", err)
+	}
+	requireColumnOrder(t, tbl.Columns, []string{"k", "u"})
+	requireSchemaString(t, tbl.Col(tbl.ColIndex("u")).Schema(), "union<int,string>")
+	if got := tbl.Get(0, "u"); got.Type != TypeInt || got.Int != 7 {
+		t.Fatalf("first union value: got %s, want int 7", got.AsString())
+	}
+	if got := tbl.Get(1, "u"); got.Type != TypeString || got.Str != "seven" {
+		t.Fatalf("second union value: got %s, want string seven", got.AsString())
+	}
+
+	empty, err := ListToTableWithSchema(ListVal(nil), recordSchema)
+	if err != nil {
+		t.Fatalf("empty ListToTableWithSchema returned error: %v", err)
+	}
+	requireColumnOrder(t, empty.Columns, []string{"k", "u"})
+	requireSchemaString(t, empty.Col(empty.ColIndex("u")).Schema(), "union<int,string>")
+}
+
+func TestListToTableWithSchemaRejectsDuplicateRecordFieldsBeforeExtraction(t *testing.T) {
+	cases := []struct {
+		name   string
+		schema *TypeDescriptor
+		value  Value
+		want   string
+	}{
+		{
+			name:   "known_field",
+			schema: recordOf(field("x", td(TypeInt))),
+			value: ListVal([]Value{
+				RecordVal([]RecordField{{Name: "x", Value: IntVal(1)}, {Name: "x", Value: IntVal(2)}}),
+			}),
+			want: "x duplicate record field",
+		},
+		{
+			name:   "unknown_field_that_would_be_dropped",
+			schema: recordOf(field("x", td(TypeInt))),
+			value: ListVal([]Value{
+				RecordVal([]RecordField{{Name: "y", Value: IntVal(1)}, {Name: "y", Value: IntVal(2)}}),
+			}),
+			want: "y duplicate record field",
+		},
+		{
+			name:   "nested_record_field",
+			schema: recordOf(field("payload", recordOf(field("x", td(TypeInt))))),
+			value: ListVal([]Value{
+				RecordVal([]RecordField{{Name: "payload", Value: RecordVal([]RecordField{
+					{Name: "x", Value: IntVal(1)},
+					{Name: "x", Value: IntVal(2)},
+				})}}),
+			}),
+			want: "payload.x duplicate record field",
+		},
+		{
+			name:   "later_list_element",
+			schema: recordOf(field("x", td(TypeInt))),
+			value: ListVal([]Value{
+				RecordVal([]RecordField{{Name: "x", Value: IntVal(1)}}),
+				RecordVal([]RecordField{{Name: "x", Value: IntVal(2)}, {Name: "x", Value: IntVal(3)}}),
+			}),
+			want: "x duplicate record field",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ListToTableWithSchema(tc.value, tc.schema)
+			if err == nil {
+				t.Fatal("expected duplicate record field error")
+			}
+			if got := err.Error(); got != tc.want {
+				t.Fatalf("error: got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestNewTableWithTypesPreservesDeclaredTypes(t *testing.T) {
 	tbl := NewTableWithTypes([]string{"id", "amount", "note", "active"}, []ValueType{
 		TypeInt,
@@ -196,6 +287,34 @@ func TestSliceRows(t *testing.T) {
 	}
 }
 
+func TestSliceRowsCopiesAllColumnTypesAndSchemas(t *testing.T) {
+	tbl := mixedColumnTable()
+
+	sliced := tbl.SliceRows(0, 2)
+	if sliced.NumRows != 2 {
+		t.Fatalf("rows: got %d, want 2", sliced.NumRows)
+	}
+	assertMixedColumnRow(t, sliced, 0, 1, "a")
+	for col := range sliced.Columns {
+		if !sliced.GetAt(1, col).IsNull() {
+			t.Fatalf("%s row 1: got %v, want null", sliced.Columns[col], sliced.GetAt(1, col))
+		}
+	}
+	for i, name := range tbl.Columns {
+		if sliced.Col(i) == tbl.Col(i) {
+			t.Fatalf("%s column storage was shared", name)
+		}
+		if got, want := sliced.Col(i).Schema().String(), tbl.Col(i).Schema().String(); got != want {
+			t.Fatalf("%s schema: got %s, want %s", name, got, want)
+		}
+	}
+
+	clamped := tbl.SliceRows(-10, 100)
+	if clamped.NumRows != tbl.NumRows {
+		t.Fatalf("clamped rows: got %d, want %d", clamped.NumRows, tbl.NumRows)
+	}
+}
+
 func TestApplyPermutation(t *testing.T) {
 	tbl := NewTable([]string{"n"})
 	for i := int64(1); i <= 3; i++ {
@@ -211,6 +330,30 @@ func TestApplyPermutation(t *testing.T) {
 	}
 }
 
+func TestApplyPermutationCopiesAllColumnTypesAndSchemas(t *testing.T) {
+	tbl := mixedColumnTable()
+
+	permuted := tbl.ApplyPermutation([]int{2, 0, 1})
+	if permuted.NumRows != 3 {
+		t.Fatalf("rows: got %d, want 3", permuted.NumRows)
+	}
+	assertMixedColumnRow(t, permuted, 0, 2, "c")
+	assertMixedColumnRow(t, permuted, 1, 1, "a")
+	for col := range permuted.Columns {
+		if !permuted.GetAt(2, col).IsNull() {
+			t.Fatalf("%s row 2: got %v, want null", permuted.Columns[col], permuted.GetAt(2, col))
+		}
+	}
+	for i, name := range tbl.Columns {
+		if permuted.Col(i) == tbl.Col(i) {
+			t.Fatalf("%s column storage was shared", name)
+		}
+		if got, want := permuted.Col(i).Schema().String(), tbl.Col(i).Schema().String(); got != want {
+			t.Fatalf("%s schema: got %s, want %s", name, got, want)
+		}
+	}
+}
+
 func TestSelectColsSharesData(t *testing.T) {
 	tbl := NewTable([]string{"a", "b", "c"})
 	tbl.AddRow([]Value{IntVal(1), IntVal(2), IntVal(3)})
@@ -221,6 +364,57 @@ func TestSelectColsSharesData(t *testing.T) {
 	}
 	if sub.Col(0) != tbl.Col(0) || sub.Col(1) != tbl.Col(2) {
 		t.Error("SelectCols should share column pointers")
+	}
+}
+
+func TestAppendTypedComputedColumnsSharesExistingAndValidatesNewColumns(t *testing.T) {
+	tbl := NewTable([]string{"id", "amount"})
+	tbl.AddRow([]Value{IntVal(1), IntVal(10)})
+	tbl.AddRow([]Value{IntVal(2), IntVal(3)})
+
+	got, err := tbl.AppendTypedComputedColumns(
+		[]string{"total"},
+		[]*TypeDescriptor{ScalarSchema(TypeFloat)},
+		[][]Value{{IntVal(20), FloatVal(6.5)}},
+	)
+	if err != nil {
+		t.Fatalf("AppendTypedComputedColumns returned error: %v", err)
+	}
+	requireColumnOrder(t, got.Columns, []string{"id", "amount", "total"})
+	if got.NumRows != tbl.NumRows {
+		t.Fatalf("row count: got %d, want %d", got.NumRows, tbl.NumRows)
+	}
+	if got.Col(0) != tbl.Col(0) || got.Col(1) != tbl.Col(1) {
+		t.Fatal("existing columns should be shared")
+	}
+	if got.Col(2) == nil || got.Col(2) == tbl.Col(0) || got.Col(2) == tbl.Col(1) {
+		t.Fatal("computed column should have separate storage")
+	}
+	if got.Col(2).ColType() != TypeFloat {
+		t.Fatalf("computed column type: got %v, want float", got.Col(2).ColType())
+	}
+	if v := got.Get(0, "total"); v.Type != TypeFloat || v.Float != 20 {
+		t.Fatalf("row 0 total: got %v", v)
+	}
+	if v := got.Get(1, "total"); v.Type != TypeFloat || v.Float != 6.5 {
+		t.Fatalf("row 1 total: got %v", v)
+	}
+}
+
+func TestAppendTypedComputedColumnsRejectsInvalidComputedValue(t *testing.T) {
+	tbl := NewTable([]string{"id"})
+	tbl.AddRow([]Value{IntVal(1)})
+
+	_, err := tbl.AppendTypedComputedColumns(
+		[]string{"bad"},
+		[]*TypeDescriptor{ScalarSchema(TypeInt)},
+		[][]Value{{StrVal("oops")}},
+	)
+	if err == nil {
+		t.Fatal("expected invalid computed value error")
+	}
+	if got, want := err.Error(), "bad expected int, got string"; got != want {
+		t.Fatalf("error: got %q, want %q", got, want)
 	}
 }
 
@@ -436,6 +630,96 @@ func TestConcatTypeWidening(t *testing.T) {
 	}
 }
 
+func TestConcatPreservesZeroRowSchemas(t *testing.T) {
+	a := NewTableWithSchemas([]string{"id"}, []*TypeDescriptor{{Kind: TypeInt}})
+	b := NewTableWithSchemas([]string{"id"}, []*TypeDescriptor{{Kind: TypeInt}})
+
+	got, err := Concat([]*Table{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.NumRows != 0 {
+		t.Fatalf("expected 0 rows, got %d", got.NumRows)
+	}
+	if schema := got.Col(0).Schema().String(); schema != "int" {
+		t.Fatalf("schema: got %s, want int", schema)
+	}
+	if typ := TypeName(got.Col(0).ColType()); typ != "int" {
+		t.Fatalf("type: got %s, want int", typ)
+	}
+}
+
+func TestConcatPreservesUnionSchemaAndBranchIdentity(t *testing.T) {
+	union := &TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+		{Kind: TypeInt},
+		{Kind: TypeString},
+	}}
+	empty := NewTableWithSchemas([]string{"u"}, []*TypeDescriptor{union})
+	rows := NewTableWithSchemas([]string{"u"}, []*TypeDescriptor{union})
+	rows.AddRow([]Value{IntVal(7)})
+	rows.AddRow([]Value{StrVal("7")})
+
+	got, err := Concat([]*Table{empty, rows})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if schema := got.Col(0).Schema().String(); schema != "union<int,string>" {
+		t.Fatalf("schema: got %s, want union<int,string>", schema)
+	}
+	if typ := TypeName(got.Col(0).ColType()); typ != "union" {
+		t.Fatalf("type: got %s, want union", typ)
+	}
+	if got.Get(0, "u").Type != TypeInt || got.Get(1, "u").Type != TypeString {
+		t.Fatalf("branch values were not preserved: %v / %v", got.Get(0, "u"), got.Get(1, "u"))
+	}
+	if CanonicalKey(got.Get(0, "u")) == CanonicalKey(got.Get(1, "u")) {
+		t.Fatalf("int and string union branch values should have distinct keys")
+	}
+}
+
+func TestAddRowKnownUnionSchemaMarksNullRowsNullable(t *testing.T) {
+	union := &TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+		{Kind: TypeInt},
+		{Kind: TypeString},
+	}}
+	tbl := NewTableWithSchemas([]string{"u"}, []*TypeDescriptor{union})
+
+	tbl.AddRow([]Value{Null()})
+	requireSchemaString(t, tbl.Col(0).Schema(), "union<int,string>?")
+	if got := tbl.Get(0, "u"); !got.IsNull() {
+		t.Fatalf("row 0: got %v, want null", got)
+	}
+
+	tbl.AddRow([]Value{IntVal(7)})
+	requireSchemaString(t, tbl.Col(0).Schema(), "union<int,string>?")
+	if got := tbl.Get(1, "u"); got.Type != TypeInt || got.Int != 7 {
+		t.Fatalf("row 1: got %v, want int 7", got)
+	}
+}
+
+func TestAddRowKnownNestedUnionSchemaMarksNullFieldNullable(t *testing.T) {
+	union := &TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+		{Kind: TypeInt},
+		{Kind: TypeString},
+	}}
+	schema := recordOf(
+		field("kind", td(TypeString)),
+		field("u", union),
+	)
+	tbl := NewTableWithSchemas([]string{"payload"}, []*TypeDescriptor{schema})
+
+	tbl.AddRow([]Value{RecordVal([]RecordField{
+		{Name: "kind", Value: StrVal("empty")},
+		{Name: "u", Value: Null()},
+	})})
+
+	requireSchemaString(t, tbl.Col(0).Schema(), "record<kind:string, u:union<int,string>?>")
+	payload := recordValuesForTableTest(tbl.Get(0, "payload"))
+	if got := payload["u"]; !got.IsNull() {
+		t.Fatalf("payload.u: got %v, want null", got)
+	}
+}
+
 func TestConcatEmpty(t *testing.T) {
 	_, err := Concat(nil)
 	if err == nil || err.Error() != "concat: no tables" {
@@ -568,6 +852,60 @@ func TestIsExplicitTrueAndIsBoolOrNull(t *testing.T) {
 	if IntVal(1).IsBoolOrNull() || StrVal("x").IsBoolOrNull() {
 		t.Error("non-bool/non-null should not be valid logical operands")
 	}
+}
+
+func mixedColumnTable() *Table {
+	tbl := NewTable([]string{"i", "f", "s", "b", "list", "record"})
+	tbl.AddRow([]Value{
+		IntVal(1),
+		FloatVal(1.5),
+		StrVal("a"),
+		BoolVal(true),
+		ListVal([]Value{IntVal(1), StrVal("a")}),
+		RecordVal([]RecordField{{Name: "id", Value: IntVal(1)}, {Name: "label", Value: StrVal("a")}}),
+	})
+	tbl.AddRow([]Value{Null(), Null(), Null(), Null(), Null(), Null()})
+	tbl.AddRow([]Value{
+		IntVal(2),
+		FloatVal(2.5),
+		StrVal("c"),
+		BoolVal(false),
+		ListVal([]Value{IntVal(2), StrVal("c")}),
+		RecordVal([]RecordField{{Name: "id", Value: IntVal(2)}, {Name: "label", Value: StrVal("c")}}),
+	})
+	return tbl
+}
+
+func assertMixedColumnRow(t *testing.T, tbl *Table, row int, id int64, label string) {
+	t.Helper()
+	if got := tbl.Get(row, "i"); got.Type != TypeInt || got.Int != id {
+		t.Fatalf("row %d i: got %v, want int %d", row, got, id)
+	}
+	if got := tbl.Get(row, "f"); got.Type != TypeFloat || got.Float != float64(id)+0.5 {
+		t.Fatalf("row %d f: got %v, want float %.1f", row, got, float64(id)+0.5)
+	}
+	if got := tbl.Get(row, "s"); got.Type != TypeString || got.Str != label {
+		t.Fatalf("row %d s: got %v, want string %q", row, got, label)
+	}
+	if got := tbl.Get(row, "b"); got.Type != TypeBool || got.Bool != (id == 1) {
+		t.Fatalf("row %d b: got %v", row, got)
+	}
+	list := tbl.Get(row, "list")
+	if list.Type != TypeList || len(list.List) != 2 || list.List[0].Int != id || list.List[1].Str != label {
+		t.Fatalf("row %d list: got %v", row, list)
+	}
+	record := recordValuesForTableTest(tbl.Get(row, "record"))
+	if record["id"].Type != TypeInt || record["id"].Int != id || record["label"].Type != TypeString || record["label"].Str != label {
+		t.Fatalf("row %d record: got %v", row, tbl.Get(row, "record"))
+	}
+}
+
+func recordValuesForTableTest(v Value) map[string]Value {
+	out := make(map[string]Value, len(v.Fields))
+	for _, field := range v.Fields {
+		out[field.Name] = field.Value
+	}
+	return out
 }
 
 func TestEvalTruthNonBooleanErrors(t *testing.T) {

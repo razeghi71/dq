@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	goavro "github.com/linkedin/goavro/v2"
+	parquet "github.com/parquet-go/parquet-go"
 	"github.com/razeghi71/dq/table"
 )
 
@@ -90,6 +91,31 @@ func checkUsersTable(t *testing.T, tbl *table.Table) {
 	}
 	if tbl.GetAt(5, ageIdx).Int != 40 {
 		t.Errorf("row 5 age: want 40, got %d", tbl.GetAt(5, ageIdx).Int)
+	}
+}
+
+func TestMetadataTypedRowRejectsSchemaMismatch(t *testing.T) {
+	tbl := table.NewTableWithSchemas(
+		[]string{"id"},
+		[]*table.TypeDescriptor{{Kind: table.TypeInt}},
+	)
+
+	err := addMetadataTypedRow(tbl, []table.Value{table.StrVal("bad")}, "test row")
+	if err == nil {
+		t.Fatal("expected schema mismatch error")
+	}
+	if got, want := err.Error(), "error materializing test row: id expected int, got string"; got != want {
+		t.Fatalf("error: got %q, want %q", got, want)
+	}
+	if tbl.NumRows != 0 {
+		t.Fatalf("failed typed row should not append, got %d rows", tbl.NumRows)
+	}
+
+	if err := addMetadataTypedRow(tbl, []table.Value{table.IntVal(7)}, "test row"); err != nil {
+		t.Fatalf("valid typed row returned error: %v", err)
+	}
+	if got := tbl.Get(0, "id"); got.Type != table.TypeInt || got.Int != 7 {
+		t.Fatalf("stored value: got %v, want int 7", got)
 	}
 }
 
@@ -1238,6 +1264,62 @@ func TestLoadNestedParquet(t *testing.T) {
 	checkNestedTable(t, tbl)
 }
 
+type parquetElementRecordFixture struct {
+	Element int64 `parquet:"element"`
+}
+
+type parquetElementFieldFixture struct {
+	Element parquetElementRecordFixture   `parquet:"element"`
+	Payload parquetElementRecordFixture   `parquet:"payload"`
+	Items   []parquetElementRecordFixture `parquet:"items,list"`
+	Numbers []int64                       `parquet:"numbers,list"`
+}
+
+func TestLoadParquetPreservesElementNamedRecordFields(t *testing.T) {
+	path := writeParquetFixture(t, []parquetElementFieldFixture{{
+		Element: parquetElementRecordFixture{Element: 3},
+		Payload: parquetElementRecordFixture{Element: 9},
+		Items: []parquetElementRecordFixture{
+			{Element: 1},
+			{Element: 2},
+		},
+		Numbers: []int64{4, 5},
+	}})
+
+	tbl, err := Load(path, Options{Format: "parquet"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	requireLoaderSchemaString(t, tbl.Col(tbl.ColIndex("element")).Schema(), "record<element:int>")
+	requireLoaderSchemaString(t, tbl.Col(tbl.ColIndex("payload")).Schema(), "record<element:int>")
+	requireLoaderSchemaString(t, tbl.Col(tbl.ColIndex("items")).Schema(), "list<record<element:int>>")
+	requireLoaderSchemaString(t, tbl.Col(tbl.ColIndex("numbers")).Schema(), "list<int>")
+
+	if got := fieldVal(t, tbl.Get(0, "element"), "element"); got.Type != table.TypeInt || got.Int != 3 {
+		t.Fatalf("element.element: got %v, want int 3", got)
+	}
+	if got := fieldVal(t, tbl.Get(0, "payload"), "element"); got.Type != table.TypeInt || got.Int != 9 {
+		t.Fatalf("payload.element: got %v, want int 9", got)
+	}
+
+	items := tbl.Get(0, "items")
+	if items.Type != table.TypeList || len(items.List) != 2 {
+		t.Fatalf("items: got %v, want two record items", items)
+	}
+	if got := fieldVal(t, items.List[0], "element"); got.Type != table.TypeInt || got.Int != 1 {
+		t.Fatalf("items[0].element: got %v, want int 1", got)
+	}
+	if got := fieldVal(t, items.List[1], "element"); got.Type != table.TypeInt || got.Int != 2 {
+		t.Fatalf("items[1].element: got %v, want int 2", got)
+	}
+
+	numbers := tbl.Get(0, "numbers")
+	if numbers.Type != table.TypeList || len(numbers.List) != 2 || numbers.List[0].Int != 4 || numbers.List[1].Int != 5 {
+		t.Fatalf("numbers: got %v, want [4, 5]", numbers)
+	}
+}
+
 func TestAvroSchemaNameNamespacedRecord(t *testing.T) {
 	schema := `{
 	  "type":"record","name":"Row","namespace":"com.example",
@@ -1317,6 +1399,128 @@ func TestLoadAvroNamespacedUnionRecord(t *testing.T) {
 	}
 }
 
+func TestLoadAvroNamedRecordReferencesInUnions(t *testing.T) {
+	schema := `{
+	  "type":"record","name":"Row","namespace":"com.example",
+	  "fields":[
+	    {"name":"template","type":{"type":"record","name":"Inner","fields":[{"name":"x","type":"long"},{"name":"label","type":"string"}]}},
+	    {"name":"u","type":["null","Inner"],"default":null},
+	    {"name":"fq","type":["null","com.example.Inner"],"default":null}
+	  ]}`
+	writeAvro := func(t *testing.T, rows []map[string]any) string {
+		t.Helper()
+		var buf bytes.Buffer
+		w, err := goavro.NewOCFWriter(goavro.OCFConfig{W: &buf, Schema: schema})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) > 0 {
+			if err := w.Append(rows); err != nil {
+				t.Fatal(err)
+			}
+		}
+		path := filepath.Join(t.TempDir(), "named-ref.avro")
+		if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	path := writeAvro(t, nil)
+	tbl, err := Load(path, Options{Format: "avro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireLoaderSchemaString(t, tbl.Col(tbl.ColIndex("template")).Schema(), "record<label:string, x:int>")
+	requireLoaderSchemaString(t, tbl.Col(tbl.ColIndex("u")).Schema(), "record<label:string, x:int>?")
+	requireLoaderSchemaString(t, tbl.Col(tbl.ColIndex("fq")).Schema(), "record<label:string, x:int>?")
+
+	path = writeAvro(t, []map[string]any{
+		{
+			"template": map[string]any{"x": int64(0), "label": "seed"},
+			"u":        goavro.Union("com.example.Inner", map[string]any{"x": int64(7), "label": "short"}),
+			"fq":       goavro.Union("com.example.Inner", map[string]any{"x": int64(8), "label": "full"}),
+		},
+	})
+	tbl, err = Load(path, Options{Format: "avro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := tbl.Get(0, "u")
+	if u.Type != table.TypeRecord {
+		t.Fatalf("short reference union branch: want record, got %v (%s)", u.Type, u.AsString())
+	}
+	if got := fieldVal(t, u, "x").Int; got != 7 {
+		t.Fatalf("short reference u.x: got %d, want 7", got)
+	}
+	if got := fieldVal(t, u, "label").Str; got != "short" {
+		t.Fatalf("short reference u.label: got %q, want short", got)
+	}
+	fq := tbl.Get(0, "fq")
+	if fq.Type != table.TypeRecord {
+		t.Fatalf("fully-qualified reference union branch: want record, got %v (%s)", fq.Type, fq.AsString())
+	}
+	if got := fieldVal(t, fq, "x").Int; got != 8 {
+		t.Fatalf("fully-qualified reference fq.x: got %d, want 8", got)
+	}
+	if got := fieldVal(t, fq, "label").Str; got != "full" {
+		t.Fatalf("fully-qualified reference fq.label: got %q, want full", got)
+	}
+}
+
+func TestLoadAvroNamedRecordReferenceWithSameNamedField(t *testing.T) {
+	schema := `{
+	  "type":"record","name":"Row",
+	  "fields":[
+	    {"name":"template","type":{"type":"record","name":"Inner","fields":[{"name":"Inner","type":"long"}]}},
+	    {"name":"ref","type":"Inner"}
+	  ]}`
+	writeAvro := func(t *testing.T, rows []map[string]any) string {
+		t.Helper()
+		var buf bytes.Buffer
+		w, err := goavro.NewOCFWriter(goavro.OCFConfig{W: &buf, Schema: schema})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) > 0 {
+			if err := w.Append(rows); err != nil {
+				t.Fatal(err)
+			}
+		}
+		path := filepath.Join(t.TempDir(), "same-name-ref.avro")
+		if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	path := writeAvro(t, nil)
+	tbl, err := Load(path, Options{Format: "avro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireLoaderSchemaString(t, tbl.Col(tbl.ColIndex("ref")).Schema(), "record<Inner:int>")
+
+	path = writeAvro(t, []map[string]any{
+		{
+			"template": map[string]any{"Inner": int64(0)},
+			"ref":      map[string]any{"Inner": int64(7)},
+		},
+	})
+	tbl, err = Load(path, Options{Format: "avro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireLoaderSchemaString(t, tbl.Col(tbl.ColIndex("ref")).Schema(), "record<Inner:int>")
+	ref := tbl.Get(0, "ref")
+	if ref.Type != table.TypeRecord {
+		t.Fatalf("ref: want record, got %v (%s)", ref.Type, ref.AsString())
+	}
+	if got := fieldVal(t, ref, "Inner").Int; got != 7 {
+		t.Fatalf("ref.Inner: got %d, want 7", got)
+	}
+}
+
 func TestAvroValueSchemaBranchShapes(t *testing.T) {
 	if got := avroValue(map[string]any{"string": "wrapped"}, "string", ""); got.Type != table.TypeString || got.Str != "wrapped" {
 		t.Fatalf("wrapped primitive branch: want wrapped string, got %v", got)
@@ -1381,10 +1585,298 @@ func TestAnyToValueAdditionalTypes(t *testing.T) {
 	if got := anyToValue(map[string]interface{}{"element": int64(9)}); got.Type != table.TypeRecord || len(got.Fields) != 1 || got.Fields[0].Name != "element" || got.Fields[0].Value.Int != 9 {
 		t.Fatalf("generic element field: want record<element:9>, got %v", got)
 	}
-	if got := parquetValue(map[string]interface{}{"element": int64(9)}); got.Type != table.TypeInt || got.Int != 9 {
+	if got := parquetListElementValue(map[string]interface{}{"element": int64(9)}, &table.TypeDescriptor{Kind: table.TypeInt}); got.Type != table.TypeInt || got.Int != 9 {
 		t.Fatalf("parquet element wrapper: want 9, got %v", got)
+	}
+	if got := parquetValue(map[string]interface{}{"element": int64(9)}, &table.TypeDescriptor{
+		Kind: table.TypeRecord,
+		Fields: []table.FieldDescriptor{
+			{Name: "element", Type: &table.TypeDescriptor{Kind: table.TypeInt}},
+		},
+	}); got.Type != table.TypeRecord || len(got.Fields) != 1 || got.Fields[0].Name != "element" || got.Fields[0].Value.Int != 9 {
+		t.Fatalf("parquet element record field: want record<element:9>, got %v", got)
 	}
 	if got := anyToValue(struct{ X int }{X: 1}); got.Type != table.TypeString || got.Str != `{"X":1}` {
 		t.Fatalf("fallback JSON value: want object string, got %v", got)
+	}
+}
+
+func TestParquetValueElementWrapperDisambiguation(t *testing.T) {
+	recordWithX := &table.TypeDescriptor{
+		Kind: table.TypeRecord,
+		Fields: []table.FieldDescriptor{
+			{Name: "x", Type: &table.TypeDescriptor{Kind: table.TypeInt}},
+		},
+	}
+	if got := parquetListElementValue(map[string]any{"element": map[string]any{"x": int64(7)}}, recordWithX); got.Type != table.TypeRecord || fieldVal(t, got, "x").Int != 7 {
+		t.Fatalf("wrapped record list element: got %v, want record<x:7>", got)
+	}
+
+	recordWithElement := &table.TypeDescriptor{
+		Kind: table.TypeRecord,
+		Fields: []table.FieldDescriptor{
+			{Name: "element", Type: &table.TypeDescriptor{Kind: table.TypeInt}},
+		},
+	}
+	if got := parquetListElementValue(map[string]any{"element": int64(9)}, recordWithElement); got.Type != table.TypeRecord || fieldVal(t, got, "element").Int != 9 {
+		t.Fatalf("record field named element: got %v, want record<element:9>", got)
+	}
+
+	listOfInt := &table.TypeDescriptor{Kind: table.TypeList, Elem: &table.TypeDescriptor{Kind: table.TypeInt}}
+	if got := parquetValue([]any{map[string]any{"element": int64(1)}, int64(2)}, listOfInt); got.Type != table.TypeList || len(got.List) != 2 || got.List[0].Int != 1 || got.List[1].Int != 2 {
+		t.Fatalf("list wrapper values: got %v, want [1, 2]", got)
+	}
+	if got := parquetValue("fallback", listOfInt); got.Type != table.TypeString || got.Str != "fallback" {
+		t.Fatalf("fallback list value: got %v, want fallback string", got)
+	}
+	if got := parquetUnknownValue(map[string]any{"a": []any{int64(1)}}); got.Type != table.TypeRecord || fieldVal(t, got, "a").Type != table.TypeList {
+		t.Fatalf("unknown parquet record: got %v, want record with list field", got)
+	}
+}
+
+func TestParquetListElementSchemaDescriptorUnwrapsElementWrapper(t *testing.T) {
+	schema := parquet.NewSchema("root", parquet.Group{
+		"xs": parquet.List(parquet.Group{
+			"element": parquet.Optional(parquet.Int(64)),
+		}),
+	})
+
+	got := parquetNodeSchemaDescriptor(schema.Fields()[0])
+	if got == nil {
+		t.Fatal("schema descriptor is nil")
+	}
+	if want := "list<int?>"; got.String() != want {
+		t.Fatalf("schema: want %s, got %s", want, got.String())
+	}
+}
+
+func TestAvroPrimitiveSchemaDescriptorBranches(t *testing.T) {
+	cases := []struct {
+		name string
+		want string
+	}{
+		{"null", "string?"},
+		{"int", "int"},
+		{"long", "int"},
+		{"float", "float"},
+		{"double", "float"},
+		{"boolean", "bool"},
+		{"string", "string"},
+		{"bytes", "string"},
+		{"enum", "string"},
+		{"fixed", "string"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := avroPrimitiveSchemaDescriptor(tc.name)
+			requireLoaderSchemaString(t, got, tc.want)
+		})
+	}
+
+	if got := avroPrimitiveSchemaDescriptor("decimal"); got != nil {
+		t.Fatalf("unknown primitive: got %s, want nil", got.String())
+	}
+}
+
+func TestAvroFieldSchemaDescriptorBranches(t *testing.T) {
+	recordSchema := map[string]any{
+		"type": "record",
+		"name": "Payload",
+		"fields": []any{
+			map[string]any{"name": "z", "type": "long"},
+			map[string]any{"name": "a", "type": []any{"null", "string"}},
+		},
+	}
+	cases := []struct {
+		name   string
+		schema any
+		want   string
+	}{
+		{name: "primitive string", schema: "long", want: "int"},
+		{name: "nullable union", schema: []any{"null", "string"}, want: "string?"},
+		{name: "numeric union", schema: []any{"int", "double"}, want: "float"},
+		{name: "incompatible union", schema: []any{"int", "string"}, want: "union<int,string>"},
+		{name: "null-only union", schema: []any{"null"}, want: "string?"},
+		{name: "array", schema: map[string]any{"type": "array", "items": "boolean"}, want: "list<bool>"},
+		{name: "type union in map", schema: map[string]any{"type": []any{"null", "long"}}, want: "int?"},
+		{name: "nested type map", schema: map[string]any{"type": map[string]any{"type": "array", "items": "float"}}, want: "list<float>"},
+		{name: "record", schema: recordSchema, want: "record<a:string?, z:int>"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := avroFieldSchemaDescriptor(tc.schema, "example")
+			requireLoaderSchemaString(t, got, tc.want)
+		})
+	}
+
+	nilCases := []struct {
+		name   string
+		schema any
+	}{
+		{name: "array unknown item", schema: map[string]any{"type": "array", "items": "decimal"}},
+		{name: "map unsupported", schema: map[string]any{"type": "map", "values": "string"}},
+		{name: "unknown primitive map", schema: map[string]any{"type": "decimal"}},
+		{name: "unknown nested type", schema: map[string]any{"type": map[string]any{"type": "decimal"}}},
+		{name: "unsupported shape", schema: 42},
+	}
+
+	for _, tc := range nilCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := avroFieldSchemaDescriptor(tc.schema, "example"); got != nil {
+				t.Fatalf("got %s, want nil", got.String())
+			}
+		})
+	}
+}
+
+func TestAvroRecordSchemaDescriptorInvalidBranches(t *testing.T) {
+	valid := map[string]any{
+		"type": "record",
+		"name": "Payload",
+		"fields": []any{
+			map[string]any{"name": "b", "type": "boolean"},
+			map[string]any{"name": "a", "type": "long"},
+		},
+	}
+	requireLoaderSchemaString(t, avroRecordSchemaDescriptor(valid, "example"), "record<a:int, b:bool>")
+
+	nilCases := []struct {
+		name   string
+		schema map[string]any
+	}{
+		{name: "missing fields", schema: map[string]any{"type": "record", "name": "Missing"}},
+		{name: "fields not slice", schema: map[string]any{"type": "record", "fields": "bad"}},
+		{name: "field not map", schema: map[string]any{"type": "record", "fields": []any{"bad"}}},
+		{name: "field name not string", schema: map[string]any{"type": "record", "fields": []any{map[string]any{"name": 1, "type": "long"}}}},
+		{name: "field type unsupported", schema: map[string]any{"type": "record", "fields": []any{map[string]any{"name": "x", "type": "decimal"}}}},
+	}
+
+	for _, tc := range nilCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := avroRecordSchemaDescriptor(tc.schema, "example"); got != nil {
+				t.Fatalf("got %s, want nil", got.String())
+			}
+		})
+	}
+}
+
+func TestParquetSchemaDescriptorBranches(t *testing.T) {
+	if got := parquetNodeSchemaDescriptor(nil); got != nil {
+		t.Fatalf("nil node: got %s, want nil", got.String())
+	}
+	requireLoaderSchemaString(t, parquetNodeSchemaDescriptor(parquet.Optional(parquet.Int(32))), "int?")
+	requireLoaderSchemaString(t, parquetNodeSchemaDescriptor(parquet.Repeated(parquet.Int(64))), "list<int>")
+	requireLoaderSchemaString(t, parquetNodeSchemaDescriptor(parquet.Group{
+		"b": parquet.Optional(parquet.Int(32)),
+		"a": parquet.List(parquet.String()),
+	}), "record<a:list<string>, b:int?>")
+
+	requireLoaderSchemaString(t, parquetNodeSchemaDescriptorRepeatedElem(parquet.Repeated(parquet.Group{
+		"flag": parquet.Int(32),
+		"name": parquet.String(),
+	})), "record<flag:int, name:string>")
+
+	boolSchema := parquet.SchemaOf(new(struct {
+		Flag bool `parquet:"flag"`
+	}))
+	requireLoaderSchemaString(t, parquetNodeSchemaDescriptor(boolSchema.Fields()[0]), "bool")
+
+	doubleSchema := parquet.SchemaOf(new(struct {
+		Amount float64 `parquet:"amount"`
+	}))
+	requireLoaderSchemaString(t, parquetNodeSchemaDescriptor(doubleSchema.Fields()[0]), "float")
+}
+
+func TestParquetListElementSchemaDescriptorBranches(t *testing.T) {
+	standard := parquet.NewSchema("root", parquet.Group{
+		"xs": parquet.List(parquet.Int(32)),
+	})
+	requireLoaderSchemaString(t, parquetListElementSchemaDescriptor(standard.Fields()[0]), "int")
+
+	wrapped := parquet.NewSchema("root", parquet.Group{
+		"xs": parquet.List(parquet.Group{
+			"element": parquet.Optional(parquet.Int(64)),
+		}),
+	})
+	requireLoaderSchemaString(t, parquetListElementSchemaDescriptor(wrapped.Fields()[0]), "int?")
+
+	recordElem := parquet.NewSchema("root", parquet.Group{
+		"xs": parquet.List(parquet.Group{
+			"b": parquet.Int(32),
+			"a": parquet.String(),
+		}),
+	})
+	requireLoaderSchemaString(t, parquetListElementSchemaDescriptor(recordElem.Fields()[0]), "record<a:string, b:int>")
+
+	legacyListElem := parquet.Group{
+		"list": parquet.Group{
+			"item": parquet.Int(32),
+		},
+	}
+	requireLoaderSchemaString(t, parquetListElementSchemaDescriptor(legacyListElem), "int")
+
+	elementRecord := parquet.Group{
+		"list": parquet.Group{
+			"element": parquet.Group{
+				"item": parquet.Int(32),
+			},
+		},
+	}
+	requireLoaderSchemaString(t, parquetListElementSchemaDescriptor(elementRecord), "record<item:int>")
+
+	nonListSingle := parquet.Group{"value": parquet.Int(64)}
+	requireLoaderSchemaString(t, parquetListElementSchemaDescriptor(nonListSingle), "int")
+
+	nilCases := []struct {
+		name string
+		node parquet.Node
+	}{
+		{name: "empty group", node: parquet.Group{}},
+		{name: "multi field group", node: parquet.Group{"a": parquet.Int(32), "b": parquet.Int(64)}},
+	}
+	for _, tc := range nilCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parquetListElementSchemaDescriptor(tc.node); got != nil {
+				t.Fatalf("got %s, want nil", got.String())
+			}
+		})
+	}
+}
+
+func writeParquetFixture[T any](t *testing.T, rows []T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "fixture.parquet")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create parquet fixture: %v", err)
+	}
+	pw := parquet.NewGenericWriter[T](f)
+	if len(rows) > 0 {
+		if _, err := pw.Write(rows); err != nil {
+			_ = pw.Close()
+			_ = f.Close()
+			t.Fatalf("write parquet fixture rows: %v", err)
+		}
+	}
+	if err := pw.Close(); err != nil {
+		_ = f.Close()
+		t.Fatalf("close parquet fixture writer: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close parquet fixture file: %v", err)
+	}
+	return path
+}
+
+func requireLoaderSchemaString(t *testing.T, got *table.TypeDescriptor, want string) {
+	t.Helper()
+	if got == nil {
+		t.Fatalf("schema: got nil, want %s", want)
+	}
+	got = table.FinalizeSchema(got)
+	if got.String() != want {
+		t.Fatalf("schema: got %s, want %s", got.String(), want)
 	}
 }

@@ -30,6 +30,9 @@ type inferredField struct {
 const parquetColumnOrderMetadataKey = "dq.column_order"
 
 func writeAvro(w io.Writer, t *table.Table) error {
+	if err := rejectUnionBinaryOutput("Avro", t); err != nil {
+		return err
+	}
 	return writeAvroWithTypes(w, t, inferTableTypes(t))
 }
 
@@ -77,7 +80,20 @@ func writeAvroWithTypes(w io.Writer, t *table.Table, types []*inferredType) erro
 }
 
 func writeParquet(w io.Writer, t *table.Table) error {
+	if err := rejectUnionBinaryOutput("Parquet", t); err != nil {
+		return err
+	}
 	return writeParquetWithTypes(w, t, inferTableTypes(t))
+}
+
+func rejectUnionBinaryOutput(format string, t *table.Table) error {
+	schema := t.Schema()
+	for _, col := range schema.Columns {
+		if table.SchemaContainsUnion(col.Type) {
+			return fmt.Errorf("%s output does not support union schema in column %q", format, col.Name)
+		}
+	}
+	return nil
 }
 
 func writeParquetWithTypes(w io.Writer, t *table.Table, types []*inferredType) error {
@@ -375,14 +391,48 @@ func setParquetScalar(field reflect.Value, v table.Value, typ *inferredType) err
 
 func inferTableTypes(t *table.Table) []*inferredType {
 	types := make([]*inferredType, len(t.Columns))
+	schema := t.Schema()
 	for j := range t.Columns {
 		var typ *inferredType
+		if j < len(schema.Columns) {
+			typ = inferredFromSchema(schema.Columns[j].Type)
+		}
 		for i := 0; i < t.NumRows; i++ {
 			typ = mergeInferred(typ, inferValue(t.Col(j).Get(i)))
 		}
 		types[j] = finalizeInferred(typ)
 	}
 	return types
+}
+
+func inferredFromSchema(schema *table.TypeDescriptor) *inferredType {
+	if schema == nil {
+		return nil
+	}
+	schema = table.FinalizeSchema(schema)
+	switch schema.Kind {
+	case table.TypeNull:
+		return &inferredType{typ: table.TypeNull, nullable: schema.Nullable}
+	case table.TypeInt, table.TypeFloat, table.TypeString, table.TypeBool:
+		return &inferredType{typ: schema.Kind, nullable: schema.Nullable}
+	case table.TypeList:
+		return &inferredType{
+			typ:      table.TypeList,
+			nullable: schema.Nullable,
+			elem:     inferredFromSchema(schema.Elem),
+		}
+	case table.TypeRecord:
+		fields := make([]inferredField, len(schema.Fields))
+		for i, field := range schema.Fields {
+			fields[i] = inferredField{name: field.Name, typ: inferredFromSchema(field.Type)}
+		}
+		sort.Slice(fields, func(i, j int) bool { return fields[i].name < fields[j].name })
+		return &inferredType{typ: table.TypeRecord, nullable: schema.Nullable, fields: fields}
+	case table.TypeMixed:
+		return &inferredType{typ: table.TypeString, nullable: schema.Nullable}
+	default:
+		return &inferredType{typ: table.TypeString, nullable: schema.Nullable}
+	}
 }
 
 func inferValue(v table.Value) *inferredType {

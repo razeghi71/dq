@@ -111,6 +111,58 @@ func runCLIQueryExpectError(t *testing.T, bin, query string) []byte {
 	return out
 }
 
+func TestPrintUsageWritesExpectedSections(t *testing.T) {
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	t.Cleanup(func() {
+		os.Stderr = origStderr
+		_ = r.Close()
+	})
+
+	printUsage()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"usage: dq '<query>'",
+		"dq mcp",
+		"subcommands:",
+		"-agent-guide",
+		"output formats",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("usage output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestStdinPipedReportsRegularFile(t *testing.T) {
+	origStdin := os.Stdin
+	f, err := os.CreateTemp(t.TempDir(), "stdin-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = f
+	t.Cleanup(func() {
+		os.Stdin = origStdin
+		_ = f.Close()
+	})
+
+	if !stdinPiped() {
+		t.Fatal("regular file stdin should be treated as piped input")
+	}
+}
+
 func writeCLIUsersCSV(t *testing.T, dir string) string {
 	t.Helper()
 	path := filepath.Join(dir, "users.csv")
@@ -1141,6 +1193,16 @@ func TestCLILengthFunctionsSmoke(t *testing.T) {
 	s := strings.TrimSpace(string(out))
 	if s != "count\n1" {
 		t.Fatalf("expected count\\n1, got:\n%s", s)
+	}
+}
+
+func TestCLIReduceCountRejectsArguments(t *testing.T) {
+	bin := buildCLI(t)
+	out := strings.ToLower(string(runCLIQueryExpectError(t, bin, `../../testdata/users.csv | group city | reduce c = count(age) | remove grouped | sort city | json`)))
+	for _, part := range []string{"count()", "no arguments"} {
+		if !strings.Contains(out, part) {
+			t.Fatalf("count arity error missing %q:\n%s", part, out)
+		}
 	}
 }
 

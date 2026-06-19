@@ -138,7 +138,256 @@ func schemaForPath(t *table.Table, path []string) *table.TypeDescriptor {
 	if len(path) == 1 {
 		return schema
 	}
-	return table.SchemaAtPath(schema, path[1:])
+	if nested := table.SchemaAtPath(schema, path[1:]); nested != nil {
+		return nested
+	}
+	return inferSchemaForPathValues(t, path)
+}
+
+func inferSchemaForPathValues(t *table.Table, path []string) *table.TypeDescriptor {
+	var out *table.TypeDescriptor
+	for i := 0; i < t.NumRows; i++ {
+		v, err := resolveColumnPath(path, t, i)
+		if err != nil {
+			return nil
+		}
+		merged, err := table.UnifyStrict(out, table.InferValueSchema(v))
+		if err != nil {
+			return nil
+		}
+		out = merged
+	}
+	return table.FinalizeSchema(out)
+}
+
+func schemaForKnownPath(t *table.Table, path []string) (*table.TypeDescriptor, bool) {
+	if t == nil || len(path) == 0 {
+		return nil, false
+	}
+	idx := t.ColIndex(path[0])
+	if idx < 0 {
+		return nil, false
+	}
+	cur := t.Col(idx).Schema()
+	if len(path) == 1 {
+		return cur, true
+	}
+	for _, seg := range path[1:] {
+		cur = table.FinalizeSchema(cur)
+		if cur == nil || cur.Kind != table.TypeRecord {
+			return cur, false
+		}
+		var next *table.TypeDescriptor
+		for _, field := range cur.Fields {
+			if field.Name == seg {
+				next = field.Type
+				break
+			}
+		}
+		if next == nil {
+			return nil, false
+		}
+		cur = next
+	}
+	return cur, true
+}
+
+func unionBeforePathEnd(t *table.Table, path []string) *table.TypeDescriptor {
+	if t == nil || len(path) < 2 {
+		return nil
+	}
+	idx := t.ColIndex(path[0])
+	if idx < 0 {
+		return nil
+	}
+	return unionBeforePathEndInSchema(t.Col(idx).Schema(), path[1:])
+}
+
+func unionBeforePathEndInSchema(schema *table.TypeDescriptor, path []string) *table.TypeDescriptor {
+	if schema == nil || len(path) == 0 {
+		return nil
+	}
+	cur := schema
+	for _, seg := range path {
+		cur = table.FinalizeSchema(cur)
+		if cur == nil {
+			return nil
+		}
+		if cur.Kind == table.TypeUnion {
+			return cur
+		}
+		if cur.Kind != table.TypeRecord {
+			return nil
+		}
+		var next *table.TypeDescriptor
+		for _, field := range cur.Fields {
+			if field.Name == seg {
+				next = field.Type
+				break
+			}
+		}
+		if next == nil {
+			return nil
+		}
+		cur = next
+	}
+	return nil
+}
+
+func unionPathTraversalError(path []string, schema *table.TypeDescriptor) error {
+	return fmt.Errorf("%q: cannot access fields through union schema %s", strings.Join(path, "."), schema.String())
+}
+
+func validatePathDoesNotTraverseUnion(op string, t *table.Table, path []string) error {
+	if schema := unionBeforePathEnd(t, path); schema != nil {
+		return fmt.Errorf("%s %q: cannot access fields through union schema %s", op, strings.Join(path, "."), schema.String())
+	}
+	return nil
+}
+
+func validateExprDoesNotTraverseUnion(expr ast.Expr, t *table.Table) error {
+	return validateExprColumnPaths(expr, func(path []string) error {
+		if schema := unionBeforePathEnd(t, path); schema != nil {
+			return unionPathTraversalError(path, schema)
+		}
+		return nil
+	})
+}
+
+func validateExprDoesNotTraverseUnionInSchema(expr ast.Expr, schema *table.TypeDescriptor) error {
+	return validateExprColumnPaths(expr, func(path []string) error {
+		if schema := unionBeforePathEndInSchema(schema, path); schema != nil {
+			return unionPathTraversalError(path, schema)
+		}
+		return nil
+	})
+}
+
+func validateExprColumnPaths(expr ast.Expr, validate func([]string) error) error {
+	switch e := expr.(type) {
+	case *ast.ColumnExpr:
+		return validate(e.Path)
+	case *ast.BinaryExpr:
+		if err := validateExprColumnPaths(e.Left, validate); err != nil {
+			return err
+		}
+		return validateExprColumnPaths(e.Right, validate)
+	case *ast.UnaryExpr:
+		return validateExprColumnPaths(e.Operand, validate)
+	case *ast.FuncCallExpr:
+		for _, arg := range e.Args {
+			if err := validateExprColumnPaths(arg, validate); err != nil {
+				return err
+			}
+		}
+	case *ast.StructExpr:
+		for _, field := range e.Fields {
+			if err := validateExprColumnPaths(field.Expr, validate); err != nil {
+				return err
+			}
+		}
+	case *ast.ListExpr:
+		for _, elem := range e.Elements {
+			if err := validateExprColumnPaths(elem, validate); err != nil {
+				return err
+			}
+		}
+	case *ast.IsNullExpr:
+		return validateExprColumnPaths(e.Operand, validate)
+	}
+	return nil
+}
+
+func validateUnionComparisons(expr ast.Expr, t *table.Table) error {
+	return validateUnionComparisonsWith(expr, func(expr ast.Expr) *table.TypeDescriptor {
+		return inferExprSchema(expr, t)
+	})
+}
+
+func validateUnionComparisonsInSchema(expr ast.Expr, schema *table.TypeDescriptor) error {
+	return validateUnionComparisonsWith(expr, func(expr ast.Expr) *table.TypeDescriptor {
+		return inferAggregateSchema(expr, schema)
+	})
+}
+
+func validateUnionComparisonsWith(expr ast.Expr, schemaOf func(ast.Expr) *table.TypeDescriptor) error {
+	switch e := expr.(type) {
+	case *ast.BinaryExpr:
+		switch e.Op {
+		case "==", "!=", "<", ">", "<=", ">=":
+			if comparisonOperandContainsUnion(e.Left, schemaOf) || comparisonOperandContainsUnion(e.Right, schemaOf) {
+				return fmt.Errorf("cannot compare union values")
+			}
+		}
+		if err := validateUnionComparisonsWith(e.Left, schemaOf); err != nil {
+			return err
+		}
+		return validateUnionComparisonsWith(e.Right, schemaOf)
+	case *ast.UnaryExpr:
+		return validateUnionComparisonsWith(e.Operand, schemaOf)
+	case *ast.FuncCallExpr:
+		for _, arg := range e.Args {
+			if err := validateUnionComparisonsWith(arg, schemaOf); err != nil {
+				return err
+			}
+		}
+	case *ast.StructExpr:
+		for _, field := range e.Fields {
+			if err := validateUnionComparisonsWith(field.Expr, schemaOf); err != nil {
+				return err
+			}
+		}
+	case *ast.ListExpr:
+		for _, elem := range e.Elements {
+			if err := validateUnionComparisonsWith(elem, schemaOf); err != nil {
+				return err
+			}
+		}
+	case *ast.IsNullExpr:
+		return validateUnionComparisonsWith(e.Operand, schemaOf)
+	}
+	return nil
+}
+
+func comparisonOperandContainsUnion(expr ast.Expr, schemaOf func(ast.Expr) *table.TypeDescriptor) bool {
+	schema := schemaOf(expr)
+	if table.SchemaContainsUnion(schema) {
+		return true
+	}
+	return schema == nil && exprTreeContainsUnion(expr, schemaOf)
+}
+
+func exprTreeContainsUnion(expr ast.Expr, schemaOf func(ast.Expr) *table.TypeDescriptor) bool {
+	if table.SchemaContainsUnion(schemaOf(expr)) {
+		return true
+	}
+	switch e := expr.(type) {
+	case *ast.BinaryExpr:
+		return exprTreeContainsUnion(e.Left, schemaOf) || exprTreeContainsUnion(e.Right, schemaOf)
+	case *ast.UnaryExpr:
+		return exprTreeContainsUnion(e.Operand, schemaOf)
+	case *ast.FuncCallExpr:
+		for _, arg := range e.Args {
+			if exprTreeContainsUnion(arg, schemaOf) {
+				return true
+			}
+		}
+	case *ast.StructExpr:
+		for _, field := range e.Fields {
+			if exprTreeContainsUnion(field.Expr, schemaOf) {
+				return true
+			}
+		}
+	case *ast.ListExpr:
+		for _, elem := range e.Elements {
+			if exprTreeContainsUnion(elem, schemaOf) {
+				return true
+			}
+		}
+	case *ast.IsNullExpr:
+		return exprTreeContainsUnion(e.Operand, schemaOf)
+	}
+	return false
 }
 
 func execHead(o *ast.HeadOp, t *table.Table) *table.Table {
@@ -164,6 +413,15 @@ func execSort(o *ast.SortOp, t *table.Table) (*table.Table, error) {
 	}
 	keys := make([]key, len(o.Keys))
 	for i, k := range o.Keys {
+		if err := validatePathDoesNotTraverseUnion("sort", t, k.Path); err != nil {
+			return nil, err
+		}
+		if schema, ok := schemaForKnownPath(t, k.Path); ok {
+			schema = table.FinalizeSchema(schema)
+			if table.SchemaContainsUnion(schema) {
+				return nil, fmt.Errorf("sort %q: union values are not orderable", strings.Join(k.Path, "."))
+			}
+		}
 		keys[i] = key{k.Path, k.Desc}
 	}
 
@@ -223,9 +481,15 @@ func compareValues(a, b table.Value) int {
 func execSelect(o *ast.SelectOp, t *table.Table) (*table.Table, error) {
 	var resultCols []string
 	for _, path := range o.Columns {
+		if err := validatePathDoesNotTraverseUnion("select", t, path); err != nil {
+			return nil, err
+		}
 		base := pathToColumnName(path)
 		name := uniqueColumnName(base, resultCols)
 		resultCols = append(resultCols, name)
+	}
+	if indices, ok := topLevelSelectIndices(o.Columns, t); ok {
+		return t.SelectCols(indices, resultCols), nil
 	}
 
 	schemas := make([]*table.TypeDescriptor, len(o.Columns))
@@ -242,13 +506,33 @@ func execSelect(o *ast.SelectOp, t *table.Table) (*table.Table, error) {
 			}
 			vals[j] = v
 		}
-		result.AddRow(vals)
+		if err := result.AddRowTyped(vals); err != nil {
+			return nil, fmt.Errorf("select: %w", err)
+		}
 	}
 	return result, nil
 }
 
+func topLevelSelectIndices(paths [][]string, t *table.Table) ([]int, bool) {
+	indices := make([]int, len(paths))
+	for i, path := range paths {
+		if len(path) != 1 {
+			return nil, false
+		}
+		idx := t.ColIndex(path[0])
+		if idx < 0 {
+			return nil, false
+		}
+		indices[i] = idx
+	}
+	return indices, true
+}
+
 func execFilter(o *ast.FilterOp, t *table.Table) (*table.Table, error) {
-	result := table.NewTable(t.Columns)
+	if err := checkFilterExpr(o.Expr, t); err != nil {
+		return nil, fmt.Errorf("filter: %w", err)
+	}
+	kept := make([]int, 0, t.NumRows)
 	for i := 0; i < t.NumRows; i++ {
 		ctx := &EvalContext{Table: t, RowIdx: i}
 		val, err := Eval(o.Expr, ctx)
@@ -257,20 +541,23 @@ func execFilter(o *ast.FilterOp, t *table.Table) (*table.Table, error) {
 		}
 		switch {
 		case val.IsExplicitTrue():
-			result.AddRow(rowVals(t, i))
+			kept = append(kept, i)
 		case val.IsBoolOrNull():
 			// false or unknown — drop row
 		default:
 			return nil, fmt.Errorf("filter: expression did not return boolean, got %v", val.AsString())
 		}
 	}
-	return result, nil
+	return t.ApplyPermutation(kept), nil
 }
 
 func execGroup(o *ast.GroupOp, t *table.Table) (*table.Table, error) {
 	// Build output key column names with dedup
 	var keyColNames []string
 	for _, path := range o.Columns {
+		if err := validatePathDoesNotTraverseUnion("group", t, path); err != nil {
+			return nil, err
+		}
 		base := pathToColumnName(path)
 		name := uniqueColumnName(base, keyColNames)
 		keyColNames = append(keyColNames, name)
@@ -314,17 +601,30 @@ func execGroup(o *ast.GroupOp, t *table.Table) (*table.Table, error) {
 
 	// Build result table: key columns + list column
 	resultCols := append(append([]string{}, keyColNames...), o.NestedName)
-	result := table.NewTableWithSchemas(resultCols, nil)
+	schemas := make([]*table.TypeDescriptor, len(resultCols))
+	for i, path := range o.Columns {
+		schemas[i] = schemaForPath(t, path)
+	}
+	schemas[len(schemas)-1] = &table.TypeDescriptor{Kind: table.TypeList, Elem: recordSchemaForTable(t)}
+	result := table.NewTableWithSchemas(resultCols, schemas)
 	for _, g := range groups {
 		vals := make([]table.Value, len(g.key)+1)
 		copy(vals, g.key)
 		vals[len(g.key)] = table.ListVal(g.records)
-		result.AddRow(vals)
+		if err := result.AddRowTyped(vals); err != nil {
+			return nil, fmt.Errorf("group: %w", err)
+		}
 	}
 	return result, nil
 }
 
 func execTransform(o *ast.TransformOp, t *table.Table) (*table.Table, error) {
+	for _, a := range o.Assignments {
+		if err := checkTransformExpr(a.Expr, t); err != nil {
+			return nil, fmt.Errorf("transform %q: %w", a.Column, err)
+		}
+	}
+
 	newCols := make([]string, len(t.Columns))
 	copy(newCols, t.Columns)
 	assignTargets := make([]int, len(o.Assignments))
@@ -351,6 +651,15 @@ func execTransform(o *ast.TransformOp, t *table.Table) (*table.Table, error) {
 	for _, target := range assignTargets {
 		schemas[target] = nil
 	}
+	for i, a := range o.Assignments {
+		schemas[assignTargets[i]] = plannedAssignmentSchema(a.Expr, t)
+	}
+	useTypedAppend := allSchemasKnown(schemas, assignTargets)
+	if useTypedAppend {
+		if result, ok, err := execAppendOnlyTypedTransform(o, t, newCols, schemas, assignTargets); ok || err != nil {
+			return result, err
+		}
+	}
 	result := table.NewTableWithSchemas(newCols, schemas)
 	for i := 0; i < t.NumRows; i++ {
 		vals := make([]table.Value, len(newCols))
@@ -371,9 +680,56 @@ func execTransform(o *ast.TransformOp, t *table.Table) (*table.Table, error) {
 			}
 			vals[assignTargets[j]] = v
 		}
-		result.AddRow(vals)
+		if useTypedAppend {
+			if err := result.AddRowTypedColumns(vals, assignTargets); err != nil {
+				return nil, fmt.Errorf("transform: %w", err)
+			}
+		} else {
+			result.AddRow(vals)
+		}
 	}
 	return result, nil
+}
+
+func execAppendOnlyTypedTransform(o *ast.TransformOp, t *table.Table, newCols []string, schemas []*table.TypeDescriptor, assignTargets []int) (*table.Table, bool, error) {
+	if !appendOnlyTransformTargets(assignTargets, len(t.Columns)) {
+		return nil, false, nil
+	}
+
+	addedNames := newCols[len(t.Columns):]
+	addedSchemas := schemas[len(t.Columns):]
+	valuesByColumn := make([][]table.Value, len(addedNames))
+	for i := range valuesByColumn {
+		valuesByColumn[i] = make([]table.Value, t.NumRows)
+	}
+
+	for row := 0; row < t.NumRows; row++ {
+		ctx := &EvalContext{Table: t, RowIdx: row}
+		for i, a := range o.Assignments {
+			v, err := Eval(a.Expr, ctx)
+			if err != nil {
+				return nil, true, fmt.Errorf("transform %q: %w", a.Column, err)
+			}
+			valuesByColumn[assignTargets[i]-len(t.Columns)][row] = v
+		}
+	}
+
+	result, err := t.AppendTypedComputedColumns(addedNames, addedSchemas, valuesByColumn)
+	if err != nil {
+		return nil, true, fmt.Errorf("transform: %w", err)
+	}
+	return result, true, nil
+}
+
+func appendOnlyTransformTargets(assignTargets []int, baseCols int) bool {
+	seen := make(map[int]bool, len(assignTargets))
+	for _, target := range assignTargets {
+		if target < baseCols || seen[target] {
+			return false
+		}
+		seen[target] = true
+	}
+	return true
 }
 
 func execReduce(o *ast.ReduceOp, t *table.Table) (*table.Table, error) {
@@ -405,17 +761,27 @@ func execReduce(o *ast.ReduceOp, t *table.Table) (*table.Table, error) {
 	for len(schemas) < len(newCols) {
 		schemas = append(schemas, nil)
 	}
+	nestedSchema := nestedRecordSchemaFromList(t.Col(nestedIdx).Schema())
+	for _, a := range o.Assignments {
+		if err := checkReduceExpr(a.Expr, nestedSchema); err != nil {
+			return nil, fmt.Errorf("reduce %q: %w", a.Column, err)
+		}
+	}
 	for _, target := range assignTargets {
 		schemas[target] = nil
 	}
+	for i, a := range o.Assignments {
+		schemas[assignTargets[i]] = plannedAggregateSchema(a.Expr, nestedSchema)
+	}
 	result := table.NewTableWithSchemas(newCols, schemas)
+	useTypedAppend := allSchemasKnown(schemas, assignTargets)
 	for i := 0; i < t.NumRows; i++ {
 		nested := t.Col(nestedIdx).Get(i)
 		if nested.Type != table.TypeList {
 			return nil, fmt.Errorf("reduce: column %q is not a list (did you forget to group first?)", o.NestedName)
 		}
 
-		nestedTable, err := table.ListToTable(nested)
+		nestedTable, err := table.ListToTableWithSchema(nested, nestedSchema)
 		if err != nil {
 			return nil, fmt.Errorf("reduce: %w", err)
 		}
@@ -435,21 +801,35 @@ func execReduce(o *ast.ReduceOp, t *table.Table) (*table.Table, error) {
 			}
 			vals[assignTargets[j]] = v
 		}
-		result.AddRow(vals)
+		if useTypedAppend {
+			if err := result.AddRowTypedColumns(vals, assignTargets); err != nil {
+				return nil, fmt.Errorf("reduce: %w", err)
+			}
+		} else {
+			result.AddRow(vals)
+		}
 	}
 	return result, nil
 }
 
 func execCount(t *table.Table) *table.Table {
-	result := table.NewTable([]string{"count"})
-	result.AddRow([]table.Value{table.IntVal(int64(t.NumRows))})
+	result := table.NewTableWithSchemas([]string{"count"}, []*table.TypeDescriptor{{Kind: table.TypeInt}})
+	_ = result.AddRowTyped([]table.Value{table.IntVal(int64(t.NumRows))})
 	return result
 }
 
 func execDescribe(t *table.Table) *table.Table {
-	result := table.NewTable([]string{"column", "type", "row_count", "schema"})
+	result := table.NewTableWithSchemas(
+		[]string{"column", "type", "row_count", "schema"},
+		[]*table.TypeDescriptor{
+			{Kind: table.TypeString},
+			{Kind: table.TypeString},
+			{Kind: table.TypeInt},
+			{Kind: table.TypeString},
+		},
+	)
 	for i, name := range t.Columns {
-		result.AddRow([]table.Value{
+		_ = result.AddRowTyped([]table.Value{
 			table.StrVal(name),
 			table.StrVal(table.TypeName(t.Col(i).ColType())),
 			table.IntVal(int64(t.NumRows)),
@@ -460,8 +840,13 @@ func execDescribe(t *table.Table) *table.Table {
 }
 
 func execDistinct(o *ast.DistinctOp, t *table.Table) (*table.Table, error) {
+	for _, path := range o.Columns {
+		if err := validatePathDoesNotTraverseUnion("distinct", t, path); err != nil {
+			return nil, err
+		}
+	}
 	seen := make(map[string]bool)
-	result := table.NewTable(t.Columns)
+	result := table.NewTableWithSchemas(t.Columns, columnSchemas(t))
 	for i := 0; i < t.NumRows; i++ {
 		var key string
 		if len(o.Columns) > 0 {
@@ -484,7 +869,9 @@ func execDistinct(o *ast.DistinctOp, t *table.Table) (*table.Table, error) {
 
 		if !seen[key] {
 			seen[key] = true
-			result.AddRow(rowVals(t, i))
+			if err := result.AddRowTyped(rowVals(t, i)); err != nil {
+				return nil, fmt.Errorf("distinct: %w", err)
+			}
 		}
 	}
 	return result, nil

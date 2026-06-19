@@ -32,7 +32,8 @@ func execJoin(o *ast.JoinOp, left *table.Table, load LoadFunc) (*table.Table, er
 	}
 
 	outCols, leftKeyOutIdx, rightColMap := buildJoinSchema(left, right, leftKeys, rightKeys, o.Filename)
-	result := table.NewTable(outCols)
+	outSchemas, useTypedAppend := buildJoinOutputSchemas(left, right, leftKeys, rightKeys, leftKeyOutIdx, rightColMap, len(outCols), o.Kind)
+	result := table.NewTableWithSchemas(outCols, outSchemas)
 
 	rightIndex, err := buildJoinIndex(right, rightKeys)
 	if err != nil {
@@ -81,7 +82,13 @@ func execJoin(o *ast.JoinOp, left *table.Table, load LoadFunc) (*table.Table, er
 				vals[outIdx] = table.Null()
 			}
 		}
-		result.AddRow(vals)
+		if useTypedAppend {
+			if err := result.AddRowTyped(vals); err != nil {
+				return err
+			}
+		} else {
+			result.AddRow(vals)
+		}
 		return nil
 	}
 
@@ -135,6 +142,12 @@ func resolveJoinKeys(keys []ast.JoinKey, left, right *table.Table) ([]resolvedJo
 	leftKeys := make([]resolvedJoinKey, len(keys))
 	rightKeys := make([]resolvedJoinKey, len(keys))
 	for i, k := range keys {
+		if err := validatePathDoesNotTraverseUnion("join", left, k.Left); err != nil {
+			return nil, nil, err
+		}
+		if err := validatePathDoesNotTraverseUnion("join", right, k.Right); err != nil {
+			return nil, nil, err
+		}
 		lk, err := resolveJoinKeySide(k.Left, left, "left")
 		if err != nil {
 			return nil, nil, fmt.Errorf("join: %w", err)
@@ -206,6 +219,69 @@ func buildJoinSchema(left, right *table.Table, leftKeys, rightKeys []resolvedJoi
 		outCols = append(outCols, name)
 	}
 	return outCols, leftKeyOutIdx, rightColMap
+}
+
+func buildJoinOutputSchemas(left, right *table.Table, leftKeys, rightKeys []resolvedJoinKey, leftKeyOutIdx []int, rightColMap map[int]int, outLen int, joinKind string) ([]*table.TypeDescriptor, bool) {
+	schemas := make([]*table.TypeDescriptor, outLen)
+	useTypedAppend := true
+
+	keyOutIdx := make(map[int]bool, len(leftKeyOutIdx))
+	for _, outIdx := range leftKeyOutIdx {
+		keyOutIdx[outIdx] = true
+	}
+
+	for i := range left.Columns {
+		schema := left.Col(i).Schema()
+		if (joinKind == "right" || joinKind == "full") && !keyOutIdx[i] {
+			schema = table.WithNullable(schema)
+		}
+		schemas[i] = schema
+	}
+
+	for i := range leftKeys {
+		outIdx := leftKeyOutIdx[i]
+		leftSchema := schemaForPath(left, leftKeys[i].path)
+		rightSchema := schemaForPath(right, rightKeys[i].path)
+		if leftSchema == nil {
+			leftSchema = rightSchema
+		}
+		if rightSchema != nil {
+			if merged, err := table.UnifyStrict(leftSchema, rightSchema); err == nil {
+				leftSchema = merged
+			} else {
+				useTypedAppend = false
+				if joinKind == "right" || joinKind == "full" {
+					// In fallback mode, retained right-only rows supply the merged
+					// key value. Do not pre-seed that key with the incompatible
+					// left schema, or permissive append will stringify it. Keep the
+					// right schema so zero-row outputs still describe the side that
+					// would supply retained right-only keys.
+					leftSchema = rightSchema
+				}
+			}
+		}
+		if outIdx >= 0 && outIdx < len(schemas) {
+			schemas[outIdx] = leftSchema
+		}
+	}
+
+	for outIdx, rightIdx := range rightColMap {
+		if outIdx >= 0 && outIdx < len(schemas) {
+			schema := right.Col(rightIdx).Schema()
+			if joinKind == "left" || joinKind == "full" {
+				schema = table.WithNullable(schema)
+			}
+			schemas[outIdx] = schema
+		}
+	}
+
+	for _, schema := range schemas {
+		if schema == nil {
+			useTypedAppend = false
+			break
+		}
+	}
+	return schemas, useTypedAppend
 }
 
 // joinBasename derives a sanitized column prefix from the join filename:

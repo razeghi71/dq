@@ -90,7 +90,7 @@ For the detailed language and design contract, see `AGENTS.md`.
 
 ## Type and Schema Basics
 
-`type` is the top-level storage type: `int`, `float`, `string`, `bool`, `list`, `record`, or `null`. `schema` shows nested detail and nullability:
+`type` is the top-level storage type: `int`, `float`, `string`, `bool`, `list`, `record`, `union`, or `null`. `schema` shows nested detail and nullability:
 
 ```bash
 dq 'nested.json | describe | select column, type, schema'
@@ -105,7 +105,26 @@ dq 'events.jsonl | describe | select column, schema'
 # profile -> record<email:string?, id:int>
 ```
 
+Pipeline operations keep known schemas even when no rows survive:
+
+```bash
+dq 'users.csv | filter { false } | describe'
+# name -> string, row_count 0
+# age  -> int,    row_count 0
+```
+
 Numeric types promote from `int` to `float` when needed. Heterogeneous values inside one JSON/list value are preserved as `mixed`, such as `[1, "two"] -> list<mixed>`. Outside that explicit list heterogeneity case, incompatible native JSON types are bad records instead of silently becoming strings.
+
+Avro unions with incompatible branches load as `union<...>` from file metadata, even for empty files:
+
+```bash
+dq 'events.avro | describe | select column, type, schema'
+# u -> union, union<int,string>
+# maybe_u -> union, union<int,string>?
+```
+
+Union values output as their active branch value in table, CSV, JSON, and JSONL. `group`, `distinct`, and `join` keys use the active value's exact type and structural key, so integer `7` is different from string `"7"`. Avro branch names/tags are not stored today; two named Avro branches with the same dq schema are indistinguishable after loading. Direct ordering or comparison on a union column is intentionally rejected.
+Recursive Avro named records are rejected with a clear load error because `dq` schemas cannot represent recursive types yet.
 
 ## Operations
 
@@ -270,7 +289,8 @@ Join keys can use dot paths for nested fields; a dot-path key gets its own flatt
 Notes:
 
 - Null keys never match (rows with null keys still appear in left/right/full joins, with the other side null).
-- Keys match by exact type and structural value, consistent with `group` and `distinct` -- e.g. integer `1` does not match string `"1"` across files of different formats.
+- Outer-join schemas reflect possible null padding even when no rows survive: left/full joins make right-side output columns nullable, and right/full joins make non-key left-side output columns nullable. Merged join keys keep their key schema.
+- Keys match by exact dq type and structural value, consistent with `group` and `distinct` -- e.g. integer `1` does not match string `"1"` across files of different formats or union branch value types. Avro branch names/tags are not part of the key.
 
 ## Functions
 
@@ -324,6 +344,8 @@ dq 'users.csv | transform empty = struct(), nullable = struct(a = null)'
 ```
 
 Struct field names are identifiers; use backticks for names with spaces or keywords such as `` `and` ``. `select` and `group` flatten dot paths to underscore names (`address.city` → `address_city`). Missing sub-fields return null. Null fields inside constructed records are preserved; schema-based writers infer their concrete field type from other non-null values, or fall back to nullable string when every value is null.
+
+Dot paths cannot step through a union branch because different rows may hold different branch shapes. Select the union column itself, or normalize it first once branch-specific helpers exist.
 
 ## List columns
 
@@ -382,8 +404,15 @@ Output format commands (`table`, `csv`, `json`, `jsonl`, `avro`, `parquet`) must
 | `csv`   | `\| csv`  | Standard CSV. Nulls render as empty strings.             |
 | `json`  | `\| json` | JSON array. Preserves types (ints, bools, nulls, nested).|
 | `jsonl` | `\| jsonl`| One JSON object per line. Same type preservation as JSON. |
-| `avro`  | `\| avro` | Avro object container file. Field names must match `[A-Za-z_][A-Za-z0-9_]*`. Requires at least one output column. |
-| `parquet` | `\| parquet` | Parquet file. Requires at least one output column. Column order is preserved via file metadata. |
+| `avro`  | `\| avro` | Avro object container file. Field names must match `[A-Za-z_][A-Za-z0-9_]*`. Requires at least one output column and currently rejects `union` schemas. |
+| `parquet` | `\| parquet` | Parquet file. Requires at least one output column, currently rejects `union` schemas, and preserves column order via file metadata. |
+
+Avro and Parquet outputs use the result table schema, so empty results still carry selected column types:
+
+```bash
+dq 'users.csv | filter { false } | select name, age | parquet to empty.parquet'
+dq 'empty.parquet | describe'
+```
 
 ## Supported Input Formats
 
@@ -420,7 +449,7 @@ dq 'nested.json | describe | select column, schema'
 
 Mixed numeric JSON values promote from int to float. Heterogeneous values inside a single JSON array are preserved and described as `mixed`, for example `[1, "two"]` has schema `list<mixed>`.
 Outside that single-array `mixed` case, incompatible native JSON types are bad records instead of silent string widening, including nested fields such as `s.x` or cross-row typed-list conflicts such as `orders[].amount`.
-Avro and Parquet are schema-bound readers and currently use the table append path; if inconsistent values are produced there, they follow normal permissive table widening rather than the JSON/JSONL strict recursive load checks.
+Avro and Parquet are schema-bound readers. They seed table schemas from file metadata, including empty files with columns. Avro unions with incompatible non-null branches seed `union<...>` schemas and preserve active branch values by dq value type and structure; compatible numeric unions still collapse to `float`, and structurally identical named branches collapse because Avro branch tags are not represented. Recursive Avro named records are rejected because `dq` schemas cannot represent recursive types yet. Parquet has no equivalent union type in `dq` today.
 
 JSON/JSONL schema inference samples the first 20480 logical records by default. Use `infer_rows=-1` when late sparse fields matter more than startup cost, and `max_bad_records=N` to skip a limited number of malformed or schema-incompatible records:
 
@@ -461,6 +490,7 @@ dq 'users.csv | join left orders/part-*.csv on user_id'
 - Patterns are matched relative to the current working directory.
 - Matched files are loaded and concatenated.
 - CSV glob shards follow the CSV header rules below; compatible extended headers create a column union and missing values are null.
+- CSV header names must be unique; duplicate header names fail at load time.
 - JSON/JSONL glob shards use one sampled schema in deterministic path order. Fields first seen after the sample are bad records; use `with format=jsonl, infer_rows=-1` (or a larger `infer_rows`) when sparse late fields should be part of the schema.
 - Matched paths are sorted lexicographically (use zero-padded partition names like `part-001` for correct order).
 - CSV shards after the first: repeated headers are skipped; reordered or extended headers are detected when the first row is clearly a header (shared column names, new lowercase identifiers such as `email`, not `Email`). Otherwise rows are read positionally under the first file's columns.

@@ -476,6 +476,9 @@ func callDatePart(args []ast.Expr, ctx *EvalContext, part string) (table.Value, 
 func EvalAggregate(expr ast.Expr, nested *table.Table) (table.Value, error) {
 	switch e := expr.(type) {
 	case *ast.FuncCallExpr:
+		if err := validateAggregateFunctionArity(e); err != nil {
+			return table.Null(), err
+		}
 		switch e.Name {
 		case "count":
 			return table.IntVal(int64(nested.NumRows)), nil
@@ -497,20 +500,13 @@ func EvalAggregate(expr ast.Expr, nested *table.Table) (table.Value, error) {
 			return table.Null(), fmt.Errorf("non-aggregate function %q in reduce context", e.Name)
 		}
 	case *ast.BinaryExpr:
-		left, err := EvalAggregate(e.Left, nested)
-		if err != nil {
-			return table.Null(), err
-		}
-		right, err := EvalAggregate(e.Right, nested)
-		if err != nil {
-			return table.Null(), err
-		}
-		if left.IsNull() || right.IsNull() {
-			return table.Null(), nil
-		}
-		return evalArith(e.Op, left, right)
+		return evalAggregateBinary(e, nested)
+	case *ast.UnaryExpr:
+		return evalAggregateUnary(e, nested)
 	case *ast.LiteralExpr:
 		return evalLiteral(e), nil
+	case *ast.IsNullExpr:
+		return evalAggregateIsNull(e, nested)
 	case *ast.StructExpr:
 		return table.Null(), fmt.Errorf("struct constructor is not supported in reduce")
 	case *ast.ListExpr:
@@ -518,6 +514,85 @@ func EvalAggregate(expr ast.Expr, nested *table.Table) (table.Value, error) {
 	default:
 		return table.Null(), fmt.Errorf("unsupported expression type %T in reduce", expr)
 	}
+}
+
+func validateAggregateFunctionArity(e *ast.FuncCallExpr) error {
+	switch e.Name {
+	case "count":
+		if len(e.Args) != 0 {
+			return fmt.Errorf("count() takes no arguments, got %d", len(e.Args))
+		}
+	case "sum", "avg", "min", "max", "first", "last":
+		if len(e.Args) != 1 {
+			return fmt.Errorf("%s() takes 1 argument, got %d", e.Name, len(e.Args))
+		}
+	}
+	return nil
+}
+
+func evalAggregateBinary(e *ast.BinaryExpr, nested *table.Table) (table.Value, error) {
+	left, err := EvalAggregate(e.Left, nested)
+	if err != nil {
+		return table.Null(), err
+	}
+	right, err := EvalAggregate(e.Right, nested)
+	if err != nil {
+		return table.Null(), err
+	}
+
+	switch e.Op {
+	case "+", "-", "*", "/":
+		if left.IsNull() || right.IsNull() {
+			return table.Null(), nil
+		}
+		return evalArith(e.Op, left, right)
+	case "==", "!=", "<", ">", "<=", ">=":
+		return evalComparison(e.Op, left, right)
+	case "and":
+		return table.EvalTruthAnd(left, right)
+	case "or":
+		return table.EvalTruthOr(left, right)
+	default:
+		return table.Null(), fmt.Errorf("unknown operator %q", e.Op)
+	}
+}
+
+func evalAggregateUnary(e *ast.UnaryExpr, nested *table.Table) (table.Value, error) {
+	operand, err := EvalAggregate(e.Operand, nested)
+	if err != nil {
+		return table.Null(), err
+	}
+
+	switch e.Op {
+	case "not":
+		return table.EvalTruthNot(operand)
+	case "-":
+		if operand.IsNull() {
+			return table.Null(), nil
+		}
+		switch operand.Type {
+		case table.TypeInt:
+			return table.IntVal(-operand.Int), nil
+		case table.TypeFloat:
+			return table.FloatVal(-operand.Float), nil
+		default:
+			return table.Null(), fmt.Errorf("cannot negate %v", operand.AsString())
+		}
+	default:
+		return table.Null(), fmt.Errorf("unknown unary operator %q", e.Op)
+	}
+}
+
+func evalAggregateIsNull(e *ast.IsNullExpr, nested *table.Table) (table.Value, error) {
+	operand, err := EvalAggregate(e.Operand, nested)
+	if err != nil {
+		return table.Null(), err
+	}
+	isNull := operand.IsNull()
+	if e.Negated {
+		isNull = !isNull
+	}
+	return table.BoolVal(isNull), nil
 }
 
 func getColValues(e *ast.FuncCallExpr, nested *table.Table) ([]table.Value, error) {

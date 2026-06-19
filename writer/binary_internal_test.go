@@ -324,6 +324,27 @@ func TestAvroUnionNameCoversAllTypes(t *testing.T) {
 	}
 }
 
+func TestMarkNullableClonesAndDefaults(t *testing.T) {
+	got := markNullable(nil)
+	if got.typ != table.TypeString || !got.nullable {
+		t.Fatalf("markNullable(nil): got type=%v nullable=%v, want string?", got.typ, got.nullable)
+	}
+
+	orig := &inferredType{
+		typ: table.TypeRecord,
+		fields: []inferredField{
+			{name: "x", typ: &inferredType{typ: table.TypeInt}},
+		},
+	}
+	nullable := markNullable(orig)
+	if nullable == orig || len(nullable.fields) != 1 || nullable.fields[0].typ == orig.fields[0].typ {
+		t.Fatal("markNullable should deep clone the inferred type")
+	}
+	if !nullable.nullable || orig.nullable {
+		t.Fatalf("nullable flags: clone=%v orig=%v, want clone only", nullable.nullable, orig.nullable)
+	}
+}
+
 func TestParquetScalarAndListElementBranches(t *testing.T) {
 	intField := reflect.New(reflect.TypeOf(int64(0))).Elem()
 	if err := setParquetScalar(intField, table.IntVal(7), &inferredType{typ: table.TypeInt}); err != nil {

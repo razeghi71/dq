@@ -98,6 +98,115 @@ func TestMergeSchemasStrictMergesListOfList(t *testing.T) {
 	requireSchemaString(t, got, "list<list<float>>")
 }
 
+func TestUnionSchemaNormalizationBranches(t *testing.T) {
+	requireSchemaString(t, UnionSchema([]*TypeDescriptor{nil, td(TypeNull)}, false), "string?")
+	requireSchemaString(t, UnionSchema([]*TypeDescriptor{td(TypeInt), td(TypeFloat)}, true), "float?")
+	requireSchemaString(t, UnionSchema([]*TypeDescriptor{td(TypeInt), nullable(TypeInt)}, false), "int?")
+	requireSchemaString(t, UnionSchema([]*TypeDescriptor{td(TypeInt), nullable(TypeString)}, false), "union<int,string>?")
+
+	nested := UnionSchema([]*TypeDescriptor{
+		{Kind: TypeUnion, Nullable: true, Branches: []*TypeDescriptor{td(TypeString), td(TypeBool)}},
+		td(TypeString),
+	}, false)
+	requireSchemaString(t, nested, "union<string,bool>?")
+
+	records := UnionSchema([]*TypeDescriptor{
+		recordOf(field("x", td(TypeInt))),
+		recordOf(field("y", td(TypeInt))),
+		recordOf(field("x", td(TypeInt))),
+	}, false)
+	requireSchemaString(t, records, "union<record<x:int>,record<y:int>>")
+
+	nullableRecordBranch := UnionSchema([]*TypeDescriptor{
+		recordOf(field("x", td(TypeInt)), field("y", td(TypeString))),
+		td(TypeString),
+		recordOf(field("x", td(TypeInt)), field("y", nullable(TypeString))),
+	}, false)
+	requireSchemaString(t, nullableRecordBranch, "union<record<x:int, y:string?>,string>")
+
+	sparseRecordBranch := UnionSchema([]*TypeDescriptor{
+		recordOf(field("x", td(TypeInt))),
+		td(TypeString),
+		recordOf(field("x", td(TypeInt)), field("y", td(TypeString))),
+	}, false)
+	requireSchemaString(t, sparseRecordBranch, "union<record<x:int>,string,record<x:int, y:string>>")
+}
+
+func TestNormalizeSchemaCanonicalizesUnions(t *testing.T) {
+	raw := &TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+		nullable(TypeInt),
+		td(TypeString),
+	}}
+	canonical := UnionOf([]*TypeDescriptor{nullable(TypeInt), td(TypeString)}, false)
+
+	requireSchemaString(t, NormalizeSchema(raw), "union<int,string>?")
+	requireSchemaString(t, canonical, "union<int,string>?")
+	if !EquivalentSchema(raw, canonical) {
+		t.Fatalf("EquivalentSchema returned false for raw %s and canonical %s", raw, canonical)
+	}
+}
+
+func TestUnifyUnionStrictAtPathBranches(t *testing.T) {
+	left := UnionSchema([]*TypeDescriptor{td(TypeInt), td(TypeString)}, false)
+	right := UnionSchema([]*TypeDescriptor{td(TypeString), td(TypeBool)}, true)
+
+	got, err := unifyUnionStrictAtPath(left, right, "u")
+	if err != nil {
+		t.Fatalf("unify union/union: %v", err)
+	}
+	requireSchemaString(t, got, "union<int,string,bool>?")
+
+	got, err = unifyUnionStrictAtPath(left, td(TypeInt), "u")
+	if err != nil {
+		t.Fatalf("unify union/schema: %v", err)
+	}
+	requireSchemaString(t, got, "union<int,string>")
+
+	got, err = unifyUnionStrictAtPath(td(TypeInt), left, "u")
+	if err != nil {
+		t.Fatalf("unify schema/union: %v", err)
+	}
+	requireSchemaString(t, got, "union<int,string>")
+
+	_, err = unifyUnionStrictAtPath(left, td(TypeBool), "u")
+	requireSchemaError(t, err, "u", "union<int,string>", "bool")
+}
+
+func TestUnifyUnionStrictMergesCompatibleBranchNullability(t *testing.T) {
+	left := UnionSchema([]*TypeDescriptor{
+		recordOf(field("x", td(TypeInt)), field("y", td(TypeString))),
+		td(TypeString),
+	}, false)
+	right := recordOf(field("x", td(TypeInt)), field("y", nullable(TypeString)))
+
+	got, err := UnifyStrict(left, right)
+	if err != nil {
+		t.Fatalf("UnifyStrict returned error: %v", err)
+	}
+	requireSchemaString(t, got, "union<record<x:int, y:string?>,string>")
+}
+
+func TestUnifyUnionStrictLiftsBranchNullabilityToUnion(t *testing.T) {
+	left := UnionSchema([]*TypeDescriptor{td(TypeInt), td(TypeString)}, false)
+
+	got, err := UnifyStrict(left, nullable(TypeInt))
+	if err != nil {
+		t.Fatalf("UnifyStrict returned error: %v", err)
+	}
+	requireSchemaString(t, got, "union<int,string>?")
+}
+
+func TestUnifyUnionStrictRejectsSparseRecordBranchMerge(t *testing.T) {
+	left := UnionSchema([]*TypeDescriptor{
+		recordOf(field("x", td(TypeInt)), field("y", td(TypeString))),
+		td(TypeString),
+	}, false)
+	right := recordOf(field("x", td(TypeInt)))
+
+	_, err := UnifyStrict(left, right)
+	requireSchemaError(t, err, "", "union<record<x:int, y:string>,string>", "record<x:int>")
+}
+
 func TestMergeSchemasStrictReportsNestedConflictPaths(t *testing.T) {
 	t.Run("record field", func(t *testing.T) {
 		a := recordOf(field("s", recordOf(field("x", td(TypeInt)))))
@@ -119,6 +228,21 @@ func TestMergeSchemasStrictReportsNestedConflictPaths(t *testing.T) {
 
 		requireSchemaError(t, err, "orders[].amt", "int", "string")
 	})
+}
+
+func TestMergeSchemasStrictRejectsDuplicateFieldDescriptors(t *testing.T) {
+	invalid := recordOf(
+		field("x", td(TypeInt)),
+		field("x", td(TypeInt)),
+	)
+
+	_, err := MergeSchemasStrict(invalid, cloneTypeDescriptor(invalid))
+	if err == nil {
+		t.Fatal("expected duplicate field descriptor error")
+	}
+	if got, want := err.Error(), "x duplicate record field"; got != want {
+		t.Fatalf("error: got %q, want %q", got, want)
+	}
 }
 
 func TestInferValueSchemaUsesMixedOnlyWithinOneList(t *testing.T) {
@@ -225,6 +349,104 @@ func TestMergeValueSchemaStrictSparseRecordsAndNestedConflicts(t *testing.T) {
 
 	_, err = MergeValueSchemaStrictAtPath(schema, IntVal(4), "root")
 	requireSchemaError(t, err, "root", "record<extra:bool?, id:int, s:record<x:int?, y:string?>>", "int")
+}
+
+func TestMergeValueSchemaStrictRejectsDuplicateRecordFields(t *testing.T) {
+	cases := []struct {
+		name     string
+		schema   *TypeDescriptor
+		value    Value
+		basePath string
+		want     string
+	}{
+		{
+			name:     "nil_schema_top_level_record",
+			basePath: "payload",
+			want:     "payload.x duplicate record field",
+			value: RecordVal([]RecordField{
+				{Name: "x", Value: IntVal(1)},
+				{Name: "x", Value: IntVal(2)},
+			}),
+		},
+		{
+			name:     "null_schema_top_level_record",
+			schema:   nullable(TypeNull),
+			basePath: "payload",
+			want:     "payload.x duplicate record field",
+			value: RecordVal([]RecordField{
+				{Name: "x", Value: IntVal(1)},
+				{Name: "x", Value: IntVal(2)},
+			}),
+		},
+		{
+			name:     "existing_record_schema",
+			schema:   recordOf(field("x", td(TypeInt))),
+			basePath: "payload",
+			want:     "payload.x duplicate record field",
+			value: RecordVal([]RecordField{
+				{Name: "x", Value: IntVal(1)},
+				{Name: "x", Value: IntVal(2)},
+			}),
+		},
+		{
+			name:     "existing_record_with_new_duplicate_field",
+			schema:   recordOf(field("id", td(TypeInt))),
+			basePath: "payload",
+			want:     "payload.x duplicate record field",
+			value: RecordVal([]RecordField{
+				{Name: "id", Value: IntVal(1)},
+				{Name: "x", Value: IntVal(2)},
+				{Name: "x", Value: IntVal(3)},
+			}),
+		},
+		{
+			name:     "nested_record",
+			basePath: "payload",
+			want:     "payload.meta.score duplicate record field",
+			value: RecordVal([]RecordField{
+				{Name: "meta", Value: RecordVal([]RecordField{
+					{Name: "score", Value: IntVal(1)},
+					{Name: "score", Value: IntVal(2)},
+				})},
+			}),
+		},
+		{
+			name:     "list_record_element",
+			basePath: "items",
+			want:     "items[].sku duplicate record field",
+			value: ListVal([]Value{
+				RecordVal([]RecordField{
+					{Name: "sku", Value: StrVal("a")},
+					{Name: "sku", Value: StrVal("b")},
+				}),
+			}),
+		},
+		{
+			name:     "nested_list_record_element",
+			basePath: "payload",
+			want:     "payload.items[].sku duplicate record field",
+			value: RecordVal([]RecordField{
+				{Name: "items", Value: ListVal([]Value{
+					RecordVal([]RecordField{
+						{Name: "sku", Value: StrVal("a")},
+						{Name: "sku", Value: StrVal("b")},
+					}),
+				})},
+			}),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := MergeValueSchemaStrictAtPath(cloneTypeDescriptor(tc.schema), tc.value, tc.basePath)
+			if err == nil {
+				t.Fatal("expected duplicate record field error")
+			}
+			if got := err.Error(); got != tc.want {
+				t.Fatalf("error: got %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestMergeValueSchemaStrictListsAndMixedElements(t *testing.T) {
@@ -440,6 +662,362 @@ func TestCoerceValueToSchemaPreservesMixedListValues(t *testing.T) {
 	}
 }
 
+func TestCoerceValueToSchemaUnionRecordBranchesPreserveExactBranch(t *testing.T) {
+	schema := &TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+		recordOf(field("x", td(TypeInt))),
+		recordOf(field("y", td(TypeInt))),
+	}}
+
+	got, err := CoerceValueToSchema(RecordVal([]RecordField{{Name: "y", Value: IntVal(2)}}), schema)
+	if err != nil {
+		t.Fatalf("CoerceValueToSchema returned error: %v", err)
+	}
+	requireRecordValue(t, got, []RecordField{{Name: "y", Value: IntVal(2)}})
+
+	got, err = CoerceValueToSchema(RecordVal([]RecordField{{Name: "x", Value: IntVal(1)}}), schema)
+	if err != nil {
+		t.Fatalf("CoerceValueToSchema returned error: %v", err)
+	}
+	requireRecordValue(t, got, []RecordField{{Name: "x", Value: IntVal(1)}})
+}
+
+func TestCoerceValueToSchemaUnionCanonicalRecordBranchFillsNullableFields(t *testing.T) {
+	schema := &TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+		recordOf(field("x", nullable(TypeInt)), field("y", nullable(TypeInt))),
+		td(TypeString),
+	}}
+
+	got, err := CoerceValueToSchema(RecordVal([]RecordField{{Name: "y", Value: IntVal(2)}}), schema)
+	if err != nil {
+		t.Fatalf("CoerceValueToSchema returned error: %v", err)
+	}
+	requireRecordValue(t, got, []RecordField{
+		{Name: "x", Value: Null()},
+		{Name: "y", Value: IntVal(2)},
+	})
+
+	_, err = CoerceValueToSchema(RecordVal([]RecordField{{Name: "z", Value: IntVal(1)}}), schema)
+	requireSchemaError(t, err, "", "union<record<x:int?, y:int?>,string>", "record<z:int>")
+}
+
+func TestCoerceValueToSchemaUnionCanonicalRecordBranchRejectsMissingRequiredField(t *testing.T) {
+	schema := &TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+		recordOf(field("x", td(TypeInt)), field("y", nullable(TypeInt))),
+		td(TypeString),
+	}}
+
+	_, err := CoerceValueToSchemaAtPath(RecordVal([]RecordField{{Name: "y", Value: IntVal(2)}}), schema, "u")
+	requireSchemaError(t, err, "u", "union<record<x:int, y:int?>,string>", "record<y:int>")
+}
+
+func TestCoerceValueToSchemaUnionRecordBranchesPreserveSharedFieldBranch(t *testing.T) {
+	schema := &TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+		recordOf(field("kind", td(TypeString)), field("x", td(TypeInt))),
+		recordOf(field("kind", td(TypeString)), field("y", td(TypeInt))),
+	}}
+	value := RecordVal([]RecordField{
+		{Name: "kind", Value: StrVal("right")},
+		{Name: "y", Value: IntVal(2)},
+	})
+
+	got, err := CoerceValueToSchema(value, schema)
+	if err != nil {
+		t.Fatalf("CoerceValueToSchema returned error: %v", err)
+	}
+	requireRecordValue(t, got, []RecordField{
+		{Name: "kind", Value: StrVal("right")},
+		{Name: "y", Value: IntVal(2)},
+	})
+}
+
+func TestCoerceValueToSchemaUnionRecordBranchesPreferExactOverEarlierSuperset(t *testing.T) {
+	schema := &TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+		recordOf(field("x", td(TypeInt)), field("y", nullable(TypeInt))),
+		recordOf(field("x", td(TypeInt))),
+	}}
+
+	got, err := CoerceValueToSchema(RecordVal([]RecordField{{Name: "x", Value: IntVal(1)}}), schema)
+	if err != nil {
+		t.Fatalf("CoerceValueToSchema returned error: %v", err)
+	}
+	requireRecordValue(t, got, []RecordField{{Name: "x", Value: IntVal(1)}})
+}
+
+func TestCoerceValueToSchemaUnionRecordBranchesPreferExactOverEarlierNumericCoercion(t *testing.T) {
+	schema := &TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+		recordOf(field("x", td(TypeFloat))),
+		recordOf(field("x", td(TypeInt))),
+	}}
+
+	got, err := CoerceValueToSchema(RecordVal([]RecordField{{Name: "x", Value: IntVal(1)}}), schema)
+	if err != nil {
+		t.Fatalf("CoerceValueToSchema returned error: %v", err)
+	}
+	requireRecordValue(t, got, []RecordField{{Name: "x", Value: IntVal(1)}})
+
+	got, err = CoerceValueToSchema(RecordVal([]RecordField{{Name: "x", Value: FloatVal(1)}}), schema)
+	if err != nil {
+		t.Fatalf("CoerceValueToSchema returned error: %v", err)
+	}
+	requireRecordValue(t, got, []RecordField{{Name: "x", Value: FloatVal(1)}})
+}
+
+func TestCoerceValueToSchemaUnionNestedExactPassDoesNotCoerce(t *testing.T) {
+	schema := UnionOf([]*TypeDescriptor{
+		recordOf(field("u", UnionOf([]*TypeDescriptor{td(TypeFloat), td(TypeString)}, false))),
+		recordOf(field("u", td(TypeInt))),
+	}, false)
+	value := RecordVal([]RecordField{{Name: "u", Value: IntVal(7)}})
+
+	got, err := CoerceValueToSchema(value, schema)
+	if err != nil {
+		t.Fatalf("CoerceValueToSchema returned error: %v", err)
+	}
+	requireRecordValue(t, got, []RecordField{{Name: "u", Value: IntVal(7)}})
+
+	got, err = CoerceValueToSchemaMode(value, schema, CoerceExactMode)
+	if err != nil {
+		t.Fatalf("CoerceExactMode returned error: %v", err)
+	}
+	requireRecordValue(t, got, []RecordField{{Name: "u", Value: IntVal(7)}})
+}
+
+func TestCoerceValueToSchemaUnionListBranchesPreferExactOverEarlierNumericCoercion(t *testing.T) {
+	schema := listOf(&TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+		recordOf(field("x", td(TypeFloat))),
+		recordOf(field("x", td(TypeInt))),
+	}})
+	value := ListVal([]Value{
+		RecordVal([]RecordField{{Name: "x", Value: IntVal(1)}}),
+		RecordVal([]RecordField{{Name: "x", Value: FloatVal(2)}}),
+	})
+
+	got, err := CoerceValueToSchema(value, schema)
+	if err != nil {
+		t.Fatalf("CoerceValueToSchema returned error: %v", err)
+	}
+	if got.Type != TypeList || len(got.List) != 2 {
+		t.Fatalf("coerced list: got %v, want two elements", got)
+	}
+	requireRecordValue(t, got.List[0], []RecordField{{Name: "x", Value: IntVal(1)}})
+	requireRecordValue(t, got.List[1], []RecordField{{Name: "x", Value: FloatVal(2)}})
+}
+
+func TestCoerceValueToSchemaUnionListRecordBranchesPreserveElementBranches(t *testing.T) {
+	schema := listOf(&TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+		recordOf(field("x", td(TypeInt))),
+		recordOf(field("y", td(TypeInt))),
+	}})
+	value := ListVal([]Value{
+		RecordVal([]RecordField{{Name: "y", Value: IntVal(2)}}),
+		RecordVal([]RecordField{{Name: "x", Value: IntVal(1)}}),
+	})
+
+	got, err := CoerceValueToSchema(value, schema)
+	if err != nil {
+		t.Fatalf("CoerceValueToSchema returned error: %v", err)
+	}
+	if got.Type != TypeList || len(got.List) != 2 {
+		t.Fatalf("coerced list: got %v, want two elements", got)
+	}
+	requireRecordValue(t, got.List[0], []RecordField{{Name: "y", Value: IntVal(2)}})
+	requireRecordValue(t, got.List[1], []RecordField{{Name: "x", Value: IntVal(1)}})
+}
+
+func TestCoerceUnionBranchHelpersCoverEdgeCases(t *testing.T) {
+	got, err := coerceValueToExactUnionBranch(IntVal(1), nil, "u")
+	if err != nil || !Equal(got, IntVal(1)) {
+		t.Fatalf("exact nil schema: got %s, err %v", got.AsString(), err)
+	}
+
+	got, err = coerceValueToExactUnionBranch(Null(), td(TypeInt), "u")
+	if err != nil || !got.IsNull() {
+		t.Fatalf("exact null value: got %s, err %v", got.AsString(), err)
+	}
+
+	got, err = coerceValueToExactUnionBranch(StrVal("x"), &TypeDescriptor{Kind: TypeMixed}, "u")
+	if err != nil || !Equal(got, StrVal("x")) {
+		t.Fatalf("exact mixed schema: got %s, err %v", got.AsString(), err)
+	}
+
+	nestedUnion := &TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{td(TypeInt), td(TypeString)}}
+	got, err = coerceValueToExactUnionBranch(IntVal(2), nestedUnion, "u")
+	if err != nil || !Equal(got, IntVal(2)) {
+		t.Fatalf("exact nested union: got %s, err %v", got.AsString(), err)
+	}
+
+	got, err = coerceValueToExactUnionBranch(ListVal([]Value{IntVal(3)}), listOf(td(TypeInt)), "xs")
+	if err != nil || got.Type != TypeList || got.List[0].Int != 3 {
+		t.Fatalf("exact list branch: got %s, err %v", got.AsString(), err)
+	}
+
+	got, err = coerceValueToUnionBranch(IntVal(4), &TypeDescriptor{Kind: TypeFloat}, "u")
+	if err != nil || got.Type != TypeFloat || got.Float != 4 {
+		t.Fatalf("coercive numeric branch: got %s, err %v", got.AsString(), err)
+	}
+
+	got, err = coerceValueToUnionBranch(ListVal([]Value{IntVal(5)}), listOf(td(TypeFloat)), "xs")
+	if err != nil || got.Type != TypeList || got.List[0].Type != TypeFloat || got.List[0].Float != 5 {
+		t.Fatalf("coercive list branch: got %s, err %v", got.AsString(), err)
+	}
+
+	_, err = coerceValueToUnionBranch(ListVal([]Value{StrVal("bad")}), listOf(td(TypeInt)), "xs")
+	requireSchemaError(t, err, "xs[]", "int", "string")
+}
+
+func TestCoerceValueToSchemaUnionRecordBranchesRejectIncompatibleRecord(t *testing.T) {
+	schema := &TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+		recordOf(field("x", td(TypeInt))),
+		recordOf(field("y", td(TypeInt))),
+	}}
+
+	_, err := CoerceValueToSchemaAtPath(RecordVal([]RecordField{{Name: "y", Value: StrVal("bad")}}), schema, "u")
+	if err == nil {
+		t.Fatal("expected incompatible union record branch error")
+	}
+	if !strings.Contains(err.Error(), "u expected union<record<x:int>,record<y:int>>, got record<y:string>") {
+		t.Fatalf("error: got %q", err.Error())
+	}
+}
+
+func TestMergeValueSchemaStrictAcceptsNarrowerUnionBranchValues(t *testing.T) {
+	cases := []struct {
+		name   string
+		schema *TypeDescriptor
+		value  Value
+		want   string
+	}{
+		{
+			name: "nullable_record_field_with_non_null_value",
+			schema: &TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+				recordOf(field("x", nullable(TypeInt))),
+				td(TypeString),
+			}},
+			value: RecordVal([]RecordField{{Name: "x", Value: IntVal(1)}}),
+			want:  "union<record<x:int?>,string>",
+		},
+		{
+			name: "nullable_record_field_with_null_value",
+			schema: &TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+				recordOf(field("x", nullable(TypeInt))),
+				td(TypeString),
+			}},
+			value: RecordVal([]RecordField{{Name: "x", Value: Null()}}),
+			want:  "union<record<x:int?>,string>",
+		},
+		{
+			name: "string_branch",
+			schema: &TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+				recordOf(field("x", nullable(TypeInt))),
+				td(TypeString),
+			}},
+			value: StrVal("ok"),
+			want:  "union<record<x:int?>,string>",
+		},
+		{
+			name: "numeric_promotion_inside_nullable_record_branch",
+			schema: &TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+				recordOf(field("x", nullable(TypeFloat))),
+				td(TypeString),
+			}},
+			value: RecordVal([]RecordField{{Name: "x", Value: IntVal(1)}}),
+			want:  "union<record<x:float?>,string>",
+		},
+		{
+			name: "multiple_record_branches",
+			schema: &TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+				recordOf(field("x", nullable(TypeInt))),
+				recordOf(field("y", nullable(TypeInt))),
+				td(TypeString),
+			}},
+			value: RecordVal([]RecordField{{Name: "y", Value: IntVal(2)}}),
+			want:  "union<record<x:int?>,record<y:int?>,string>",
+		},
+		{
+			name: "shared_field_record_branch",
+			schema: &TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+				recordOf(field("kind", td(TypeString)), field("x", nullable(TypeInt))),
+				recordOf(field("kind", td(TypeString)), field("y", nullable(TypeInt))),
+			}},
+			value: RecordVal([]RecordField{{Name: "kind", Value: StrVal("right")}, {Name: "y", Value: IntVal(2)}}),
+			want:  "union<record<kind:string, x:int?>,record<kind:string, y:int?>>",
+		},
+		{
+			name: "list_element_union_branch",
+			schema: listOf(&TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+				recordOf(field("x", nullable(TypeInt))),
+				td(TypeString),
+			}}),
+			value: ListVal([]Value{
+				RecordVal([]RecordField{{Name: "x", Value: IntVal(1)}}),
+				StrVal("ok"),
+				RecordVal([]RecordField{{Name: "x", Value: Null()}}),
+			}),
+			want: "list<union<record<x:int?>,string>>",
+		},
+		{
+			name: "nested_union_field",
+			schema: recordOf(field("u", &TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+				recordOf(field("x", nullable(TypeInt))),
+				td(TypeString),
+			}})),
+			value: RecordVal([]RecordField{{Name: "u", Value: RecordVal([]RecordField{{Name: "x", Value: IntVal(1)}})}}),
+			want:  "record<u:union<record<x:int?>,string>>",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := MergeValueSchemaStrictAtPath(cloneTypeDescriptor(tc.schema), tc.value, "u")
+			if err != nil {
+				t.Fatalf("MergeValueSchemaStrictAtPath returned error: %v", err)
+			}
+			requireSchemaString(t, got, tc.want)
+		})
+	}
+}
+
+func TestMergeValueSchemaStrictRejectsInvalidUnionBranchValues(t *testing.T) {
+	schema := &TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+		recordOf(field("x", nullable(TypeInt))),
+		recordOf(field("y", nullable(TypeInt))),
+	}}
+
+	cases := []struct {
+		name  string
+		value Value
+		want  string
+	}{
+		{
+			name:  "bad_field_type",
+			value: RecordVal([]RecordField{{Name: "x", Value: StrVal("bad")}}),
+			want:  "u expected union<record<x:int?>,record<y:int?>>, got record<x:string>",
+		},
+		{
+			name:  "wrong_record_shape",
+			value: RecordVal([]RecordField{{Name: "z", Value: IntVal(1)}}),
+			want:  "u expected union<record<x:int?>,record<y:int?>>, got record<z:int>",
+		},
+		{
+			name:  "missing_nullable_branch_field_still_wrong_shape",
+			value: RecordVal(nil),
+			want:  "u expected union<record<x:int?>,record<y:int?>>, got record<>",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := MergeValueSchemaStrictAtPath(cloneTypeDescriptor(schema), tc.value, "u")
+			if err == nil {
+				t.Fatal("expected union branch merge error")
+			}
+			if got := err.Error(); got != tc.want {
+				t.Fatalf("error: got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCoerceValueToSchemaReportsNestedPath(t *testing.T) {
 	schema := listOf(recordOf(field("amt", td(TypeInt))))
 	value := ListVal([]Value{
@@ -449,6 +1027,73 @@ func TestCoerceValueToSchemaReportsNestedPath(t *testing.T) {
 	_, err := CoerceValueToSchemaAtPath(value, schema, "orders")
 
 	requireSchemaError(t, err, "orders[].amt", "int", "string")
+}
+
+func requireRecordValue(t *testing.T, got Value, fields []RecordField) {
+	t.Helper()
+	want := RecordVal(fields)
+	if !Equal(got, want) {
+		t.Fatalf("record value:\ngot  %s\nwant %s", got.AsString(), want.AsString())
+	}
+}
+
+func TestCoerceValueToSchemaRejectsDuplicateRecordFields(t *testing.T) {
+	cases := []struct {
+		name     string
+		schema   *TypeDescriptor
+		value    Value
+		basePath string
+		wantPath string
+	}{
+		{
+			name:     "top_level_record",
+			schema:   recordOf(field("x", td(TypeInt))),
+			basePath: "payload",
+			wantPath: "payload.x",
+			value: RecordVal([]RecordField{
+				{Name: "x", Value: IntVal(1)},
+				{Name: "x", Value: IntVal(2)},
+			}),
+		},
+		{
+			name:     "nested_record",
+			basePath: "payload",
+			wantPath: "payload.meta.score",
+			schema: recordOf(field("meta", recordOf(
+				field("score", td(TypeFloat)),
+			))),
+			value: RecordVal([]RecordField{
+				{Name: "meta", Value: RecordVal([]RecordField{
+					{Name: "score", Value: IntVal(1)},
+					{Name: "score", Value: IntVal(2)},
+				})},
+			}),
+		},
+		{
+			name:     "list_record",
+			schema:   listOf(recordOf(field("sku", td(TypeString)))),
+			basePath: "items",
+			wantPath: "items[].sku",
+			value: ListVal([]Value{
+				RecordVal([]RecordField{
+					{Name: "sku", Value: StrVal("a")},
+					{Name: "sku", Value: StrVal("b")},
+				}),
+			}),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := CoerceValueToSchemaAtPath(tc.value, tc.schema, tc.basePath)
+			if err == nil {
+				t.Fatal("expected duplicate record field error")
+			}
+			if got, want := err.Error(), tc.wantPath+" duplicate record field"; got != want {
+				t.Fatalf("error: got %q, want %q", got, want)
+			}
+		})
+	}
 }
 
 func TestNewTableWithSchemasColumnSchemaAndAddRowTyped(t *testing.T) {
@@ -476,6 +1121,160 @@ func TestNewTableWithSchemasColumnSchemaAndAddRowTyped(t *testing.T) {
 	if got := tbl.Col(1).ColType(); got != TypeRecord {
 		t.Fatalf("column type: got %v, want record", got)
 	}
+}
+
+func TestNewTableWithSchemasDuplicateRecordFieldSchemaIsNotStored(t *testing.T) {
+	tbl := NewTableWithSchemas([]string{"payload"}, []*TypeDescriptor{
+		recordOf(
+			field("x", td(TypeInt)),
+			field("x", td(TypeInt)),
+		),
+	})
+	requireSchemaString(t, tbl.Col(0).Schema(), "string")
+
+	err := tbl.AddRowTyped([]Value{
+		RecordVal([]RecordField{{Name: "x", Value: IntVal(1)}}),
+	})
+	if err == nil {
+		t.Fatal("expected typed append error")
+	}
+	if got, want := err.Error(), "payload expected string, got record<x:int>"; got != want {
+		t.Fatalf("error: got %q, want %q", got, want)
+	}
+}
+
+func TestSchemaValidationBoundariesRejectInvalidDescriptors(t *testing.T) {
+	invalid := recordOf(
+		field("x", td(TypeInt)),
+		field("x", td(TypeInt)),
+	)
+
+	if SchemaAssignable(invalid, cloneTypeDescriptor(invalid), AssignCoerciveMode) {
+		t.Fatal("SchemaAssignable accepted duplicate field descriptors")
+	}
+	if schemaFitsTarget(invalid, cloneTypeDescriptor(invalid)) {
+		t.Fatal("schemaFitsTarget accepted duplicate field descriptors")
+	}
+
+	_, err := UnifySchemasAtPath(td(TypeInt), invalid, UnifyStrictMode, "payload")
+	if err == nil {
+		t.Fatal("expected UnifySchemasAtPath to reject invalid actual schema")
+	}
+	if got, want := err.Error(), "payload.x duplicate record field"; got != want {
+		t.Fatalf("UnifySchemasAtPath error: got %q, want %q", got, want)
+	}
+
+	_, err = MergeValueSchemaStrictAtPath(invalid, Null(), "payload")
+	if err == nil {
+		t.Fatal("expected MergeValueSchemaStrictAtPath to reject invalid schema")
+	}
+	if got, want := err.Error(), "payload.x duplicate record field"; got != want {
+		t.Fatalf("MergeValueSchemaStrictAtPath error: got %q, want %q", got, want)
+	}
+}
+
+func TestAppendTypedComputedColumnsCoversStorageKinds(t *testing.T) {
+	base := NewTableWithSchemas([]string{"id"}, []*TypeDescriptor{td(TypeInt)})
+	if err := base.AddRowTyped([]Value{IntVal(1)}); err != nil {
+		t.Fatalf("seed row 1: %v", err)
+	}
+	if err := base.AddRowTyped([]Value{IntVal(2)}); err != nil {
+		t.Fatalf("seed row 2: %v", err)
+	}
+
+	names := []string{"i", "f", "s", "b", "xs", "rec", "u"}
+	schemas := []*TypeDescriptor{
+		td(TypeInt),
+		td(TypeFloat),
+		td(TypeString),
+		td(TypeBool),
+		listOf(td(TypeInt)),
+		recordOf(field("x", td(TypeInt))),
+		UnionOf([]*TypeDescriptor{td(TypeInt), td(TypeString)}, false),
+	}
+	values := [][]Value{
+		{IntVal(10), IntVal(20)},
+		{IntVal(1), FloatVal(2.5)},
+		{StrVal("a"), StrVal("b")},
+		{BoolVal(true), BoolVal(false)},
+		{ListVal([]Value{IntVal(1)}), ListVal([]Value{IntVal(2), IntVal(3)})},
+		{RecordVal([]RecordField{{Name: "x", Value: IntVal(1)}}), RecordVal([]RecordField{{Name: "x", Value: IntVal(2)}})},
+		{IntVal(7), StrVal("seven")},
+	}
+
+	got, err := base.AppendTypedComputedColumns(names, schemas, values)
+	if err != nil {
+		t.Fatalf("AppendTypedComputedColumns returned error: %v", err)
+	}
+	if got.NumRows != 2 || len(got.Columns) != 8 {
+		t.Fatalf("computed table shape: rows=%d columns=%v", got.NumRows, got.Columns)
+	}
+	if v := got.Get(0, "f"); v.Type != TypeFloat || v.Float != 1 {
+		t.Fatalf("float computed value: got %v", v)
+	}
+	if v := got.Get(1, "b"); v.Type != TypeBool || v.Bool {
+		t.Fatalf("bool computed value: got %v", v)
+	}
+	if v := got.Get(1, "xs"); v.Type != TypeList || len(v.List) != 2 || v.List[1].Int != 3 {
+		t.Fatalf("list computed value: got %v", v)
+	}
+	requireRecordValue(t, got.Get(0, "rec"), []RecordField{{Name: "x", Value: IntVal(1)}})
+	if v := got.Get(0, "u"); v.Type != TypeInt || v.Int != 7 {
+		t.Fatalf("union int computed value: got %v", v)
+	}
+	if v := got.Get(1, "u"); v.Type != TypeString || v.Str != "seven" {
+		t.Fatalf("union string computed value: got %v", v)
+	}
+}
+
+func TestAddRowTypedAcceptsNarrowerUnionBranchValues(t *testing.T) {
+	schemas := []*TypeDescriptor{
+		{Kind: TypeUnion, Branches: []*TypeDescriptor{
+			recordOf(field("x", nullable(TypeInt))),
+			td(TypeString),
+		}},
+		{Kind: TypeUnion, Branches: []*TypeDescriptor{
+			recordOf(field("x", nullable(TypeFloat))),
+			td(TypeString),
+		}},
+		listOf(&TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+			recordOf(field("x", nullable(TypeInt))),
+			td(TypeString),
+		}}),
+		recordOf(field("u", &TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{
+			recordOf(field("x", nullable(TypeInt))),
+			td(TypeString),
+		}})),
+	}
+	tbl := NewTableWithSchemas([]string{"u", "f", "xs", "payload"}, schemas)
+
+	err := tbl.AddRowTyped([]Value{
+		RecordVal([]RecordField{{Name: "x", Value: IntVal(1)}}),
+		RecordVal([]RecordField{{Name: "x", Value: IntVal(2)}}),
+		ListVal([]Value{
+			RecordVal([]RecordField{{Name: "x", Value: IntVal(3)}}),
+			StrVal("ok"),
+			RecordVal([]RecordField{{Name: "x", Value: Null()}}),
+		}),
+		RecordVal([]RecordField{{Name: "u", Value: RecordVal([]RecordField{{Name: "x", Value: IntVal(4)}})}}),
+	})
+	if err != nil {
+		t.Fatalf("AddRowTyped returned error: %v", err)
+	}
+
+	requireRecordValue(t, tbl.Get(0, "u"), []RecordField{{Name: "x", Value: IntVal(1)}})
+	requireRecordValue(t, tbl.Get(0, "f"), []RecordField{{Name: "x", Value: FloatVal(2)}})
+	xs := tbl.Get(0, "xs")
+	if xs.Type != TypeList || len(xs.List) != 3 {
+		t.Fatalf("xs: got %v, want three union branch values", xs)
+	}
+	requireRecordValue(t, xs.List[0], []RecordField{{Name: "x", Value: IntVal(3)}})
+	if xs.List[1].Type != TypeString || xs.List[1].Str != "ok" {
+		t.Fatalf("xs[1]: got %v, want string ok", xs.List[1])
+	}
+	requireRecordValue(t, xs.List[2], []RecordField{{Name: "x", Value: Null()}})
+	payload := tbl.Get(0, "payload")
+	requireRecordValue(t, payload, []RecordField{{Name: "u", Value: RecordVal([]RecordField{{Name: "x", Value: IntVal(4)}})}})
 }
 
 func TestAddRowTypedUpdatesSchemaNullabilityForAcceptedNulls(t *testing.T) {
@@ -547,6 +1346,22 @@ func TestAddRowTypedRejectsNonNullValueWithoutConcreteColumnType(t *testing.T) {
 	}
 	if got := tbl.Get(0, "a"); got.Type != TypeNull {
 		t.Fatalf("nil schema column stored non-null value: got %v", got)
+	}
+}
+
+func TestAddRowTypedColumnsFailureDoesNotAppendTrustedColumns(t *testing.T) {
+	tbl := NewTableWithSchemas([]string{"amount", "total"}, []*TypeDescriptor{td(TypeInt), td(TypeInt)})
+
+	err := tbl.AddRowTypedColumns([]Value{IntVal(10), StrVal("bad")}, []int{1})
+
+	requireSchemaError(t, err, "total", "int", "string")
+	if tbl.NumRows != 0 {
+		t.Fatalf("failed selective typed append changed row count: got %d", tbl.NumRows)
+	}
+	for i, colName := range tbl.Columns {
+		if got := tbl.Col(i).Len(); got != 0 {
+			t.Fatalf("column %q length changed after failed append: got %d", colName, got)
+		}
 	}
 }
 

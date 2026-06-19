@@ -24,6 +24,8 @@ func TypeName(t ValueType) string {
 		return "list"
 	case TypeRecord:
 		return "record"
+	case TypeUnion:
+		return "union"
 	case TypeMixed:
 		return "mixed"
 	default:

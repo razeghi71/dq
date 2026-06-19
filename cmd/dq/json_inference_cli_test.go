@@ -242,15 +242,33 @@ func TestCLIJSONLInferenceCompressedAndGlobEndToEnd(t *testing.T) {
 		dir := t.TempDir()
 		writeCLIJSONInferenceFile(t, dir, "a.jsonl", "{\"id\":1,\"amount\":10}\n")
 		writeCLIJSONInferenceFile(t, dir, "b.jsonl", "{\"id\":2,\"amount\":\"bad\"}\n{\"id\":3,\"amount\":30}\n")
-		out := runCLIQuery(t, bin, filepath.Join(dir, "*.jsonl")+" with format=jsonl, infer_rows=1, max_bad_records=1 | count | json")
-		var rows []map[string]int64
-		if err := json.Unmarshal(out, &rows); err != nil {
-			t.Fatalf("json output: %v\n%s", err, out)
-		}
-		if len(rows) != 1 || rows[0]["count"] != 2 {
-			t.Fatalf("glob count after skipped bad row: got %#v, want count=2", rows)
-		}
+		out := runCLIQuery(t, bin, filepath.Join(dir, "*.jsonl")+" with format=jsonl, infer_rows=1, max_bad_records=1 | select id | sort id | json")
+		requireCLIJSONIDRows(t, out, []int64{1, 3})
 	})
+
+	t.Run("glob_json_array", func(t *testing.T) {
+		dir := t.TempDir()
+		writeCLIJSONInferenceFile(t, dir, "a.json", `[{"id":1,"amount":10}]`)
+		writeCLIJSONInferenceFile(t, dir, "b.json", `[{"id":2,"amount":"bad"},{"id":3,"amount":30}]`)
+		out := runCLIQuery(t, bin, filepath.Join(dir, "*.json")+" with format=json, infer_rows=1, max_bad_records=1 | select id | sort id | json")
+		requireCLIJSONIDRows(t, out, []int64{1, 3})
+	})
+}
+
+func requireCLIJSONIDRows(t *testing.T, out []byte, want []int64) {
+	t.Helper()
+	var rows []map[string]int64
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatalf("json output: %v\n%s", err, out)
+	}
+	if len(rows) != len(want) {
+		t.Fatalf("id rows: got %#v, want ids %v", rows, want)
+	}
+	for i, id := range want {
+		if rows[i]["id"] != id {
+			t.Fatalf("row %d id: got %#v, want ids %v", i, rows, want)
+		}
+	}
 }
 
 func TestCLIJSONInferenceOptionsRejectedEndToEnd(t *testing.T) {

@@ -32,6 +32,26 @@ func TestLoadCSVInferenceDefaultLateBadRecordErrors(t *testing.T) {
 	}
 }
 
+func TestLoadCSVRejectsDuplicateHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts Options
+	}{
+		{name: "streaming", opts: Options{Format: "csv"}},
+		{name: "full_inference", opts: Options{Format: "csv", InferRows: -1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadReader(strings.NewReader("a,a\n1,2\n"), tc.opts)
+			if err == nil {
+				t.Fatal("expected duplicate header error")
+			}
+			if got, want := err.Error(), `csv header: duplicate column name "a"`; !strings.Contains(got, want) {
+				t.Fatalf("error %q does not contain %q", got, want)
+			}
+		})
+	}
+}
+
 func TestLoadCSVDefaultInferRowsSamples20480Rows(t *testing.T) {
 	var data strings.Builder
 	data.WriteString("id,amount\n")

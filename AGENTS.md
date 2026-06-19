@@ -7,7 +7,7 @@ dq 'filename | op [args] | op2 [args] ... [| output_format]'
 ```
 
 * The entire query is passed as a **single-quoted string** to avoid shell interpretation of `|`, `{`, `}`, `>`, `<`, and backticks.
-* Takes a file (csv, avro, json, etc.) as input. Gzip-, Zstandard-, and zlib-wrapped deflate-compressed CSV/JSON/JSONL text files are supported via double extensions such as `.csv.gz` / `.jsonl.zst` / `.jsonl.deflate` or explicit `with compression=gzip` / `with compression=zstd` / `with compression=deflate`. CSV, JSON, and JSONL infer schemas from the first 20480 logical records by default; use `with infer_rows=-1` to infer from all rows, `with infer_rows=0` to load all non-null CSV cells as strings, and `with max_bad_records=N` to skip up to `N` bad logical records after or during inference. `infer_rows=0` is invalid for JSON/JSONL. JSON and JSONL infer recursive schemas from native JSON values before materialization; compatible ints/floats promote to float, missing fields become nullable, and incompatible native types such as `{"s":{"x":1}}` followed by `{"s":{"x":"bad"}}` are bad records with a path such as `s.x`. Globs are supported (`logs/**/*.csv`, `orders/part-*.csv`) — matched files are concatenated. All matched files are loaded into memory before the pipeline runs. A zero-byte CSV (or BOM-/whitespace-only with no data rows) loads as an empty table (0 columns, 0 rows). Empty glob shards are skipped when establishing the column schema; the first non-empty shard defines the anchor columns. CSV rows must match the schema width by default (same rules for single files and glob shards); use `with allow_jagged_rows=true` for missing trailing columns (null-filled) and `with ignore_unknown_values=true` to drop extra columns. On glob sources, CSV-only options require `with format=csv` at parse time (e.g. `logs/part-* with format=csv, allow_jagged_rows=true`) — format cannot be inferred from the pattern alone. CSV glob shards without a detectable header row are read positionally under the first file's columns. Extended headers require shared column names plus new lowercase identifiers (`email`, not `Email`); renamed columns with no anchor overlap are positional.
+* Takes a file (csv, avro, json, etc.) as input. Gzip-, Zstandard-, and zlib-wrapped deflate-compressed CSV/JSON/JSONL text files are supported via double extensions such as `.csv.gz` / `.jsonl.zst` / `.jsonl.deflate` or explicit `with compression=gzip` / `with compression=zstd` / `with compression=deflate`. CSV, JSON, and JSONL infer schemas from the first 20480 logical records by default; use `with infer_rows=-1` to infer from all rows, `with infer_rows=0` to load all non-null CSV cells as strings, and `with max_bad_records=N` to skip up to `N` bad logical records after or during inference. `infer_rows=0` is invalid for JSON/JSONL. JSON and JSONL infer recursive schemas from native JSON values before materialization; compatible ints/floats promote to float, missing fields become nullable, and incompatible native types such as `{"s":{"x":1}}` followed by `{"s":{"x":"bad"}}` are bad records with a path such as `s.x`. Globs are supported (`logs/**/*.csv`, `orders/part-*.csv`) — matched files are concatenated. All matched files are loaded into memory before the pipeline runs. A zero-byte CSV (or BOM-/whitespace-only with no data rows) loads as an empty table (0 columns, 0 rows). CSV header names must be unique. Empty glob shards are skipped when establishing the column schema; the first non-empty shard defines the anchor columns. CSV rows must match the schema width by default (same rules for single files and glob shards); use `with allow_jagged_rows=true` for missing trailing columns (null-filled) and `with ignore_unknown_values=true` to drop extra columns. On glob sources, CSV-only options require `with format=csv` at parse time (e.g. `logs/part-* with format=csv, allow_jagged_rows=true`) — format cannot be inferred from the pattern alone. CSV glob shards without a detectable header row are read positionally under the first file's columns. Extended headers require shared column names plus new lowercase identifiers (`email`, not `Email`); renamed columns with no anchor overlap are positional.
 * Optional **`with key=value, ...`** on the primary source or join file sets load format, compression, and CSV options (see Load options below).
 * Optional **output format command** at the end of the query (`table`, `csv`, `json`, `jsonl`, `avro`, `parquet`); omitted means pretty table output. Output commands can write to a path with `to`, and can split files with `with split_rows=N`.
 * Everything is **pipe-based** — each op takes a table and returns a table.
@@ -233,7 +233,7 @@ Rules:
 * Outside the single-array `mixed` case, incompatible native types are bad records, not automatic string widening. Examples: the same field as `int` vs `string` across rows, a field as `record` vs `int` across rows, or `orders[].amount` as numeric in one row's typed list and string in another row's typed list.
 * The `mixed` marker is limited to heterogeneity observed within a single array value. A typed array field that is `list<int>` in one JSON/JSONL row and `list<string>` in another row remains a schema conflict.
 * JSON array bad-record errors report a row index such as `row 2`; JSONL bad-record errors report a line number such as `line 2`. Errors include the source path when available, nested path, expected schema, and actual schema where possible. When the bad-record limit is exceeded, the reported record is the record that exceeded the limit.
-* This recursive schema and bad-record behavior is specific to JSON/JSONL loading. Avro and Parquet readers are schema-bound and currently materialize through the normal table append path, so any inconsistent values produced there follow permissive table widening rather than JSON/JSONL strict checks.
+* This recursive schema and bad-record behavior is specific to JSON/JSONL loading. Avro and Parquet readers seed the table schema from file metadata, including empty files with columns. Avro unions with incompatible non-null branches seed `union<...>` schemas and preserve the active branch value for each row by dq value type and structure; compatible numeric Avro unions still collapse to `float`, and structurally identical named branches collapse because `table.TypeDescriptor` does not store Avro branch tags. Recursive Avro named records are rejected with a load error because `table.TypeDescriptor` has no recursive-reference node. Parquet currently has no equivalent union type in `dq`.
 
 Examples:
 
@@ -263,7 +263,7 @@ Avro and Parquet internal compression codecs are discovered from the file metada
 
 ## Internal type and schema model
 
-`table.TypeDescriptor` is the canonical logical type model. Display strings such as `record<x:int?>` are renderings of that model, not the model itself. Code that needs type reasoning should use the central helpers in `table/schema.go` instead of ad-hoc string comparisons or local kind checks.
+`table.TypeDescriptor` is the canonical logical type model. Display strings such as `record<x:int?>` are renderings of that model, not the model itself. Code that needs type reasoning should use the central helpers in `table/type_system.go` and `table/schema.go` instead of ad-hoc string comparisons or local kind checks.
 
 Canonical type kinds:
 
@@ -276,6 +276,7 @@ Canonical type kinds:
 | `TypeBool` | boolean |
 | `TypeList` | ordered list with an element schema |
 | `TypeRecord` | named-field record |
+| `TypeUnion` | ordered set of possible branch schemas; each row stores one active branch value |
 | `TypeMixed` | schema marker for explicitly heterogeneous list contents |
 
 Nullability is structural on every type node:
@@ -284,12 +285,16 @@ Nullability is structural on every type node:
 * nullable record with nullable field: `record<x:int?>?`
 * list with nullable elements: `list<int?>`
 * nullable list with non-null elements: `list<int>?`
+* nullable union: `union<int,string>?`
 
 The central helpers are intentionally split by purpose:
 
+* `NormalizeSchema(t)` returns the deterministic canonical descriptor for dq's structural type system. Record fields are sorted; union branches are normalized but remain ordered because branch order is observable when multiple branches can accept a coerced value.
 * `Render(t)` renders a deterministic compact schema string. Record fields render by field name.
-* `Same(a, b)` compares logical type shape and nullability, ignoring record field order and pointer identity.
+* `Same(a, b)` / `EquivalentSchema(a, b)` compare logical type shape and nullability, ignoring record field order and pointer identity. Union branch order remains significant.
 * `WithNullable(t)` and `WithoutNull(t)` return modified copies and must not mutate the input descriptor.
+* `UnionSchema(branches, nullable)` / `UnionOf(branches, nullable)` build ordered union descriptors, collapsing storage-equivalent branches. This includes storage-compatible scalar branches such as `int|float -> float` and structurally identical record/list branches; Avro branch names/tags are not retained in `TypeDescriptor`.
+* `UnifySchemas(a, b, mode)`, `SchemaAssignable(target, actual, mode)`, and `CoerceValueToSchemaMode(v, schema, mode)` are the mode-based type-system APIs. Use strict/exact modes when declared schemas decide legality; use coercive modes only where storage compatibility is explicitly documented; use permissive mode only for legacy AddRow-style widening.
 * `IsNumeric`, `IsBooleanLike`, `IsStringLike`, `IsComparable`, and `IsOrderable` are predicate helpers for future planning/type checking.
 * `UnifyStrict` and `UnifyAllStrict` merge compatible logical types and reject incompatible non-null types.
 * `UnifyListLiteralElems` is the narrow helper that may produce `mixed` for explicitly heterogeneous list literals or single JSON array values.
@@ -306,19 +311,25 @@ Strict unification rules:
 | `null`, `T` | `T?` |
 | matching records | fields unified by name, missing fields marked nullable |
 | matching lists | element schema unified recursively |
+| explicit union with matching branch | union schema is preserved |
 | `int`, `string` | error |
 | `bool`, `int` | error |
 | `record<...>`, scalar | error |
 | `list<int>`, `list<string>` | error under strict expression/schema unification |
 
-`mixed` must stay narrow. It is allowed for explicitly heterogeneous contents inside a single list value, such as `[1, "two"] -> list<mixed>` or `[{"amt":1}, {"amt":"x"}] -> list<record<amt:mixed>>`. It must not become a top-level scalar escape hatch for incompatible expression branches: future checks for `if(cond, 1, "x")` or `coalesce(1, "x")` should use strict unification and reject or apply an explicitly documented rule.
+`union` and `mixed` have different meanings. `union<...>` is a declared schema, currently produced by Avro unions, and each row stores an active branch value. `mixed` is a schema marker for explicitly heterogeneous contents inside a single list value, such as `[1, "two"] -> list<mixed>` or `[{"amt":1}, {"amt":"x"}] -> list<record<amt:mixed>>`. `mixed` must not become a top-level scalar escape hatch for incompatible expression branches: future checks for `if(cond, 1, "x")` or `coalesce(1, "x")` should use strict unification and reject or apply an explicitly documented rule.
 
 Strict and permissive APIs must remain distinct:
 
-* Loader inference and current execution can still use permissive table append/widening where documented. `Column.Append` may widen incompatible values to `string`.
+* Loader inference and documented compatibility paths can still use permissive table append/widening. `Column.Append` may widen incompatible values to `string`.
 * JSON/JSONL recursive loading uses strict schema checks for native type conflicts, with the single-array `mixed` exception described above.
 * `AddRowTyped` validates against a known schema and must not stringify incompatible values.
-* Fixed-schema engine execution and broader planner use belong to later tickets; do not silently convert existing engine operators from permissive to strict append without updating the operator-level schema contract and tests.
+* `TypeUnion` storage preserves each active branch value instead of stringifying it. JSON/JSONL/table/CSV outputs render the active value; `group`, `distinct`, and `join` keys use the active value's exact dq type and structural key, so `int(7)` and `string("7")` do not collide. They do not include Avro branch names/tags, so two named Avro record branches with the same dq schema and value are indistinguishable.
+* Direct comparison and ordering over union-typed expressions are rejected unless an explicit future branch-normalization operation is added. Dot paths may project a union-typed field, but they must not step through a union branch such as `select u.x` when `u` is `union<record<x:int>,string>`.
+* Engine operators that preserve or can plan their output schema use fixed-schema result tables and strict append for those planned columns. This includes `filter`, `select`, `group`, `count`, `describe`, `distinct`, `rename`, `remove`, typed `transform` assignments, typed `reduce` assignments, and schema-compatible joins.
+* `transform`, `reduce`, and joins fall back to permissive append only for unplanned or schema-incompatible result shapes. Do not expand or remove that fallback without updating the operator-level schema contract and tests.
+* Schema-preserving operations must keep column schemas even when they produce zero rows. For example, `users.csv | filter { false } | describe` reports the loaded `name:string` and `age:int` schemas with `row_count = 0`, not `null` types.
+* Dot-path projections and group keys first use the parent column's logical schema. If the parent schema is unavailable because the column started null-only, the engine may infer the dot-path schema from materialized row values; if the values are incompatible, the operation falls back to the permissive path or reports the existing path error.
 
 Null-only finalization remains part of the user-visible contract: when a schema position is still `TypeNull` at finalization, it renders as nullable string. This is why all-null CSV columns, header-only CSV columns, empty lists, and null-only nested fields fall back to `string?` in schema strings where a concrete type is required.
 
@@ -480,14 +491,15 @@ Rules:
 * `describe` is a normal pipeline operation, not an output format command. It can be followed by `filter`, `select`, `sort`, output formats, etc.
 * It takes no arguments.
 * `row_count` repeats the current table row count on every metadata row.
-* Type names are `null`, `int`, `float`, `string`, `bool`, `list`, and `record`.
-* `type` is the top-level storage type. For nested values it remains `list` or `record`.
-* `schema` is a deterministic recursive type string for the current column schema. Examples: `string`, `int`, `record<city:string, zip:string>`, `list<record<amount:float, order_id:int>>`.
+* Type names are `null`, `int`, `float`, `string`, `bool`, `list`, `record`, and `union`.
+* `type` is the top-level storage type. For nested values it remains `list`, `record`, or `union`.
+* `schema` is a deterministic recursive type string for the current column schema. Examples: `string`, `int`, `record<city:string, zip:string>`, `list<record<amount:float, order_id:int>>`, `union<int,string>`.
 * Nullable schema positions are suffixed with `?`, such as `record<x:int?, y:string?>?`. Missing JSON/JSONL object fields and explicit nulls both materialize as null and make the affected schema position nullable.
-* Types are current table storage types after preceding pipeline stages, not source-declared types and not historical types from earlier stages.
+* Types are current table storage types after preceding pipeline stages, not historical physical values from earlier stages.
 * Source loaders may set concrete storage types even when no non-null values exist. CSV inference uses `TypeString` for columns with no sampled non-null values, so freshly loaded all-null CSV columns and header-only CSV columns report `string`.
+* Avro and Parquet loaders seed schemas from file metadata, so empty binary files with columns can report their declared field types. Empty Avro files with incompatible unions report the declared `union<...>` schema. Recursive Avro named records are unsupported and must fail clearly at load time rather than falling back to `null` schemas or row-value inference.
 * If a column widened to `string` and rows survive a later rebuilding operation, copied values remain `string`.
-* If no rows survive a rebuilding operation such as `filter { false }`, the rebuilt columns have no surviving values to establish a type and currently report `null`. This is distinct from load-time CSV inference, where the loader may have already established a concrete storage type.
+* Schema-preserving operations keep their planned column schemas even when no rows survive. A zero-row `filter`, `select`, `distinct`, `rename`, `remove`, `group`, typed `transform`, typed `reduce`, or schema-compatible join should still produce meaningful `describe` output for its columns.
 * A zero-column table returns zero metadata rows. Use `count` if row cardinality must be visible for a zero-column table.
 * `describe` keeps one row per top-level column. It does not emit one row per nested field; use the `schema` string to inspect nested fields.
 
@@ -680,7 +692,9 @@ dq 'users.csv | join full orders.csv on id == customer_id and region == region'
 
 Each key is either a column path (same name on both sides) or `left_path == right_path`. Join key columns appear once under the left-side name; dot-path keys get a flattened column (`address.city` -> `address_city`, suffixed if taken). Colliding right-side columns are prefixed with the join file basename (for globs, derived from the pattern — e.g. `orders/*.csv` with colliding column `note` -> `orders_note`).
 
-The join file's format comes from its extension unless overridden with `with format=...` on the join path. Join sources support globs (`orders/part-*.csv`); matched files are concatenated before the join. Null keys never match. Keys match by exact type and structural value (consistent with `group`/`distinct`), so integer `1` does not match string `"1"` across formats.
+The join file's format comes from its extension unless overridden with `with format=...` on the join path. Join sources support globs (`orders/part-*.csv`); matched files are concatenated before the join. Null keys never match. Keys match by exact dq type and structural value (consistent with `group`/`distinct`), so integer `1` does not match string `"1"` across formats or Avro union branches. Avro branch names/tags are not part of the key.
+
+Outer-join output schemas reflect possible null padding from the join kind, not only rows that happen to be emitted. `left` and `full` joins mark retained right-side output columns nullable; `right` and `full` joins mark non-key left-side output columns nullable. Merged join-key output columns keep the unified key schema and are not made nullable solely because the opposite side can be padded.
 
 ---
 
@@ -734,6 +748,8 @@ Format-specific split behavior:
 | `jsonl` | Each part is standalone JSONL |
 | `avro` | Each part is a standalone Avro OCF file |
 | `parquet` | Each part is a standalone Parquet file |
+
+Avro and Parquet writers derive file schemas from `Table.Schema()`, then refine from row values. Empty non-zero-column outputs must preserve the planned result schema, including schemas produced by `filter { false } | select ...`, joins with no matches, and other zero-row pipeline results. A zero-column Avro or Parquet output remains invalid. Union-typed schemas are currently rejected by Avro and Parquet writers rather than silently stringified; add explicit branch-aware writer support before changing that behavior.
 
 Output format names are not lexer keywords — only recognized as the final `|`-stage. Column names like `csv` in `{ csv == "x" }` are unaffected.
 

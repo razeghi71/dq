@@ -979,11 +979,11 @@ func TestIntegrationColumnTypeWidening(t *testing.T) {
 		})
 	})
 
-	t.Run("describe_zero_surviving_rows_reports_null_types", func(t *testing.T) {
+	t.Run("describe_zero_surviving_rows_preserves_input_types", func(t *testing.T) {
 		result := loadAndQuery(t, testdataDir+"/mixed_types.csv", `filter { false } | describe`)
 		assertDescribeRows(t, result, map[string]describeMeta{
-			"id":  {typ: "null", rows: 0},
-			"val": {typ: "null", rows: 0},
+			"id":  {typ: "int", rows: 0},
+			"val": {typ: "string", rows: 0},
 		})
 	})
 }

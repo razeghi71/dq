@@ -170,12 +170,31 @@ func TestDescribeSchemaForConstructedRecord(t *testing.T) {
 	})
 }
 
-func TestDescribeAfterFilterFalseReportsNullTypes(t *testing.T) {
+func TestSelectTopLevelDuplicateColumns(t *testing.T) {
+	result := runQuery(t, usersTable(), `select name, name, age`)
+	wantCols := []string{"name", "name_2", "age"}
+	for i, want := range wantCols {
+		if result.Columns[i] != want {
+			t.Fatalf("column %d: got %q, want %q", i, result.Columns[i], want)
+		}
+	}
+	if got := result.GetAt(0, 0); got.Type != table.TypeString || got.Str != "Alice" {
+		t.Fatalf("first name column: got %v", got)
+	}
+	if got := result.GetAt(0, 1); got.Type != table.TypeString || got.Str != "Alice" {
+		t.Fatalf("duplicate name column: got %v", got)
+	}
+	if got := result.GetAt(0, 2); got.Type != table.TypeInt || got.Int != 30 {
+		t.Fatalf("age column: got %v", got)
+	}
+}
+
+func TestDescribeAfterFilterFalsePreservesInputTypes(t *testing.T) {
 	result := runQuery(t, usersTable(), "filter { false } | describe")
 	assertDescribeRows(t, result, map[string]describeMeta{
-		"name": {typ: "null", rows: 0},
-		"age":  {typ: "null", rows: 0},
-		"city": {typ: "null", rows: 0},
+		"name": {typ: "string", rows: 0},
+		"age":  {typ: "int", rows: 0},
+		"city": {typ: "string", rows: 0},
 	})
 }
 
@@ -253,7 +272,7 @@ func TestDescribeAfterShapeChangingOps(t *testing.T) {
 			"name":    {typ: "string", rows: 6},
 			"age":     {typ: "float", rows: 6},
 			"city":    {typ: "string", rows: 6},
-			"missing": {typ: "null", rows: 6},
+			"missing": {typ: "string", rows: 6},
 			"profile": {typ: "record", rows: 6},
 			"tags":    {typ: "list", rows: 6},
 		})
@@ -1074,7 +1093,8 @@ func TestListContains(t *testing.T) {
 	}{
 		{"string_hit", `filter { list_contains(tags, "admin") }`, []string{"Alice"}},
 		{"string_exact_type", `filter { list_contains(nums, "1") }`, []string{"Bob"}},
-		{"int_exact_type", `filter { list_contains(nums, 1) }`, []string{"Alice"}},
+		{"float_exact_type_after_numeric_widening", `filter { list_contains(nums, 1.0) }`, []string{"Alice"}},
+		{"int_miss_after_numeric_widening", `filter { list_contains(nums, 1) }`, nil},
 		{"string_miss", `filter { list_contains(tags, "missing") }`, nil},
 		{"empty_list", `filter { list_contains(empty, "x") }`, nil},
 		{"null_list_drops", `filter { list_contains(nilcol, "x") }`, nil},
@@ -1199,6 +1219,386 @@ func TestGroupUsesExactStructuralKeys(t *testing.T) {
 	grouped := runQuery(t, tbl, "group v | reduce n = count() | remove grouped")
 	if grouped.NumRows != 2 {
 		t.Fatalf("expected group to keep both rows, got %d", grouped.NumRows)
+	}
+}
+
+func TestReduceComparisonAndLogicalOperators(t *testing.T) {
+	result := runQuery(t, usersTable(), `group city | reduce eq2 = count() == 2, ne2 = count() != 2, gt1 = count() > 1, ge2 = count() >= 2, lt2 = count() < 2, le1 = count() <= 1, both = count() > 1 and count() < 3, either = count() == 1 or count() == 2, and_null = count() == 2 and null, or_null = count() == 2 or null, not2 = not (count() == 2) | remove grouped | sort city`)
+
+	want := map[string]map[string]table.Value{
+		"LA": {
+			"eq2": table.BoolVal(true), "ne2": table.BoolVal(false),
+			"gt1": table.BoolVal(true), "ge2": table.BoolVal(true),
+			"lt2": table.BoolVal(false), "le1": table.BoolVal(false),
+			"both": table.BoolVal(true), "either": table.BoolVal(true),
+			"and_null": table.Null(), "or_null": table.BoolVal(true),
+			"not2": table.BoolVal(false),
+		},
+		"NY": {
+			"eq2": table.BoolVal(false), "ne2": table.BoolVal(true),
+			"gt1": table.BoolVal(true), "ge2": table.BoolVal(true),
+			"lt2": table.BoolVal(false), "le1": table.BoolVal(false),
+			"both": table.BoolVal(false), "either": table.BoolVal(false),
+			"and_null": table.BoolVal(false), "or_null": table.Null(),
+			"not2": table.BoolVal(true),
+		},
+		"SF": {
+			"eq2": table.BoolVal(false), "ne2": table.BoolVal(true),
+			"gt1": table.BoolVal(false), "ge2": table.BoolVal(false),
+			"lt2": table.BoolVal(true), "le1": table.BoolVal(true),
+			"both": table.BoolVal(false), "either": table.BoolVal(true),
+			"and_null": table.BoolVal(false), "or_null": table.Null(),
+			"not2": table.BoolVal(true),
+		},
+	}
+
+	cityIdx := result.ColIndex("city")
+	if cityIdx < 0 {
+		t.Fatalf("city column missing from %v", result.Columns)
+	}
+	if result.NumRows != len(want) {
+		t.Fatalf("row count: got %d, want %d", result.NumRows, len(want))
+	}
+	for row := 0; row < result.NumRows; row++ {
+		city := result.GetAt(row, cityIdx).Str
+		fields, ok := want[city]
+		if !ok {
+			t.Fatalf("unexpected city %q", city)
+		}
+		for col, expected := range fields {
+			idx := result.ColIndex(col)
+			if idx < 0 {
+				t.Fatalf("missing column %q in %v", col, result.Columns)
+			}
+			got := result.GetAt(row, idx)
+			if !table.Equal(got, expected) {
+				t.Fatalf("%s.%s: got %s, want %s", city, col, got.AsString(), expected.AsString())
+			}
+		}
+	}
+}
+
+func TestReduceUnaryAndIsNullOperatorsRuntime(t *testing.T) {
+	tbl := table.NewTable([]string{"g", "amount"})
+	tbl.AddRow([]table.Value{table.StrVal("a"), table.IntVal(2)})
+	tbl.AddRow([]table.Value{table.StrVal("a"), table.IntVal(4)})
+	tbl.AddRow([]table.Value{table.StrVal("b"), table.Null()})
+
+	result := runQuery(t, tbl, `group g | reduce neg_count = -count(), neg_avg = -avg(amount), first_missing = first(amount) is null, first_present = first(amount) is not null | remove grouped | sort g`)
+	if result.NumRows != 2 {
+		t.Fatalf("row count: got %d, want 2", result.NumRows)
+	}
+	if got := result.Get(0, "neg_count").Int; got != -2 {
+		t.Fatalf("neg_count group a: got %d, want -2", got)
+	}
+	if got := result.Get(0, "neg_avg").Float; got != -3 {
+		t.Fatalf("neg_avg group a: got %g, want -3", got)
+	}
+	if result.Get(0, "first_missing").Bool || !result.Get(0, "first_present").Bool {
+		t.Fatalf("group a null checks: missing=%v present=%v", result.Get(0, "first_missing").Bool, result.Get(0, "first_present").Bool)
+	}
+	if got := result.Get(1, "neg_count").Int; got != -1 {
+		t.Fatalf("neg_count group b: got %d, want -1", got)
+	}
+	if !result.Get(1, "neg_avg").IsNull() {
+		t.Fatalf("neg_avg group b: got %s, want null", result.Get(1, "neg_avg").AsString())
+	}
+	if !result.Get(1, "first_missing").Bool || result.Get(1, "first_present").Bool {
+		t.Fatalf("group b null checks: missing=%v present=%v", result.Get(1, "first_missing").Bool, result.Get(1, "first_present").Bool)
+	}
+}
+
+func unionRecordBranchTable(t *testing.T, includeStringBranch bool) *table.Table {
+	t.Helper()
+	unionSchema := &table.TypeDescriptor{Kind: table.TypeUnion, Branches: []*table.TypeDescriptor{
+		{
+			Kind: table.TypeRecord,
+			Fields: []table.FieldDescriptor{
+				{Name: "x", Type: &table.TypeDescriptor{Kind: table.TypeInt}},
+			},
+		},
+		{Kind: table.TypeString},
+	}}
+	tbl := table.NewTableWithSchemas(
+		[]string{"k", "u", "payload"},
+		[]*table.TypeDescriptor{
+			{Kind: table.TypeString},
+			unionSchema,
+			{
+				Kind: table.TypeRecord,
+				Fields: []table.FieldDescriptor{
+					{Name: "u", Type: unionSchema},
+				},
+			},
+		},
+	)
+	rows := [][]table.Value{
+		{
+			table.StrVal("a"),
+			table.RecordVal([]table.RecordField{{Name: "x", Value: table.IntVal(1)}}),
+			table.RecordVal([]table.RecordField{{Name: "u", Value: table.RecordVal([]table.RecordField{{Name: "x", Value: table.IntVal(1)}})}}),
+		},
+		{
+			table.StrVal("a"),
+			table.RecordVal([]table.RecordField{{Name: "x", Value: table.IntVal(2)}}),
+			table.RecordVal([]table.RecordField{{Name: "u", Value: table.RecordVal([]table.RecordField{{Name: "x", Value: table.IntVal(2)}})}}),
+		},
+	}
+	if includeStringBranch {
+		rows = append(rows, []table.Value{
+			table.StrVal("b"),
+			table.StrVal("text"),
+			table.RecordVal([]table.RecordField{{Name: "u", Value: table.StrVal("text")}}),
+		})
+	}
+	for _, row := range rows {
+		if err := tbl.AddRowTyped(row); err != nil {
+			t.Fatalf("add union row: %v", err)
+		}
+	}
+	return tbl
+}
+
+func scalarUnionTable(t *testing.T, includeStringBranch bool) *table.Table {
+	t.Helper()
+	unionSchema := &table.TypeDescriptor{Kind: table.TypeUnion, Branches: []*table.TypeDescriptor{
+		{Kind: table.TypeInt},
+		{Kind: table.TypeString},
+	}}
+	tbl := table.NewTableWithSchemas(
+		[]string{"k", "u"},
+		[]*table.TypeDescriptor{{Kind: table.TypeString}, unionSchema},
+	)
+	rows := [][]table.Value{
+		{table.StrVal("a"), table.IntVal(7)},
+		{table.StrVal("a"), table.IntVal(8)},
+	}
+	if includeStringBranch {
+		rows = append(rows, []table.Value{table.StrVal("a"), table.StrVal("seven")})
+	}
+	for _, row := range rows {
+		if err := tbl.AddRowTyped(row); err != nil {
+			t.Fatalf("add scalar union row: %v", err)
+		}
+	}
+	return tbl
+}
+
+func scalarUnionStringRowsTable(t *testing.T) *table.Table {
+	t.Helper()
+	unionSchema := &table.TypeDescriptor{Kind: table.TypeUnion, Branches: []*table.TypeDescriptor{
+		{Kind: table.TypeInt},
+		{Kind: table.TypeString},
+	}}
+	tbl := table.NewTableWithSchemas(
+		[]string{"k", "u"},
+		[]*table.TypeDescriptor{{Kind: table.TypeString}, unionSchema},
+	)
+	for _, row := range [][]table.Value{
+		{table.StrVal("a"), table.StrVal("alice")},
+		{table.StrVal("a"), table.StrVal("bob")},
+	} {
+		if err := tbl.AddRowTyped(row); err != nil {
+			t.Fatalf("add string union row: %v", err)
+		}
+	}
+	return tbl
+}
+
+func boolUnionTable(t *testing.T) *table.Table {
+	t.Helper()
+	unionSchema := &table.TypeDescriptor{Kind: table.TypeUnion, Branches: []*table.TypeDescriptor{
+		{Kind: table.TypeBool},
+		{Kind: table.TypeString},
+	}}
+	tbl := table.NewTableWithSchemas(
+		[]string{"k", "u"},
+		[]*table.TypeDescriptor{{Kind: table.TypeString}, unionSchema},
+	)
+	for _, row := range [][]table.Value{
+		{table.StrVal("a"), table.BoolVal(true)},
+		{table.StrVal("a"), table.BoolVal(false)},
+	} {
+		if err := tbl.AddRowTyped(row); err != nil {
+			t.Fatalf("add bool union row: %v", err)
+		}
+	}
+	return tbl
+}
+
+func TestUnionDotPathTraversalRejectedInExpressions(t *testing.T) {
+	tbl := unionRecordBranchTable(t, false)
+	mixed := unionRecordBranchTable(t, true)
+	cases := []struct {
+		name  string
+		input *table.Table
+		query string
+	}{
+		{"transform_direct", tbl, "transform x = u.x"},
+		{"transform_struct_field", tbl, "transform wrapped = struct(x = u.x)"},
+		{"transform_list_element", tbl, "transform xs = list(u.x)"},
+		{"transform_function_arg", tbl, `transform y = str_contains(u.x, "1")`},
+		{"filter_comparison", tbl, "filter { u.x == 1 }"},
+		{"filter_ordering", tbl, "filter { u.x > 1 }"},
+		{"filter_is_null", tbl, "filter { u.x is not null }"},
+		{"filter_function_arg", tbl, "filter { list_contains(list(u.x), 1) }"},
+		{"filter_after_head_keeps_schema", mixed, "head 1 | filter { u.x == 1 }"},
+		{"transform_after_zero_rows_keeps_schema", mixed, "filter { false } | transform x = u.x"},
+		{"nested_union_transform", tbl, "transform x = payload.u.x"},
+		{"nested_union_filter", tbl, "filter { payload.u.x == 1 }"},
+		{"reduce_aggregate_arg", tbl, "group k | reduce total = sum(u.x)"},
+		{"reduce_binary_aggregate_arg", tbl, "group k | reduce total = sum(u.x) + count()"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			expectQueryErrContains(t, tc.input, tc.query, "cannot access fields through union schema")
+			expectQueryErrContains(t, tc.input, tc.query, "u.x")
+		})
+	}
+}
+
+func TestUnionTypeSpecificOperationsFailClosedFromSchema(t *testing.T) {
+	cases := []struct {
+		name  string
+		input *table.Table
+		query string
+	}{
+		{"transform_arithmetic_active_int", scalarUnionTable(t, false), "transform x = u + 0"},
+		{"transform_string_function_active_string", scalarUnionStringRowsTable(t), "transform y = upper(u)"},
+		{"filter_boolean_active_bool", boolUnionTable(t), "filter { u }"},
+		{"reduce_sum_active_int", scalarUnionTable(t, false), "group k | reduce total = sum(u)"},
+		{"reduce_min_active_int", scalarUnionTable(t, false), "group k | reduce total = min(u)"},
+		{"reduce_max_active_int", scalarUnionTable(t, false), "group k | reduce total = max(u)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			expectQueryErrContains(t, tc.input, tc.query, "cannot use union values")
+		})
+	}
+}
+
+func TestUnionComparisonsFailClosedWhenOperandSchemaInferenceFails(t *testing.T) {
+	intOnly := scalarUnionTable(t, false)
+	mixed := scalarUnionTable(t, true)
+	cases := []struct {
+		name  string
+		input *table.Table
+		query string
+	}{
+		{"filter_arithmetic_int_only", intOnly, "filter { u + 0 == 7 } | count"},
+		{"filter_arithmetic_mixed", mixed, "filter { u + 0 == 7 } | count"},
+		{"filter_coalesce_int_only", intOnly, "filter { coalesce(u, 1.5) == 7 } | count"},
+		{"filter_coalesce_mixed", mixed, "filter { coalesce(u, 1.5) == 7 } | count"},
+		{"filter_unary_operand", intOnly, "filter { -u == -7 } | count"},
+		{"filter_struct_operand", intOnly, "filter { struct(x = u + 0) == struct(x = 7) } | count"},
+		{"filter_list_operand", intOnly, "filter { list(u + 0) == list(7) } | count"},
+		{"transform_arithmetic", intOnly, "transform eq = u + 0 == 7"},
+		{"transform_coalesce", intOnly, "transform eq = coalesce(u, 1.5) == 7"},
+		{"transform_if_condition", intOnly, `transform label = if(u + 0 == 7, "yes", "no")`},
+		{"transform_struct_field", intOnly, "transform wrapped = struct(eq = u + 0 == 7)"},
+		{"transform_list_element", intOnly, "transform xs = list(u + 0 == 7)"},
+		{"reduce_first_arithmetic", intOnly, "group k | reduce eq = first(u) + 0 == 7"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			expectQueryErrContains(t, tc.input, tc.query, "cannot compare union values")
+		})
+	}
+}
+
+func TestUnionNullCheckResultCanStillBeCompared(t *testing.T) {
+	result := runQuery(t, scalarUnionTable(t, true), `filter { (u is not null) == true } | count`)
+	if got := result.Get(0, "count").Int; got != 3 {
+		t.Fatalf("count: got %d, want 3", got)
+	}
+}
+
+func TestReduceFirstLastPreservesUnionBranchValues(t *testing.T) {
+	result := runQuery(t, scalarUnionTable(t, true), `group k | reduce first_u = first(u), last_u = last(u) | select first_u, last_u`)
+	if result.NumRows != 1 {
+		t.Fatalf("row count: got %d, want 1", result.NumRows)
+	}
+	first := result.Get(0, "first_u")
+	if first.Type != table.TypeInt || first.Int != 7 {
+		t.Fatalf("first_u: got %s (%v), want int 7", first.AsString(), first.Type)
+	}
+	last := result.Get(0, "last_u")
+	if last.Type != table.TypeString || last.Str != "seven" {
+		t.Fatalf("last_u: got %s (%v), want string seven", last.AsString(), last.Type)
+	}
+	if got := result.Col(result.ColIndex("first_u")).Schema().String(); got != "union<int,string>?" {
+		t.Fatalf("first_u schema: got %s, want union<int,string>?", got)
+	}
+	if got := result.Col(result.ColIndex("last_u")).Schema().String(); got != "union<int,string>?" {
+		t.Fatalf("last_u schema: got %s, want union<int,string>?", got)
+	}
+}
+
+func TestSortRejectsContainersContainingUnion(t *testing.T) {
+	unionSchema := &table.TypeDescriptor{Kind: table.TypeUnion, Branches: []*table.TypeDescriptor{
+		{Kind: table.TypeInt},
+		{Kind: table.TypeString},
+	}}
+	tbl := table.NewTableWithSchemas(
+		[]string{"xs", "p"},
+		[]*table.TypeDescriptor{
+			{Kind: table.TypeList, Elem: unionSchema},
+			{Kind: table.TypeRecord, Fields: []table.FieldDescriptor{{Name: "u", Type: unionSchema}}},
+		},
+	)
+	rows := [][]table.Value{
+		{
+			table.ListVal([]table.Value{table.IntVal(7), table.StrVal("seven")}),
+			table.RecordVal([]table.RecordField{{Name: "u", Value: table.IntVal(7)}}),
+		},
+		{
+			table.ListVal([]table.Value{table.StrVal("eight"), table.IntVal(8)}),
+			table.RecordVal([]table.RecordField{{Name: "u", Value: table.StrVal("eight")}}),
+		},
+	}
+	for _, row := range rows {
+		if err := tbl.AddRowTyped(row); err != nil {
+			t.Fatalf("add container union row: %v", err)
+		}
+	}
+
+	for _, query := range []string{"sort xs", "sort p"} {
+		t.Run(query, func(t *testing.T) {
+			expectQueryErrContains(t, tbl, query, "union values are not orderable")
+		})
+	}
+}
+
+func TestUnionComparisonsRejectedOutsideFilter(t *testing.T) {
+	tbl := unionRecordBranchTable(t, false)
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{"transform_self_eq", "transform eq = u == u"},
+		{"transform_literal_eq", "transform eq = u == 1"},
+		{"transform_if_condition", `transform s = if(u == u, "yes", "no")`},
+		{"transform_struct_field", "transform wrapped = struct(eq = u == u)"},
+		{"transform_list_element", "transform xs = list(u == u)"},
+		{"reduce_first_self_eq", "group k | reduce eq = first(u) == first(u)"},
+		{"reduce_first_literal_neq", `group k | reduce neq = first(u) != "x"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			expectQueryErrContains(t, tbl, tc.query, "cannot compare union values")
+		})
+	}
+}
+
+func TestReduceCountRejectsArguments(t *testing.T) {
+	cases := []string{
+		"group city | reduce c = count(age)",
+		"group city | reduce c = count(age) + 1",
+	}
+	for _, query := range cases {
+		t.Run(query, func(t *testing.T) {
+			expectQueryErrContains(t, usersTable(), query, "count() takes no arguments")
+		})
 	}
 }
 

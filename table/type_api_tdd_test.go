@@ -56,6 +56,102 @@ func TestCentralTypeAPIRenderAndSameAreDeterministic(t *testing.T) {
 	}
 }
 
+func TestCentralTypeAPIStructuralUnionContract(t *testing.T) {
+	one := UnionOf([]*TypeDescriptor{td(TypeInt), nullable(TypeInt), nil, nullLiteralType()}, false)
+	requireSchemaString(t, one, "int?")
+
+	nested := UnionOf([]*TypeDescriptor{
+		UnionOf([]*TypeDescriptor{td(TypeInt), td(TypeString)}, false),
+		UnionOf([]*TypeDescriptor{td(TypeString), td(TypeBool)}, true),
+	}, false)
+	requireSchemaString(t, nested, "union<int,string,bool>?")
+
+	again := UnionOf([]*TypeDescriptor{nested, nested}, false)
+	if !EquivalentSchema(nested, again) {
+		t.Fatalf("UnionOf should be idempotent: got %s then %s", Render(nested), Render(again))
+	}
+
+	leftGrouped := UnionOf([]*TypeDescriptor{
+		UnionOf([]*TypeDescriptor{td(TypeInt), td(TypeString)}, false),
+		td(TypeBool),
+	}, true)
+	rightGrouped := UnionOf([]*TypeDescriptor{
+		td(TypeInt),
+		UnionOf([]*TypeDescriptor{td(TypeString), td(TypeBool)}, true),
+	}, false)
+	if !EquivalentSchema(leftGrouped, rightGrouped) {
+		t.Fatalf("UnionOf should be associative for stable branch order: left=%s right=%s", Render(leftGrouped), Render(rightGrouped))
+	}
+
+	reordered := UnionOf([]*TypeDescriptor{td(TypeString), td(TypeInt)}, false)
+	if EquivalentSchema(UnionOf([]*TypeDescriptor{td(TypeInt), td(TypeString)}, false), reordered) {
+		t.Fatal("union branch order is intentionally significant for coercion behavior")
+	}
+}
+
+func TestCentralTypeAPIAssignabilityModes(t *testing.T) {
+	if SchemaAssignable(td(TypeFloat), td(TypeInt), AssignExactMode) {
+		t.Fatal("exact assignability should not allow int into float")
+	}
+	if !SchemaAssignable(td(TypeFloat), td(TypeInt), AssignCoerciveMode) {
+		t.Fatal("coercive assignability should allow int into float")
+	}
+
+	target := UnionOf([]*TypeDescriptor{
+		recordOf(field("x", td(TypeFloat))),
+		td(TypeString),
+	}, false)
+	actual := recordOf(field("x", td(TypeInt)))
+	if SchemaAssignable(target, actual, AssignExactMode) {
+		t.Fatal("exact union assignability should preserve numeric branch identity")
+	}
+	if !SchemaAssignable(target, actual, AssignCoerciveMode) {
+		t.Fatal("coercive union assignability should accept int value into float branch")
+	}
+
+	recordTarget := recordOf(
+		field("x", td(TypeInt)),
+		field("y", nullable(TypeString)),
+	)
+	recordActual := recordOf(field("x", td(TypeInt)))
+	if SchemaAssignable(recordTarget, recordActual, AssignExactMode) {
+		t.Fatal("exact record assignability should require all fields")
+	}
+	if !SchemaAssignable(recordTarget, recordActual, AssignCoerciveMode) {
+		t.Fatal("coercive record assignability should allow missing nullable fields")
+	}
+
+	value := RecordVal([]RecordField{{Name: "x", Value: IntVal(1)}})
+	coerced, err := CoerceValueToSchemaMode(value, recordTarget, CoerceCoerciveMode)
+	if err != nil {
+		t.Fatalf("coercive record value returned error: %v", err)
+	}
+	requireRecordValue(t, coerced, []RecordField{
+		{Name: "x", Value: IntVal(1)},
+		{Name: "y", Value: Null()},
+	})
+}
+
+func TestCentralTypeAPICoercionModes(t *testing.T) {
+	schema := recordOf(field("x", td(TypeFloat)))
+	value := RecordVal([]RecordField{{Name: "x", Value: IntVal(7)}})
+
+	if _, err := CoerceValueToSchemaMode(value, schema, CoerceExactMode); err == nil {
+		t.Fatal("exact coercion should reject int into float field")
+	}
+	got, err := CoerceValueToSchemaMode(value, schema, CoerceCoerciveMode)
+	if err != nil {
+		t.Fatalf("coercive mode returned error: %v", err)
+	}
+	fields := map[string]Value{}
+	for _, field := range got.Fields {
+		fields[field.Name] = field.Value
+	}
+	if got := fields["x"]; got.Type != TypeFloat || got.Float != 7 {
+		t.Fatalf("coercive mode: got %v, want float 7", got)
+	}
+}
+
 func TestCentralTypeAPIPredicates(t *testing.T) {
 	tests := []struct {
 		name       string

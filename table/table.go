@@ -17,6 +17,7 @@ const (
 	TypeBool
 	TypeList   // List  []Value
 	TypeRecord // Fields []RecordField
+	TypeUnion  // active branch values stored in unions
 	TypeMixed  // schema-only marker for heterogeneous nested list elements
 )
 
@@ -285,20 +286,73 @@ func ListToTable(v Value) (*Table, error) {
 	return t, nil
 }
 
+// ListToTableWithSchema converts a TypeList of TypeRecord values into a *Table
+// using the supplied record schema. Values are validated with typed append so
+// union active branches and nested schemas are preserved.
+func ListToTableWithSchema(v Value, recordSchema *TypeDescriptor) (*Table, error) {
+	if recordSchema == nil {
+		return ListToTable(v)
+	}
+	if v.Type != TypeList {
+		return nil, fmt.Errorf("expected TypeList, got %v", v.Type)
+	}
+	recordSchema = FinalizeSchema(recordSchema)
+	if recordSchema.Kind != TypeRecord {
+		return nil, fmt.Errorf("expected TypeRecord schema, got %v", recordSchema.Kind)
+	}
+
+	columns := make([]string, len(recordSchema.Fields))
+	schemas := make([]*TypeDescriptor, len(recordSchema.Fields))
+	for i, field := range recordSchema.Fields {
+		columns[i] = field.Name
+		schemas[i] = field.Type
+	}
+	t := NewTableWithSchemas(columns, schemas)
+
+	for _, elem := range v.List {
+		if elem.Type != TypeRecord {
+			return nil, fmt.Errorf("list element is not a TypeRecord")
+		}
+		coerced, err := CoerceValueToSchemaAtPath(elem, recordSchema, "")
+		if err != nil {
+			return nil, err
+		}
+		vals := make([]Value, len(columns))
+		for j, col := range columns {
+			vals[j] = recordFieldValue(coerced.Fields, col)
+		}
+		if err := t.AddRowTyped(vals); err != nil {
+			return nil, err
+		}
+	}
+	return t, nil
+}
+
+func recordFieldValue(fields []RecordField, name string) Value {
+	for _, field := range fields {
+		if field.Name == name {
+			return field.Value
+		}
+	}
+	return Null()
+}
+
 // Column stores all values for one column as a typed slice plus a null bitmap.
 // The Type field records the inferred type; TypeNull means no non-null data has
 // been appended yet. Only the slice matching Type is populated.
 type Column struct {
-	name    string
-	typ     ValueType
-	schema  *TypeDescriptor
-	nulls   []bool          // true = null at that row index
-	ints    []int64         // TypeInt
-	floats  []float64       // TypeFloat
-	strs    []string        // TypeString
-	bools   []bool          // TypeBool
-	lists   [][]Value       // TypeList
-	records [][]RecordField // TypeRecord
+	name     string
+	typ      ValueType
+	schema   *TypeDescriptor
+	hasUnion bool
+	nulls    []bool          // true = null at that row index
+	ints     []int64         // TypeInt
+	floats   []float64       // TypeFloat
+	strs     []string        // TypeString
+	bools    []bool          // TypeBool
+	lists    [][]Value       // TypeList
+	records  [][]RecordField // TypeRecord
+	unions   []Value         // TypeUnion stores each row's active branch value
 }
 
 // Get materializes a Value for row i (used during computation).
@@ -319,6 +373,8 @@ func (c *Column) Get(i int) Value {
 		return ListVal(c.lists[i])
 	case TypeRecord:
 		return RecordVal(c.records[i])
+	case TypeUnion:
+		return c.unions[i]
 	default:
 		return Null()
 	}
@@ -326,14 +382,39 @@ func (c *Column) Get(i int) Value {
 
 // Append adds a value to the column, widening the column type if necessary.
 func (c *Column) Append(v Value) {
-	c.mergeSchema(v)
+	if c.schema != nil && c.hasUnion {
+		if c.appendToKnownSchema(v) {
+			return
+		}
+		c.schema = ScalarSchema(TypeString)
+		c.hasUnion = false
+		c.convertTo(TypeString)
+	}
+
+	if c.appendFastScalar(v) {
+		return
+	}
+
+	schemaMerge := c.mergeSchema(v)
 	if v.Type == TypeNull {
 		c.appendNull()
 		return
 	}
 	newType := widenType(c.typ, v.Type)
+	if c.schema != nil && c.schema.Kind == TypeString {
+		newType = TypeString
+	}
 	if newType != c.typ {
 		c.convertTo(newType)
+	}
+	if c.typ == TypeList || c.typ == TypeRecord {
+		schema := c.Schema()
+		if schemaMerge.changed {
+			c.normalizeStoredValuesToSchema(schema)
+		}
+		if schemaMerge.changed || schemaMerge.coerceIncoming || c.schema != nil {
+			v = coerceValueToSchemaPermissive(v, schema)
+		}
 	}
 	c.nulls = append(c.nulls, false)
 	switch c.typ {
@@ -350,71 +431,294 @@ func (c *Column) Append(v Value) {
 		c.lists = append(c.lists, v.List)
 	case TypeRecord:
 		c.records = append(c.records, v.Fields)
+	case TypeUnion:
+		c.unions = append(c.unions, v)
 	}
 }
 
-func (c *Column) mergeSchema(v Value) {
+func (c *Column) appendFastScalar(v Value) bool {
+	if v.Type == TypeNull || c.schema == nil || c.hasUnion || c.typ != v.Type || c.schema.Kind != v.Type {
+		return false
+	}
+	switch v.Type {
+	case TypeInt, TypeFloat, TypeString, TypeBool:
+	default:
+		return false
+	}
+	c.nulls = append(c.nulls, false)
+	switch v.Type {
+	case TypeInt:
+		c.ints = append(c.ints, v.Int)
+	case TypeFloat:
+		c.floats = append(c.floats, v.Float)
+	case TypeString:
+		c.strs = append(c.strs, v.Str)
+	case TypeBool:
+		c.bools = append(c.bools, v.Bool)
+	}
+	return true
+}
+
+func (c *Column) appendToKnownSchema(v Value) bool {
+	schema := FinalizeSchema(c.schema)
+	if schema == nil {
+		return false
+	}
+	cv, err := CoerceValueToSchemaAtPath(v, schema, c.name)
+	if err != nil {
+		return false
+	}
+	if cv.Type != TypeNull && c.typ == TypeNull {
+		return false
+	}
+	if typedAppendNeedsSchemaMerge(c.schema, cv) {
+		nextSchema, err := MergeValueSchemaStrictAtPath(cloneTypeDescriptor(c.schema), cv, c.name)
+		if err != nil {
+			return false
+		}
+		c.schema = nextSchema
+		c.hasUnion = SchemaContainsUnion(c.schema)
+	}
+	c.appendCoerced(cv)
+	return true
+}
+
+type schemaMergeResult struct {
+	changed        bool
+	coerceIncoming bool
+}
+
+func (c *Column) mergeSchema(v Value) schemaMergeResult {
 	if v.Type == TypeNull {
 		if c.schema == nil {
 			c.schema = &TypeDescriptor{Kind: TypeNull, Nullable: true}
-			return
+			c.hasUnion = false
+			return schemaMergeResult{changed: true}
 		}
+		changed := !c.schema.Nullable
 		c.schema.Nullable = true
-		return
+		return schemaMergeResult{changed: changed}
 	}
 
 	if v.Type != TypeList && v.Type != TypeRecord {
-		c.mergeScalarSchema(v.Type)
-		return
+		return schemaMergeResult{changed: c.mergeScalarSchema(v.Type)}
 	}
 
+	incoming := InferValueSchema(v)
 	if c.schema != nil {
 		switch c.schema.Kind {
 		case TypeString:
-			return
+			return schemaMergeResult{}
 		case TypeNull:
-			c.schema = &TypeDescriptor{Kind: v.Type, Nullable: true}
-			return
+			c.schema = incoming
+			c.schema.Nullable = true
+			c.hasUnion = SchemaContainsUnion(c.schema)
+			return schemaMergeResult{changed: true}
 		case TypeInt, TypeFloat, TypeBool:
 			c.schema = &TypeDescriptor{Kind: TypeString, Nullable: c.schema.Nullable}
-			return
+			c.hasUnion = false
+			return schemaMergeResult{changed: true}
 		}
 	}
 
-	next, err := MergeSchemasPermissive(c.schema, InferValueSchema(v))
+	next, err := MergeSchemasPermissive(c.schema, incoming)
 	if err != nil {
+		changed := c.schema == nil || c.schema.Kind != TypeString || c.schema.Nullable
 		c.schema = ScalarSchema(TypeString)
-		return
+		c.hasUnion = false
+		return schemaMergeResult{changed: changed}
 	}
+	changed := !sameNormalized(c.schema, next)
 	c.schema = next
+	c.hasUnion = SchemaContainsUnion(c.schema)
+	return schemaMergeResult{
+		changed:        changed,
+		coerceIncoming: !schemaFitsWithoutPermissiveCoercion(incoming, next),
+	}
 }
 
-func (c *Column) mergeScalarSchema(kind ValueType) {
+func schemaFitsWithoutPermissiveCoercion(actual, target *TypeDescriptor) bool {
+	if actual == nil || target == nil || actual.Kind == TypeNull || target.Kind == TypeMixed {
+		return true
+	}
+	if target.Kind == TypeUnion {
+		for _, branch := range target.Branches {
+			if schemaFitsWithoutPermissiveCoercion(actual, branch) {
+				return true
+			}
+		}
+		return false
+	}
+	if target.Kind == TypeString {
+		return actual.Kind == TypeString
+	}
+	if actual.Kind != target.Kind {
+		return false
+	}
+
+	switch target.Kind {
+	case TypeList:
+		return schemaFitsWithoutPermissiveCoercion(actual.Elem, target.Elem)
+	case TypeRecord:
+		actualFields := make(map[string]*TypeDescriptor, len(actual.Fields))
+		for i := range actual.Fields {
+			field := &actual.Fields[i]
+			if _, exists := actualFields[field.Name]; exists {
+				return false
+			}
+			actualFields[field.Name] = field.Type
+		}
+		targetFields := make(map[string]*TypeDescriptor, len(target.Fields))
+		for i := range target.Fields {
+			field := &target.Fields[i]
+			targetFields[field.Name] = field.Type
+			actualField, ok := actualFields[field.Name]
+			if !ok || !schemaFitsWithoutPermissiveCoercion(actualField, field.Type) {
+				return false
+			}
+		}
+		return len(actualFields) == len(targetFields)
+	default:
+		return true
+	}
+}
+
+func (c *Column) normalizeStoredValuesToSchema(schema *TypeDescriptor) {
+	switch c.typ {
+	case TypeList:
+		for i := range c.lists {
+			if c.nulls[i] {
+				continue
+			}
+			v := coerceValueToSchemaPermissive(ListVal(c.lists[i]), schema)
+			if v.Type == TypeList {
+				c.lists[i] = v.List
+			}
+		}
+	case TypeRecord:
+		for i := range c.records {
+			if c.nulls[i] {
+				continue
+			}
+			v := coerceValueToSchemaPermissive(RecordVal(c.records[i]), schema)
+			if v.Type == TypeRecord {
+				c.records[i] = v.Fields
+			}
+		}
+	case TypeUnion:
+		for i := range c.unions {
+			if c.nulls[i] {
+				continue
+			}
+			c.unions[i] = coerceValueToSchemaPermissive(c.unions[i], schema)
+		}
+	}
+}
+
+func coerceValueToSchemaPermissive(v Value, schema *TypeDescriptor) Value {
+	schema = FinalizeSchema(schema)
+	if schema == nil || v.Type == TypeNull || schema.Kind == TypeMixed {
+		return v
+	}
+	switch schema.Kind {
+	case TypeInt:
+		if v.Type == TypeInt {
+			return v
+		}
+	case TypeFloat:
+		if v.Type == TypeInt {
+			return FloatVal(float64(v.Int))
+		}
+		if v.Type == TypeFloat {
+			return v
+		}
+	case TypeString:
+		return StrVal(v.AsString())
+	case TypeBool:
+		if v.Type == TypeBool {
+			return v
+		}
+	case TypeList:
+		if v.Type != TypeList {
+			return v
+		}
+		items := make([]Value, len(v.List))
+		for i, item := range v.List {
+			items[i] = coerceValueToSchemaPermissive(item, schema.Elem)
+		}
+		return ListVal(items)
+	case TypeRecord:
+		if v.Type != TypeRecord {
+			return v
+		}
+		schemaFields := make(map[string]*TypeDescriptor, len(schema.Fields))
+		for i := range schema.Fields {
+			field := &schema.Fields[i]
+			schemaFields[field.Name] = field.Type
+		}
+		seen := make(map[string]bool, len(v.Fields))
+		fields := make([]RecordField, 0, len(schema.Fields))
+		for _, field := range v.Fields {
+			fieldSchema, ok := schemaFields[field.Name]
+			if !ok {
+				continue
+			}
+			fields = append(fields, RecordField{Name: field.Name, Value: coerceValueToSchemaPermissive(field.Value, fieldSchema)})
+			seen[field.Name] = true
+		}
+		for _, field := range schema.Fields {
+			if seen[field.Name] {
+				continue
+			}
+			fields = append(fields, RecordField{Name: field.Name, Value: Null()})
+		}
+		return RecordVal(fields)
+	case TypeUnion:
+		cv, err := coerceUnionValueToSchema(v, schema, "")
+		if err == nil {
+			return cv
+		}
+		return v
+	}
+	return v
+}
+
+func (c *Column) mergeScalarSchema(kind ValueType) bool {
 	if c.schema == nil {
 		c.schema = &TypeDescriptor{Kind: kind}
-		return
+		c.hasUnion = false
+		return true
 	}
 	nullable := c.schema.Nullable
 	switch c.schema.Kind {
 	case TypeNull:
 		c.schema = &TypeDescriptor{Kind: kind, Nullable: true}
+		c.hasUnion = false
+		return true
 	case kind:
-		return
+		return false
 	case TypeInt:
 		if kind == TypeFloat {
 			c.schema = &TypeDescriptor{Kind: TypeFloat, Nullable: nullable}
-			return
+			c.hasUnion = false
+			return true
 		}
 		c.schema = &TypeDescriptor{Kind: TypeString, Nullable: nullable}
+		c.hasUnion = false
+		return true
 	case TypeFloat:
 		if kind == TypeInt {
-			return
+			return false
 		}
 		c.schema = &TypeDescriptor{Kind: TypeString, Nullable: nullable}
+		c.hasUnion = false
+		return true
 	case TypeString:
-		return
+		return false
 	default:
 		c.schema = &TypeDescriptor{Kind: TypeString, Nullable: nullable}
+		c.hasUnion = false
+		return true
 	}
 }
 
@@ -434,6 +738,8 @@ func (c *Column) appendNull() {
 		c.lists = append(c.lists, nil)
 	case TypeRecord:
 		c.records = append(c.records, nil)
+	case TypeUnion:
+		c.unions = append(c.unions, Null())
 	}
 }
 
@@ -444,6 +750,9 @@ func widenType(existing, incoming ValueType) ValueType {
 	}
 	if existing == incoming {
 		return existing
+	}
+	if existing == TypeUnion {
+		return TypeUnion
 	}
 	if (existing == TypeInt && incoming == TypeFloat) || (existing == TypeFloat && incoming == TypeInt) {
 		return TypeFloat
@@ -487,6 +796,8 @@ func (c *Column) convertTo(newType ValueType) {
 					newStrs[i] = ListVal(c.lists[i]).AsString()
 				case TypeRecord:
 					newStrs[i] = RecordVal(c.records[i]).AsString()
+				case TypeUnion:
+					newStrs[i] = c.unions[i].AsString()
 				}
 			}
 		}
@@ -496,12 +807,15 @@ func (c *Column) convertTo(newType ValueType) {
 		c.bools = nil
 		c.lists = nil
 		c.records = nil
+		c.unions = nil
 	case TypeBool:
 		c.bools = make([]bool, n)
 	case TypeList:
 		c.lists = make([][]Value, n)
 	case TypeRecord:
 		c.records = make([][]RecordField, n)
+	case TypeUnion:
+		c.unions = make([]Value, n)
 	}
 	c.typ = newType
 }
@@ -587,10 +901,10 @@ func NewTableWithSchemas(columns []string, schemas []*TypeDescriptor) *Table {
 		var schema *TypeDescriptor
 		typ := TypeNull
 		if i < len(schemas) && schemas[i] != nil {
-			schema = cloneTypeDescriptor(schemas[i])
+			schema = schemaForStorage(schemas[i])
 			typ = FinalizeSchema(schema).Kind
 		}
-		t.cols[i] = &Column{name: name, typ: typ, schema: schema}
+		t.cols[i] = &Column{name: name, typ: typ, schema: schema, hasUnion: SchemaContainsUnion(schema)}
 	}
 	return t
 }
@@ -644,37 +958,262 @@ func (t *Table) AddRow(values []Value) {
 // so describe can report top-level and nested nullability accurately. Use AddRow
 // for permissive widening.
 func (t *Table) AddRowTyped(values []Value) error {
+	return t.addRowTyped(values, nil)
+}
+
+// AddRowTypedColumns appends a row after validating only the selected columns
+// against existing schemas. Unselected columns are trusted to already match
+// their storage type and schema; callers should use this only when those values
+// were copied from columns with the same schema.
+func (t *Table) AddRowTypedColumns(values []Value, typedColumns []int) error {
+	return t.addRowTyped(values, typedColumns)
+}
+
+// AppendTypedComputedColumns returns a new table that shares the receiver's
+// existing columns and appends computed columns validated against fixed schemas.
+func (t *Table) AppendTypedComputedColumns(names []string, schemas []*TypeDescriptor, valuesByColumn [][]Value) (*Table, error) {
+	if len(schemas) != len(names) {
+		return nil, fmt.Errorf("computed columns: got %d schemas for %d columns", len(schemas), len(names))
+	}
+	if len(valuesByColumn) != len(names) {
+		return nil, fmt.Errorf("computed columns: got %d value columns for %d columns", len(valuesByColumn), len(names))
+	}
+
+	result := &Table{
+		Columns: make([]string, len(t.Columns)+len(names)),
+		cols:    make([]*Column, len(t.cols)+len(names)),
+		NumRows: t.NumRows,
+	}
+	copy(result.Columns, t.Columns)
+	copy(result.cols, t.cols)
+	copy(result.Columns[len(t.Columns):], names)
+
+	for i, name := range names {
+		if len(valuesByColumn[i]) != t.NumRows {
+			return nil, fmt.Errorf("computed column %q has %d values for %d rows", name, len(valuesByColumn[i]), t.NumRows)
+		}
+		col := newColumnWithSchema(name, schemas[i])
+		preallocateColumnStorage(col, t.NumRows)
+		for _, v := range valuesByColumn[i] {
+			cv, err := coerceValueForTypedAppend(v, col.schema, name)
+			if err != nil {
+				return nil, err
+			}
+			if cv.Type != TypeNull && col.typ == TypeNull {
+				return nil, fmt.Errorf("column %q has no concrete type for non-null %s value", col.name, TypeName(cv.Type))
+			}
+			if typedAppendNeedsSchemaMerge(col.schema, cv) {
+				nextSchema, err := MergeValueSchemaStrictAtPath(cloneTypeDescriptor(col.schema), cv, col.name)
+				if err != nil {
+					return nil, err
+				}
+				col.schema = nextSchema
+				col.hasUnion = SchemaContainsUnion(col.schema)
+			}
+			col.appendCoerced(cv)
+		}
+		result.cols[len(t.cols)+i] = col
+	}
+	return result, nil
+}
+
+func newColumnWithSchema(name string, schema *TypeDescriptor) *Column {
+	var cloned *TypeDescriptor
+	typ := TypeNull
+	if schema != nil {
+		cloned = schemaForStorage(schema)
+		typ = FinalizeSchema(cloned).Kind
+	}
+	return &Column{name: name, typ: typ, schema: cloned, hasUnion: SchemaContainsUnion(cloned)}
+}
+
+func schemaForStorage(schema *TypeDescriptor) *TypeDescriptor {
+	if schema == nil {
+		return nil
+	}
+	cloned := NormalizeSchema(schema)
+	if err := ValidateSchema(cloned); err != nil {
+		return &TypeDescriptor{Kind: TypeString, Nullable: schema.Nullable}
+	}
+	return cloned
+}
+
+func preallocateColumnStorage(c *Column, capacity int) {
+	c.nulls = make([]bool, 0, capacity)
+	switch c.typ {
+	case TypeInt:
+		c.ints = make([]int64, 0, capacity)
+	case TypeFloat:
+		c.floats = make([]float64, 0, capacity)
+	case TypeString:
+		c.strs = make([]string, 0, capacity)
+	case TypeBool:
+		c.bools = make([]bool, 0, capacity)
+	case TypeList:
+		c.lists = make([][]Value, 0, capacity)
+	case TypeRecord:
+		c.records = make([][]RecordField, 0, capacity)
+	case TypeUnion:
+		c.unions = make([]Value, 0, capacity)
+	}
+}
+
+func (t *Table) addRowTyped(values []Value, typedColumns []int) error {
 	coerced := make([]Value, len(t.cols))
-	nextSchemas := make([]*TypeDescriptor, len(t.cols))
+	var nextSchemas []*TypeDescriptor
 	for i, col := range t.cols {
 		v := Null()
 		if i < len(values) {
 			v = values[i]
 		}
-		cv, err := CoerceValueToSchemaAtPath(v, col.schema, col.name)
+		if !shouldValidateTypedColumn(i, typedColumns) {
+			coerced[i] = v
+			continue
+		}
+		cv, err := coerceValueForTypedAppend(v, col.schema, col.name)
 		if err != nil {
 			return err
 		}
 		if cv.Type != TypeNull && col.typ == TypeNull {
 			return fmt.Errorf("column %q has no concrete type for non-null %s value", col.name, TypeName(cv.Type))
 		}
-		if col.schema != nil {
+		if typedAppendNeedsSchemaMerge(col.schema, cv) {
 			nextSchema, err := MergeValueSchemaStrictAtPath(cloneTypeDescriptor(col.schema), cv, col.name)
 			if err != nil {
 				return err
+			}
+			if nextSchemas == nil {
+				nextSchemas = make([]*TypeDescriptor, len(t.cols))
 			}
 			nextSchemas[i] = nextSchema
 		}
 		coerced[i] = cv
 	}
 	for i, col := range t.cols {
-		if nextSchemas[i] != nil {
+		if nextSchemas != nil && nextSchemas[i] != nil {
 			col.schema = nextSchemas[i]
+			col.hasUnion = SchemaContainsUnion(col.schema)
 		}
 		col.appendCoerced(coerced[i])
 	}
 	t.NumRows++
 	return nil
+}
+
+func shouldValidateTypedColumn(idx int, typedColumns []int) bool {
+	if typedColumns == nil {
+		return true
+	}
+	for _, typedIdx := range typedColumns {
+		if typedIdx == idx {
+			return true
+		}
+	}
+	return false
+}
+
+func coerceValueForTypedAppend(v Value, schema *TypeDescriptor, path string) (Value, error) {
+	if schema == nil {
+		return v, nil
+	}
+	if err := ValidateSchemaAtPath(schema, path); err != nil {
+		return Null(), err
+	}
+	if v.Type == TypeNull {
+		return Null(), nil
+	}
+	switch schema.Kind {
+	case TypeInt:
+		if v.Type == TypeInt {
+			return v, nil
+		}
+	case TypeFloat:
+		switch v.Type {
+		case TypeFloat:
+			return v, nil
+		case TypeInt:
+			return FloatVal(float64(v.Int)), nil
+		}
+	case TypeString:
+		if v.Type == TypeString {
+			return v, nil
+		}
+	case TypeBool:
+		if v.Type == TypeBool {
+			return v, nil
+		}
+	case TypeMixed:
+		return v, nil
+	default:
+		return CoerceValueToSchemaAtPath(v, schema, path)
+	}
+	return Null(), &SchemaError{Path: path, Expected: FinalizeSchema(schema), Actual: FinalizeSchema(InferValueSchema(v))}
+}
+
+func typedAppendNeedsSchemaMerge(schema *TypeDescriptor, v Value) bool {
+	if schema == nil {
+		return false
+	}
+	return valueMayChangeSchemaNullability(schema, v)
+}
+
+func valueMayChangeSchemaNullability(schema *TypeDescriptor, v Value) bool {
+	schema = FinalizeSchema(schema)
+	if schema == nil {
+		return false
+	}
+	if v.Type == TypeNull {
+		return !schema.Nullable && schema.Kind != TypeNull
+	}
+	if schema.Kind == TypeUnion {
+		return valueContainsNull(v)
+	}
+	if schema.Kind != v.Type {
+		return false
+	}
+	switch schema.Kind {
+	case TypeRecord:
+		fieldsByName := make(map[string]*TypeDescriptor, len(schema.Fields))
+		for i := range schema.Fields {
+			field := &schema.Fields[i]
+			fieldsByName[field.Name] = field.Type
+		}
+		for _, field := range v.Fields {
+			if valueMayChangeSchemaNullability(fieldsByName[field.Name], field.Value) {
+				return true
+			}
+		}
+		return false
+	case TypeList:
+		for _, item := range v.List {
+			if valueMayChangeSchemaNullability(schema.Elem, item) {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
+}
+
+func valueContainsNull(v Value) bool {
+	switch v.Type {
+	case TypeNull:
+		return true
+	case TypeRecord:
+		for _, field := range v.Fields {
+			if valueContainsNull(field.Value) {
+				return true
+			}
+		}
+	case TypeList:
+		for _, item := range v.List {
+			if valueContainsNull(item) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (c *Column) appendCoerced(v Value) {
@@ -700,6 +1239,8 @@ func (c *Column) appendCoerced(v Value) {
 		c.lists = append(c.lists, v.List)
 	case TypeRecord:
 		c.records = append(c.records, v.Fields)
+	case TypeUnion:
+		c.unions = append(c.unions, v)
 	}
 }
 
@@ -739,7 +1280,8 @@ func (t *Table) SliceRows(from, to int) *Table {
 
 func sliceColumn(c *Column, from, to int) *Column {
 	n := to - from
-	nc := &Column{name: c.name, typ: c.typ, schema: FinalizeSchema(c.schema), nulls: make([]bool, n)}
+	schema := FinalizeSchema(c.schema)
+	nc := &Column{name: c.name, typ: c.typ, schema: schema, hasUnion: SchemaContainsUnion(schema), nulls: make([]bool, n)}
 	copy(nc.nulls, c.nulls[from:to])
 	switch c.typ {
 	case TypeInt:
@@ -760,6 +1302,9 @@ func sliceColumn(c *Column, from, to int) *Column {
 	case TypeRecord:
 		nc.records = make([][]RecordField, n)
 		copy(nc.records, c.records[from:to])
+	case TypeUnion:
+		nc.unions = make([]Value, n)
+		copy(nc.unions, c.unions[from:to])
 	}
 	return nc
 }
@@ -781,7 +1326,8 @@ func (t *Table) ApplyPermutation(perm []int) *Table {
 
 func permuteColumn(c *Column, perm []int) *Column {
 	n := len(perm)
-	nc := &Column{name: c.name, typ: c.typ, schema: FinalizeSchema(c.schema), nulls: make([]bool, n)}
+	schema := FinalizeSchema(c.schema)
+	nc := &Column{name: c.name, typ: c.typ, schema: schema, hasUnion: SchemaContainsUnion(schema), nulls: make([]bool, n)}
 	for i, p := range perm {
 		nc.nulls[i] = c.nulls[p]
 	}
@@ -815,6 +1361,11 @@ func permuteColumn(c *Column, perm []int) *Column {
 		nc.records = make([][]RecordField, n)
 		for i, p := range perm {
 			nc.records[i] = c.records[p]
+		}
+	case TypeUnion:
+		nc.unions = make([]Value, n)
+		for i, p := range perm {
+			nc.unions[i] = c.unions[p]
 		}
 	}
 	return nc
@@ -879,7 +1430,10 @@ func UnionColumns(columnSets ...[]string) []string {
 
 // Concat combines tables by column union. Columns from the first table keep
 // their order; new columns from later tables are appended in sorted order.
-// Missing values are null-filled. Rows are copied via AddRow so column types widen.
+// Missing values are null-filled. Output schemas are seeded from input schemas
+// before rows are copied so metadata-only shards keep their declared shape.
+// Rows are still copied via AddRow so remaining value conflicts can widen using
+// the normal permissive table semantics.
 func Concat(tables []*Table) (*Table, error) {
 	if len(tables) == 0 {
 		return nil, fmt.Errorf("concat: no tables")
@@ -891,7 +1445,7 @@ func Concat(tables []*Table) (*Table, error) {
 	}
 	unionCols := UnionColumns(columnSets...)
 
-	result := NewTable(unionCols)
+	result := NewTableWithSchemas(unionCols, concatSchemas(tables, unionCols))
 	for _, tbl := range tables {
 		for row := 0; row < tbl.NumRows; row++ {
 			vals := make([]Value, len(unionCols))
@@ -906,6 +1460,33 @@ func Concat(tables []*Table) (*Table, error) {
 		}
 	}
 	return result, nil
+}
+
+func concatSchemas(tables []*Table, columns []string) []*TypeDescriptor {
+	schemas := make([]*TypeDescriptor, len(columns))
+	for i, col := range columns {
+		var schema *TypeDescriptor
+		for _, tbl := range tables {
+			idx := tbl.ColIndex(col)
+			if idx < 0 {
+				if tbl.NumRows > 0 {
+					schema = mergeConcatSchema(schema, &TypeDescriptor{Kind: TypeNull, Nullable: true})
+				}
+				continue
+			}
+			schema = mergeConcatSchema(schema, tbl.Col(idx).Schema())
+		}
+		schemas[i] = FinalizeSchema(schema)
+	}
+	return schemas
+}
+
+func mergeConcatSchema(a, b *TypeDescriptor) *TypeDescriptor {
+	merged, err := MergeSchemasPermissive(a, b)
+	if err != nil {
+		return ScalarSchema(TypeString)
+	}
+	return merged
 }
 
 // Clone creates a deep copy of the table.
@@ -924,7 +1505,8 @@ func (t *Table) Clone() *Table {
 
 func cloneColumn(c *Column) *Column {
 	n := c.Len()
-	nc := &Column{name: c.name, typ: c.typ, schema: FinalizeSchema(c.schema), nulls: make([]bool, n)}
+	schema := FinalizeSchema(c.schema)
+	nc := &Column{name: c.name, typ: c.typ, schema: schema, hasUnion: SchemaContainsUnion(schema), nulls: make([]bool, n)}
 	copy(nc.nulls, c.nulls)
 	switch c.typ {
 	case TypeInt:
@@ -945,6 +1527,9 @@ func cloneColumn(c *Column) *Column {
 	case TypeRecord:
 		nc.records = make([][]RecordField, n)
 		copy(nc.records, c.records)
+	case TypeUnion:
+		nc.unions = make([]Value, n)
+		copy(nc.unions, c.unions)
 	}
 	return nc
 }
