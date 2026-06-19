@@ -613,6 +613,18 @@ func (t *Table) Col(i int) *Column {
 	return t.cols[i]
 }
 
+// Schema returns the logical schema for the table's current columns.
+func (t *Table) Schema() Schema {
+	if t == nil {
+		return Schema{}
+	}
+	columns := make([]SchemaColumn, len(t.cols))
+	for i, col := range t.cols {
+		columns[i] = SchemaColumn{Name: t.Columns[i], Type: col.Schema()}
+	}
+	return Schema{Columns: columns}
+}
+
 // AddRow appends a row, distributing values to typed column slices.
 // If values is shorter than the number of columns, remaining columns get null.
 func (t *Table) AddRow(values []Value) {

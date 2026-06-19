@@ -20,6 +20,17 @@ type FieldDescriptor struct {
 	Type *TypeDescriptor
 }
 
+// Schema describes the logical columns in a table.
+type Schema struct {
+	Columns []SchemaColumn
+}
+
+// SchemaColumn describes one logical table column.
+type SchemaColumn struct {
+	Name string
+	Type *TypeDescriptor
+}
+
 // SchemaError reports a mismatch while merging or coercing nested schemas.
 type SchemaError struct {
 	Path     string
@@ -101,11 +112,271 @@ func MergeSchemasStrictAtPath(a, b *TypeDescriptor, path string) (*TypeDescripto
 	return mergeSchemas(a, b, true, path)
 }
 
+// Render returns a deterministic compact recursive type string.
+func Render(t *TypeDescriptor) string {
+	if t == nil {
+		return "null"
+	}
+	var b strings.Builder
+	writeSchemaString(&b, normalizeDescriptorForCompare(t))
+	return b.String()
+}
+
+// Same reports whether two descriptors have the same logical shape.
+// Record field order is ignored; nullability is significant.
+func Same(a, b *TypeDescriptor) bool {
+	return sameNormalized(normalizeDescriptorForCompare(a), normalizeDescriptorForCompare(b))
+}
+
+// WithoutNull returns a copy of t with top-level nullability removed.
+func WithoutNull(t *TypeDescriptor) *TypeDescriptor {
+	out := cloneTypeDescriptor(t)
+	if out != nil {
+		out.Nullable = false
+	}
+	return out
+}
+
+// WithNullable returns a copy of t with top-level nullability enabled.
+func WithNullable(t *TypeDescriptor) *TypeDescriptor {
+	if t == nil {
+		return &TypeDescriptor{Kind: TypeNull, Nullable: true}
+	}
+	out := cloneTypeDescriptor(t)
+	out.Nullable = true
+	return out
+}
+
+// IsNumeric reports whether t is int/float, ignoring nullability.
+func IsNumeric(t *TypeDescriptor) bool {
+	if t == nil {
+		return false
+	}
+	return t.Kind == TypeInt || t.Kind == TypeFloat
+}
+
+// IsBooleanLike reports whether t is bool or bool?.
+func IsBooleanLike(t *TypeDescriptor) bool {
+	return t != nil && t.Kind == TypeBool
+}
+
+// IsStringLike reports whether t is string or string?.
+func IsStringLike(t *TypeDescriptor) bool {
+	return t != nil && t.Kind == TypeString
+}
+
+// IsComparable reports whether equality is defined for values of t.
+func IsComparable(t *TypeDescriptor) bool {
+	if t == nil {
+		return false
+	}
+	switch t.Kind {
+	case TypeInt, TypeFloat, TypeString, TypeBool, TypeList, TypeRecord:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsOrderable reports whether ordering comparisons are defined for values of t.
+func IsOrderable(t *TypeDescriptor) bool {
+	if t == nil {
+		return false
+	}
+	switch t.Kind {
+	case TypeInt, TypeFloat, TypeString:
+		return true
+	default:
+		return false
+	}
+}
+
+// UnifyStrict merges two logical types and rejects incompatible non-null types.
+// It does not mutate either input.
+func UnifyStrict(a, b *TypeDescriptor) (*TypeDescriptor, error) {
+	return unifyStrictAtPath(a, b, "", false)
+}
+
+// UnifyAllStrict merges all logical types and rejects incompatible non-null
+// types. It does not mutate the input descriptors.
+func UnifyAllStrict(ts []*TypeDescriptor) (*TypeDescriptor, error) {
+	var out *TypeDescriptor
+	for _, typ := range ts {
+		next, err := UnifyStrict(out, typ)
+		if err != nil {
+			return nil, err
+		}
+		out = next
+	}
+	return out, nil
+}
+
+// UnifyListLiteralElems merges element types for one list literal. Unlike
+// UnifyStrict, it may produce mixed for explicitly heterogeneous literal
+// contents.
+func UnifyListLiteralElems(ts []*TypeDescriptor) *TypeDescriptor {
+	if len(ts) == 0 {
+		return &TypeDescriptor{Kind: TypeString, Nullable: true}
+	}
+	var out *TypeDescriptor
+	for _, typ := range ts {
+		merged, err := mergeSchemasForMixedList(out, typ, "")
+		if err != nil {
+			return &TypeDescriptor{Kind: TypeMixed}
+		}
+		out = merged
+	}
+	return normalizeDescriptorForCompare(FinalizeSchema(out))
+}
+
+// NumericResult returns the result type for numeric arithmetic.
+func NumericResult(a, b *TypeDescriptor) (*TypeDescriptor, error) {
+	return numericResultAtPath(a, b, "")
+}
+
 // MergeValueSchemaStrictAtPath merges one materialized value into an existing
 // descriptor and rejects incompatible non-null types. The returned descriptor
 // may share storage with the input descriptor.
 func MergeValueSchemaStrictAtPath(schema *TypeDescriptor, v Value, path string) (*TypeDescriptor, error) {
 	return mergeValueSchemaStrict(schema, v, path)
+}
+
+func unifyStrictAtPath(a, b *TypeDescriptor, path string, allowMixed bool) (*TypeDescriptor, error) {
+	if a == nil {
+		return normalizeDescriptorForCompare(cloneTypeDescriptor(b)), nil
+	}
+	if b == nil {
+		return normalizeDescriptorForCompare(cloneTypeDescriptor(a)), nil
+	}
+	a = normalizeDescriptorForCompare(a)
+	b = normalizeDescriptorForCompare(b)
+
+	if a.Kind == TypeNull {
+		out := cloneTypeDescriptor(b)
+		out.Nullable = true
+		return out, nil
+	}
+	if b.Kind == TypeNull {
+		out := cloneTypeDescriptor(a)
+		out.Nullable = true
+		return out, nil
+	}
+	if a.Kind == TypeMixed || b.Kind == TypeMixed {
+		if allowMixed || (a.Kind == TypeMixed && b.Kind == TypeMixed) {
+			return &TypeDescriptor{Kind: TypeMixed, Nullable: a.Nullable || b.Nullable}, nil
+		}
+		return nil, &SchemaError{Path: path, Expected: a, Actual: b}
+	}
+	if a.Kind == TypeInt && b.Kind == TypeFloat || a.Kind == TypeFloat && b.Kind == TypeInt {
+		return &TypeDescriptor{Kind: TypeFloat, Nullable: a.Nullable || b.Nullable}, nil
+	}
+	if a.Kind != b.Kind {
+		return nil, &SchemaError{Path: path, Expected: a, Actual: b}
+	}
+
+	out := &TypeDescriptor{Kind: a.Kind, Nullable: a.Nullable || b.Nullable}
+	switch a.Kind {
+	case TypeRecord:
+		fields, err := unifyRecordFieldsStrict(a.Fields, b.Fields, path, allowMixed)
+		if err != nil {
+			return nil, err
+		}
+		out.Fields = fields
+	case TypeList:
+		elem, err := unifyStrictAtPath(a.Elem, b.Elem, appendSchemaPath(path, "[]"), true)
+		if err != nil {
+			return nil, err
+		}
+		out.Elem = elem
+	}
+	return out, nil
+}
+
+func unifyRecordFieldsStrict(a, b []FieldDescriptor, path string, allowMixed bool) ([]FieldDescriptor, error) {
+	aByName := make(map[string]*TypeDescriptor, len(a))
+	bByName := make(map[string]*TypeDescriptor, len(b))
+	namesSet := make(map[string]bool, len(a)+len(b))
+	for _, field := range a {
+		aByName[field.Name] = field.Type
+		namesSet[field.Name] = true
+	}
+	for _, field := range b {
+		bByName[field.Name] = field.Type
+		namesSet[field.Name] = true
+	}
+	names := make([]string, 0, len(namesSet))
+	for name := range namesSet {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	out := make([]FieldDescriptor, 0, len(names))
+	for _, name := range names {
+		at, aOK := aByName[name]
+		bt, bOK := bByName[name]
+		switch {
+		case aOK && bOK:
+			merged, err := unifyStrictAtPath(at, bt, joinSchemaPath(path, name), allowMixed)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, FieldDescriptor{Name: name, Type: merged})
+		case aOK:
+			typ := cloneTypeDescriptor(at)
+			if typ != nil {
+				typ.Nullable = true
+			}
+			out = append(out, FieldDescriptor{Name: name, Type: typ})
+		case bOK:
+			typ := cloneTypeDescriptor(bt)
+			if typ != nil {
+				typ.Nullable = true
+			}
+			out = append(out, FieldDescriptor{Name: name, Type: typ})
+		}
+	}
+	return out, nil
+}
+
+func numericResultAtPath(a, b *TypeDescriptor, path string) (*TypeDescriptor, error) {
+	a = normalizeDescriptorForCompare(a)
+	b = normalizeDescriptorForCompare(b)
+	if a == nil || b == nil {
+		return nil, fmt.Errorf("numeric result requires numeric operands")
+	}
+	if a.Kind == TypeNull {
+		if !IsNumeric(b) && b.Kind != TypeNull {
+			return nil, fmt.Errorf("numeric result requires numeric operands, got %s", Render(b))
+		}
+		out := cloneTypeDescriptor(b)
+		out.Nullable = true
+		return out, nil
+	}
+	if b.Kind == TypeNull {
+		if !IsNumeric(a) {
+			return nil, fmt.Errorf("numeric result requires numeric operands, got %s", Render(a))
+		}
+		out := cloneTypeDescriptor(a)
+		out.Nullable = true
+		return out, nil
+	}
+	if !IsNumeric(a) {
+		return nil, fmt.Errorf("numeric result requires numeric operands, got %s", Render(a))
+	}
+	if !IsNumeric(b) {
+		return nil, fmt.Errorf("numeric result requires numeric operands, got %s", Render(b))
+	}
+	if a.Kind == TypeFloat || b.Kind == TypeFloat {
+		return &TypeDescriptor{Kind: TypeFloat, Nullable: a.Nullable || b.Nullable}, nil
+	}
+	return &TypeDescriptor{Kind: TypeInt, Nullable: a.Nullable || b.Nullable}, nil
+}
+
+func appendSchemaPath(path, suffix string) string {
+	if path == "" {
+		return suffix
+	}
+	return path + suffix
 }
 
 func mergeValueSchemaStrict(schema *TypeDescriptor, v Value, path string) (*TypeDescriptor, error) {
@@ -729,12 +1000,7 @@ func SchemaAtPath(schema *TypeDescriptor, path []string) *TypeDescriptor {
 
 // String returns a deterministic compact recursive type string.
 func (schema *TypeDescriptor) String() string {
-	if schema == nil {
-		return "null"
-	}
-	var b strings.Builder
-	writeSchemaString(&b, schema)
-	return b.String()
+	return Render(schema)
 }
 
 func writeSchemaString(b *strings.Builder, schema *TypeDescriptor) {
@@ -764,6 +1030,58 @@ func writeSchemaString(b *strings.Builder, schema *TypeDescriptor) {
 	if schema.Nullable {
 		b.WriteString("?")
 	}
+}
+
+func normalizeDescriptorForCompare(schema *TypeDescriptor) *TypeDescriptor {
+	if schema == nil {
+		return nil
+	}
+	out := cloneTypeDescriptor(schema)
+	normalizeDescriptorInPlace(out)
+	return out
+}
+
+func normalizeDescriptorInPlace(schema *TypeDescriptor) {
+	if schema == nil {
+		return
+	}
+	switch schema.Kind {
+	case TypeRecord:
+		for i := range schema.Fields {
+			schema.Fields[i].Type = normalizeDescriptorForCompare(schema.Fields[i].Type)
+		}
+		sort.SliceStable(schema.Fields, func(i, j int) bool {
+			if schema.Fields[i].Name == schema.Fields[j].Name {
+				return i < j
+			}
+			return schema.Fields[i].Name < schema.Fields[j].Name
+		})
+	case TypeList:
+		schema.Elem = normalizeDescriptorForCompare(schema.Elem)
+	}
+}
+
+func sameNormalized(a, b *TypeDescriptor) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	if a.Kind != b.Kind || a.Nullable != b.Nullable {
+		return false
+	}
+	switch a.Kind {
+	case TypeRecord:
+		if len(a.Fields) != len(b.Fields) {
+			return false
+		}
+		for i := range a.Fields {
+			if a.Fields[i].Name != b.Fields[i].Name || !sameNormalized(a.Fields[i].Type, b.Fields[i].Type) {
+				return false
+			}
+		}
+	case TypeList:
+		return sameNormalized(a.Elem, b.Elem)
+	}
+	return true
 }
 
 func cloneTypeDescriptor(schema *TypeDescriptor) *TypeDescriptor {

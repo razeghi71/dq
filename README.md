@@ -88,6 +88,25 @@ dq -agent-guide
 
 For the detailed language and design contract, see `AGENTS.md`.
 
+## Type and Schema Basics
+
+`type` is the top-level storage type: `int`, `float`, `string`, `bool`, `list`, `record`, or `null`. `schema` shows nested detail and nullability:
+
+```bash
+dq 'nested.json | describe | select column, type, schema'
+# address -> record<city:string, street:string, zip:string>
+# orders  -> list<record<amount:float, order_id:int, status:string>>
+```
+
+Nullable schema positions end in `?`. Missing JSON fields and explicit nulls both make the affected position nullable:
+
+```bash
+dq 'events.jsonl | describe | select column, schema'
+# profile -> record<email:string?, id:int>
+```
+
+Numeric types promote from `int` to `float` when needed. Heterogeneous values inside one JSON/list value are preserved as `mixed`, such as `[1, "two"] -> list<mixed>`. Outside that explicit list heterogeneity case, incompatible native JSON types are bad records instead of silently becoming strings.
+
 ## Operations
 
 ### `describe` - Show columns, types, row count, and schema

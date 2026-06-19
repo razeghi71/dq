@@ -261,6 +261,69 @@ Avro and Parquet internal compression codecs are discovered from the file metada
 
 ---
 
+## Internal type and schema model
+
+`table.TypeDescriptor` is the canonical logical type model. Display strings such as `record<x:int?>` are renderings of that model, not the model itself. Code that needs type reasoning should use the central helpers in `table/schema.go` instead of ad-hoc string comparisons or local kind checks.
+
+Canonical type kinds:
+
+| Kind | Meaning |
+|------|---------|
+| `TypeNull` | null-only / not yet determined |
+| `TypeInt` | signed integer |
+| `TypeFloat` | floating-point number |
+| `TypeString` | UTF-8 string |
+| `TypeBool` | boolean |
+| `TypeList` | ordered list with an element schema |
+| `TypeRecord` | named-field record |
+| `TypeMixed` | schema marker for explicitly heterogeneous list contents |
+
+Nullability is structural on every type node:
+
+* top-level nullable int: `int?`
+* nullable record with nullable field: `record<x:int?>?`
+* list with nullable elements: `list<int?>`
+* nullable list with non-null elements: `list<int>?`
+
+The central helpers are intentionally split by purpose:
+
+* `Render(t)` renders a deterministic compact schema string. Record fields render by field name.
+* `Same(a, b)` compares logical type shape and nullability, ignoring record field order and pointer identity.
+* `WithNullable(t)` and `WithoutNull(t)` return modified copies and must not mutate the input descriptor.
+* `IsNumeric`, `IsBooleanLike`, `IsStringLike`, `IsComparable`, and `IsOrderable` are predicate helpers for future planning/type checking.
+* `UnifyStrict` and `UnifyAllStrict` merge compatible logical types and reject incompatible non-null types.
+* `UnifyListLiteralElems` is the narrow helper that may produce `mixed` for explicitly heterogeneous list literals or single JSON array values.
+* `NumericResult` returns arithmetic result types (`int + int -> int`, `int + float -> float`) while preserving nullable operands.
+* `Table.Schema()` returns a logical `table.Schema` snapshot with cloned column descriptors; callers must not depend on physical column internals.
+
+Strict unification rules:
+
+| Inputs | Result |
+|--------|--------|
+| `int`, `int` | `int` |
+| `int`, `float` | `float` |
+| `float`, `float` | `float` |
+| `null`, `T` | `T?` |
+| matching records | fields unified by name, missing fields marked nullable |
+| matching lists | element schema unified recursively |
+| `int`, `string` | error |
+| `bool`, `int` | error |
+| `record<...>`, scalar | error |
+| `list<int>`, `list<string>` | error under strict expression/schema unification |
+
+`mixed` must stay narrow. It is allowed for explicitly heterogeneous contents inside a single list value, such as `[1, "two"] -> list<mixed>` or `[{"amt":1}, {"amt":"x"}] -> list<record<amt:mixed>>`. It must not become a top-level scalar escape hatch for incompatible expression branches: future checks for `if(cond, 1, "x")` or `coalesce(1, "x")` should use strict unification and reject or apply an explicitly documented rule.
+
+Strict and permissive APIs must remain distinct:
+
+* Loader inference and current execution can still use permissive table append/widening where documented. `Column.Append` may widen incompatible values to `string`.
+* JSON/JSONL recursive loading uses strict schema checks for native type conflicts, with the single-array `mixed` exception described above.
+* `AddRowTyped` validates against a known schema and must not stringify incompatible values.
+* Fixed-schema engine execution and broader planner use belong to later tickets; do not silently convert existing engine operators from permissive to strict append without updating the operator-level schema contract and tests.
+
+Null-only finalization remains part of the user-visible contract: when a schema position is still `TypeNull` at finalization, it renders as nullable string. This is why all-null CSV columns, header-only CSV columns, empty lists, and null-only nested fields fall back to `string?` in schema strings where a concrete type is required.
+
+---
+
 ## Syntax rules
 
 Every operation uses one of three argument styles. The style is fixed per op — do not mix them.
