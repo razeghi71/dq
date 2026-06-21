@@ -210,8 +210,8 @@ dq 'users.csv | filter { age > 30 } | count'
 
 ```bash
 dq 'users.csv | distinct'             # unique rows
-dq 'users.csv | distinct city'        # unique cities (keeps first occurrence)
-dq 'users.csv | distinct city, age'    # unique city+age combinations
+dq 'users.csv | distinct city'        # one-column table of unique cities
+dq 'users.csv | distinct city, age'    # unique city+age pairs only
 ```
 
 ### `rename` - Rename columns

@@ -686,12 +686,12 @@ dq 'users.csv | filter { age > 20 } | count'
 
 ### 11. `distinct [col1, col2, ...]`
 
-Return unique rows. If columns are specified, deduplicates by those columns. If no columns are given, deduplicates by the entire row.
+Return unique rows. With no columns, `distinct` deduplicates the entire current row and preserves the full schema. With columns, `distinct col1, col2` first projects to those columns using the same path binding, output naming, and schema rules as `select`, then deduplicates the projected tuples. First-seen key order is preserved, but non-key columns are not retained.
 
 ```
 dq 'users.csv | distinct'                // unique rows
-dq 'users.csv | distinct city'           // unique cities
-dq 'users.csv | distinct city, age'      // unique combinations
+dq 'users.csv | distinct city'           // one-column table of unique cities
+dq 'users.csv | distinct city, age'      // city and age columns only
 ```
 
 ### 12. `rename old=new [, old2=new2 ...]`

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/razeghi71/dq/ast"
@@ -132,6 +133,89 @@ func columnSchemas(t *table.Table) []*table.TypeDescriptor {
 		schemas[i] = t.Col(i).Schema()
 	}
 	return schemas
+}
+
+func canonicalTupleKey(parts []string) string {
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	size := 0
+	for _, part := range parts {
+		size += len(part) + 21
+	}
+	var b strings.Builder
+	b.Grow(size)
+	var buf [20]byte
+	for _, part := range parts {
+		n := strconv.AppendInt(buf[:0], int64(len(part)), 10)
+		b.Write(n)
+		b.WriteByte(':')
+		b.WriteString(part)
+	}
+	return b.String()
+}
+
+type plannedProjection struct {
+	path []string
+}
+
+type projectionPlan struct {
+	cols        []string
+	schemas     []*table.TypeDescriptor
+	projections []plannedProjection
+	topLevelIdx []int
+}
+
+func planProjections(opName string, paths [][]string, t *table.Table) (*projectionPlan, error) {
+	plan := &projectionPlan{
+		cols:        make([]string, 0, len(paths)),
+		schemas:     make([]*table.TypeDescriptor, len(paths)),
+		projections: make([]plannedProjection, len(paths)),
+		topLevelIdx: make([]int, len(paths)),
+	}
+	topLevelOnly := true
+	for i, path := range paths {
+		bound, err := bindColumnPath(t, path, &ast.ColumnExpr{Path: path})
+		if err != nil {
+			return nil, fmt.Errorf("%s %q: %w", opName, strings.Join(path, "."), err)
+		}
+		if err := validatePathDoesNotTraverseUnion(opName, t, path); err != nil {
+			return nil, err
+		}
+		base := pathToColumnName(path)
+		name := uniqueColumnName(base, plan.cols)
+		plan.cols = append(plan.cols, name)
+		plan.schemas[i] = bound.typ
+		plan.projections[i] = plannedProjection{path: path}
+		if len(path) == 1 {
+			plan.topLevelIdx[i] = bound.topIndex
+		} else {
+			topLevelOnly = false
+		}
+	}
+	if !topLevelOnly {
+		plan.topLevelIdx = nil
+	}
+	return plan, nil
+}
+
+func planTopLevelProjections(paths [][]string, t *table.Table) ([]int, []string, bool, error) {
+	for _, path := range paths {
+		if len(path) != 1 {
+			return nil, nil, false, nil
+		}
+	}
+	indices := make([]int, len(paths))
+	cols := make([]string, 0, len(paths))
+	for i, path := range paths {
+		idx := t.ColIndex(path[0])
+		if idx < 0 {
+			return nil, nil, false, fmt.Errorf("select %q: %w", strings.Join(path, "."), columnNotFoundError(path[0], t))
+		}
+		indices[i] = idx
+		cols = append(cols, uniqueColumnName(path[0], cols))
+	}
+	return indices, cols, true, nil
 }
 
 func unionBeforePathEnd(t *table.Table, path []string) *table.TypeDescriptor {
@@ -286,34 +370,21 @@ func compareValues(a, b table.Value) int {
 }
 
 func execSelect(o *ast.SelectOp, t *table.Table) (*table.Table, error) {
-	var resultCols []string
-	boundPaths := make([]*boundColumn, len(o.Columns))
-	for _, path := range o.Columns {
-		bound, err := bindColumnPath(t, path, &ast.ColumnExpr{Path: path})
+	if indices, cols, ok, err := planTopLevelProjections(o.Columns, t); ok || err != nil {
 		if err != nil {
-			return nil, fmt.Errorf("select %q: %w", strings.Join(path, "."), err)
-		}
-		if err := validatePathDoesNotTraverseUnion("select", t, path); err != nil {
 			return nil, err
 		}
-		boundPaths[len(resultCols)] = bound
-		base := pathToColumnName(path)
-		name := uniqueColumnName(base, resultCols)
-		resultCols = append(resultCols, name)
+		return t.SelectCols(indices, cols), nil
 	}
-	if indices, ok := topLevelSelectIndices(o.Columns, t); ok {
-		return t.SelectCols(indices, resultCols), nil
+	plan, err := planProjections("select", o.Columns, t)
+	if err != nil {
+		return nil, err
 	}
-
-	schemas := make([]*table.TypeDescriptor, len(o.Columns))
-	for i, bound := range boundPaths {
-		schemas[i] = bound.typ
-	}
-	result := table.NewTableWithSchemas(resultCols, schemas)
+	result := table.NewTableWithSchemas(plan.cols, plan.schemas)
 	for i := 0; i < t.NumRows; i++ {
-		vals := make([]table.Value, len(o.Columns))
-		for j, path := range o.Columns {
-			v, err := resolveColumnPath(path, t, i)
+		vals := make([]table.Value, len(plan.projections))
+		for j, projection := range plan.projections {
+			v, err := resolveColumnPath(projection.path, t, i)
 			if err != nil {
 				return nil, fmt.Errorf("select: %w", err)
 			}
@@ -324,21 +395,6 @@ func execSelect(o *ast.SelectOp, t *table.Table) (*table.Table, error) {
 		}
 	}
 	return result, nil
-}
-
-func topLevelSelectIndices(paths [][]string, t *table.Table) ([]int, bool) {
-	indices := make([]int, len(paths))
-	for i, path := range paths {
-		if len(path) != 1 {
-			return nil, false
-		}
-		idx := t.ColIndex(path[0])
-		if idx < 0 {
-			return nil, false
-		}
-		indices[i] = idx
-	}
-	return indices, true
 }
 
 func execFilter(o *ast.FilterOp, t *table.Table) (*table.Table, error) {
@@ -686,35 +742,78 @@ func execDescribe(t *table.Table) *table.Table {
 }
 
 func execDistinct(o *ast.DistinctOp, t *table.Table) (*table.Table, error) {
-	for _, path := range o.Columns {
-		if _, err := bindColumnPath(t, path, &ast.ColumnExpr{Path: path}); err != nil {
-			return nil, fmt.Errorf("distinct %q: %w", strings.Join(path, "."), err)
-		}
-		if err := validatePathDoesNotTraverseUnion("distinct", t, path); err != nil {
+	seen := make(map[string]bool)
+	if len(o.Columns) > 0 {
+		plan, err := planProjections("distinct", o.Columns, t)
+		if err != nil {
 			return nil, err
 		}
+		result := table.NewTableWithSchemas(plan.cols, plan.schemas)
+		if plan.topLevelIdx != nil {
+			for i := 0; i < t.NumRows; i++ {
+				var key string
+				if len(plan.topLevelIdx) == 1 {
+					key = table.CanonicalKey(t.Col(plan.topLevelIdx[0]).Get(i))
+				} else {
+					keyParts := make([]string, len(plan.topLevelIdx))
+					for j, idx := range plan.topLevelIdx {
+						keyParts[j] = table.CanonicalKey(t.Col(idx).Get(i))
+					}
+					key = canonicalTupleKey(keyParts)
+				}
+				if !seen[key] {
+					seen[key] = true
+					vals := make([]table.Value, len(plan.topLevelIdx))
+					for j, idx := range plan.topLevelIdx {
+						vals[j] = t.Col(idx).Get(i)
+					}
+					if err := result.AddRowTyped(vals); err != nil {
+						return nil, fmt.Errorf("distinct: %w", err)
+					}
+				}
+			}
+			return result, nil
+		}
+		for i := 0; i < t.NumRows; i++ {
+			vals := make([]table.Value, len(plan.projections))
+			var key string
+			var keyParts []string
+			if len(plan.projections) > 1 {
+				keyParts = make([]string, len(plan.projections))
+			}
+			for j, projection := range plan.projections {
+				v, err := resolveColumnPath(projection.path, t, i)
+				if err != nil {
+					return nil, fmt.Errorf("distinct %q: %w", strings.Join(projection.path, "."), err)
+				}
+				vals[j] = v
+				if len(plan.projections) == 1 {
+					key = table.CanonicalKey(v)
+				} else {
+					keyParts[j] = table.CanonicalKey(v)
+				}
+			}
+			if len(plan.projections) > 1 {
+				key = canonicalTupleKey(keyParts)
+			}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			if err := result.AddRowTyped(vals); err != nil {
+				return nil, fmt.Errorf("distinct: %w", err)
+			}
+		}
+		return result, nil
 	}
-	seen := make(map[string]bool)
+
 	result := table.NewTableWithSchemas(t.Columns, columnSchemas(t))
 	for i := 0; i < t.NumRows; i++ {
-		var key string
-		if len(o.Columns) > 0 {
-			parts := make([]string, len(o.Columns))
-			for j, path := range o.Columns {
-				v, err := resolveColumnPath(path, t, i)
-				if err != nil {
-					return nil, fmt.Errorf("distinct %q: %w", strings.Join(path, "."), err)
-				}
-				parts[j] = table.CanonicalKey(v)
-			}
-			key = strings.Join(parts, "\x00")
-		} else {
-			parts := make([]string, len(t.Columns))
-			for j := range t.Columns {
-				parts[j] = table.CanonicalKey(t.Col(j).Get(i))
-			}
-			key = strings.Join(parts, "\x00")
+		parts := make([]string, len(t.Columns))
+		for j := range t.Columns {
+			parts[j] = table.CanonicalKey(t.Col(j).Get(i))
 		}
+		key := canonicalTupleKey(parts)
 
 		if !seen[key] {
 			seen[key] = true

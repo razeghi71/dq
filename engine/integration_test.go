@@ -189,6 +189,9 @@ func assertFlatQueries(t *testing.T, file string) {
 
 	t.Run("distinct", func(t *testing.T) {
 		result := loadAndQuery(t, file, "distinct city")
+		if len(result.Columns) != 1 || result.Columns[0] != "city" {
+			t.Fatalf("expected only city column, got %v", result.Columns)
+		}
 		if result.NumRows != 3 {
 			t.Errorf("expected 3 distinct cities, got %d", result.NumRows)
 		}
@@ -873,6 +876,9 @@ func assertNestedDotPathOps(t *testing.T, file string) {
 
 	t.Run("distinct_dot_path", func(t *testing.T) {
 		result := loadAndQuery(t, file, "distinct address.city")
+		if len(result.Columns) != 1 || result.Columns[0] != "address_city" {
+			t.Fatalf("expected only address_city column, got %v", result.Columns)
+		}
 		if result.NumRows != 3 {
 			t.Fatalf("expected 3 distinct cities, got %d", result.NumRows)
 		}

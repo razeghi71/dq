@@ -335,8 +335,6 @@ func TestDescribeAfterShapeChangingOps(t *testing.T) {
 	t.Run("distinct", func(t *testing.T) {
 		result := runQuery(t, usersTable(), "distinct city | describe")
 		assertDescribeRows(t, result, map[string]describeMeta{
-			"name": {typ: "string", rows: 3},
-			"age":  {typ: "int", rows: 3},
 			"city": {typ: "string", rows: 3},
 		})
 	})
@@ -365,6 +363,9 @@ func TestDescribeAfterJoin(t *testing.T) {
 
 func TestDistinct(t *testing.T) {
 	result := runQuery(t, usersTable(), "distinct city")
+	if len(result.Columns) != 1 || result.Columns[0] != "city" {
+		t.Fatalf("expected only city column, got %v", result.Columns)
+	}
 	if result.NumRows != 3 {
 		t.Errorf("expected 3 distinct cities, got %d", result.NumRows)
 	}
@@ -390,6 +391,9 @@ func TestDistinctWithoutColumnsDeduplicatesFullRows(t *testing.T) {
 
 func TestDistinctCommaColumnList(t *testing.T) {
 	result := runQuery(t, usersTable(), "distinct city, age")
+	if len(result.Columns) != 2 || result.Columns[0] != "city" || result.Columns[1] != "age" {
+		t.Fatalf("expected city, age columns, got %v", result.Columns)
+	}
 	if result.NumRows != 6 {
 		t.Errorf("expected 6 distinct city+age pairs, got %d", result.NumRows)
 	}

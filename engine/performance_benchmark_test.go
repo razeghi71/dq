@@ -38,6 +38,18 @@ func benchmarkFlatRows(rows int) *table.Table {
 	return tbl
 }
 
+func benchmarkDistinctFlatRows(rows int) *table.Table {
+	tbl := table.NewTable([]string{"name", "age", "city"})
+	for i := 0; i < rows; i++ {
+		tbl.AddRow([]table.Value{
+			table.StrVal(fmt.Sprintf("user-%06d", i)),
+			table.IntVal(int64(i % 100)),
+			table.StrVal(fmt.Sprintf("city-%02d", i%20)),
+		})
+	}
+	return tbl
+}
+
 func benchmarkNestedRows(rows int) *table.Table {
 	tbl := table.NewTable([]string{"name", "profile"})
 	for i := 0; i < rows; i++ {
@@ -78,4 +90,20 @@ func BenchmarkInterpretedNestedStringTransform(b *testing.B) {
 
 func BenchmarkNestedDotPathFilter(b *testing.B) {
 	benchmarkPipeline(b, benchmarkNestedRows(10000), "filter { profile.score > 40 } | count")
+}
+
+func BenchmarkDistinctTopLevelSingleKey(b *testing.B) {
+	benchmarkPipeline(b, benchmarkDistinctFlatRows(10000), "distinct city | count")
+}
+
+func BenchmarkDistinctTopLevelMultiKey(b *testing.B) {
+	benchmarkPipeline(b, benchmarkDistinctFlatRows(10000), "distinct city, age | count")
+}
+
+func BenchmarkDistinctNestedSingleKey(b *testing.B) {
+	benchmarkPipeline(b, benchmarkNestedRows(10000), "distinct profile.city | count")
+}
+
+func BenchmarkDistinctFullRow(b *testing.B) {
+	benchmarkPipeline(b, benchmarkDistinctFlatRows(10000), "distinct | count")
 }
