@@ -64,6 +64,18 @@ func BenchmarkStringPredicateFilter(b *testing.B) {
 	benchmarkPipeline(b, benchmarkFlatRows(10000), `filter { str_contains(name, "999") } | count`)
 }
 
+func BenchmarkInterpretedUpperTransform(b *testing.B) {
+	benchmarkPipeline(b, benchmarkFlatRows(10000), "transform u = upper(name) | select u | count")
+}
+
+func BenchmarkInterpretedRegexFilter(b *testing.B) {
+	benchmarkPipeline(b, benchmarkFlatRows(10000), `filter { matches(name, "9$") } | count`)
+}
+
+func BenchmarkInterpretedNestedStringTransform(b *testing.B) {
+	benchmarkPipeline(b, benchmarkFlatRows(10000), "transform u = upper(trim(name)) | select u | count")
+}
+
 func BenchmarkNestedDotPathFilter(b *testing.B) {
 	benchmarkPipeline(b, benchmarkNestedRows(10000), "filter { profile.score > 40 } | count")
 }

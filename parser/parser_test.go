@@ -238,18 +238,18 @@ func TestParseListExprEmpty(t *testing.T) {
 	}
 }
 
-func TestParseListExprCaseInsensitiveConstructor(t *testing.T) {
+func TestParseListExprConstructorIsCaseSensitive(t *testing.T) {
 	q, err := Parse("users.csv | transform xs = LIST(1, 2)")
 	if err != nil {
 		t.Fatal(err)
 	}
 	tr := q.Ops[0].(*ast.TransformOp)
-	ls, ok := tr.Assignments[0].Expr.(*ast.ListExpr)
+	call, ok := tr.Assignments[0].Expr.(*ast.FuncCallExpr)
 	if !ok {
-		t.Fatalf("expected ListExpr, got %T", tr.Assignments[0].Expr)
+		t.Fatalf("expected FuncCallExpr, got %T", tr.Assignments[0].Expr)
 	}
-	if len(ls.Elements) != 2 {
-		t.Fatalf("expected 2 elements, got %d", len(ls.Elements))
+	if call.Name != "LIST" {
+		t.Fatalf("expected function name LIST, got %q", call.Name)
 	}
 }
 
@@ -308,6 +308,38 @@ func TestParseFunctionCallsWithoutTrailingComma(t *testing.T) {
 		t.Run(query, func(t *testing.T) {
 			if _, err := Parse(query); err != nil {
 				t.Fatalf("expected valid function call query, got error: %v", err)
+			}
+		})
+	}
+}
+
+func TestParseListAndStructConstructorsAreCaseSensitive(t *testing.T) {
+	cases := []struct {
+		query string
+		name  string
+	}{
+		{"users.csv | transform xs = List(1)", "List"},
+		{"users.csv | transform xs = LIST(1)", "LIST"},
+		{"users.csv | transform rec = Struct(1)", "Struct"},
+		{"users.csv | transform rec = STRUCT(1)", "STRUCT"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			q, err := Parse(tc.query)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			tr, ok := q.Ops[0].(*ast.TransformOp)
+			if !ok || len(tr.Assignments) != 1 {
+				t.Fatalf("expected one transform assignment, got %#v", q.Ops)
+			}
+			call, ok := tr.Assignments[0].Expr.(*ast.FuncCallExpr)
+			if !ok {
+				t.Fatalf("expected uppercase constructor spelling to parse as function call, got %#v", tr.Assignments[0].Expr)
+			}
+			if call.Name != tc.name {
+				t.Fatalf("call name = %q, want %q", call.Name, tc.name)
 			}
 		})
 	}

@@ -791,6 +791,30 @@ Output format names are not lexer keywords — only recognized as the final `|`-
 
 These are available in `transform` and `reduce` expressions:
 
+Built-in function names are case-sensitive. Internally, scalar function calls,
+lazy special-form calls, and aggregate function calls are declared in one builtin
+catalog. That catalog is the source of truth for call-builtin existence,
+category, planning-time signature checks, interpreted typed runtime hooks, and
+aggregate runtime hooks. Expression constructs that are not function calls, such
+as `list(...)` and `struct(...)`, remain parser AST forms outside the catalog.
+Adding or changing a call builtin must update the catalog entry rather than
+adding an independent planner or runtime switch arm.
+
+Catalog category invariants:
+* Scalar builtins have a signature checker and `TypedEval` interpreted runtime
+  hook; they must not have an aggregate hook.
+* Special forms have a signature checker and lazy `TypedEval` interpreted
+  runtime hook. `if` and `coalesce` type-check all arguments during planning
+  but evaluate only the selected/needed runtime arguments.
+* Aggregate builtins have a signature checker and aggregate metadata/runtime
+  hook; they must not have `TypedEval`. Aggregates are valid only in `reduce`,
+  and scalar/special-form functions are rejected in reduce expressions unless
+  wrapped by an aggregate that accepts a column path.
+* Compiled fast paths may optimize only cataloged scalar builtins with the
+  expected typed shape and a `TypedEval` hook. Fast paths are hand-written
+  switch arms gated by the catalog; the compiled result must remain equivalent
+  to the interpreted catalog evaluator.
+
 **Aggregations (for `reduce` only):**
 * `count()` — number of rows in group
 * `sum(col)` — sum of numeric values (nulls ignored)

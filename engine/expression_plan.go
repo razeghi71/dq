@@ -76,6 +76,7 @@ type typedExpr struct {
 	bound    boundExpr
 	raw      ast.Expr
 	typ      *table.TypeDescriptor
+	callEval typedCallEvaluator
 	left     *typedExpr
 	right    *typedExpr
 	operand  *typedExpr
@@ -89,50 +90,6 @@ type typedStructField struct {
 	name string
 	raw  ast.StructField
 	expr typedExpr
-}
-
-type functionCategory int
-
-const (
-	scalarFunction functionCategory = iota
-	specialFormFunction
-	aggregateFunction
-)
-
-type functionSpec struct {
-	name     string
-	category functionCategory
-	check    func(args []typedExpr) (*table.TypeDescriptor, error)
-}
-
-var scalarFunctionSpecs = map[string]functionSpec{
-	"upper":        unaryStringSpec("upper"),
-	"lower":        unaryStringSpec("lower"),
-	"trim":         unaryStringSpec("trim"),
-	"str_len":      unaryStringToIntSpec("str_len"),
-	"year":         unaryStringToIntSpec("year"),
-	"month":        unaryStringToIntSpec("month"),
-	"day":          unaryStringToIntSpec("day"),
-	"substr":       {name: "substr", category: scalarFunction, check: checkSubstrSignature},
-	"str_contains": binaryStringToBoolSpec("str_contains", "substring"),
-	"starts_with":  binaryStringToBoolSpec("starts_with", "prefix"),
-	"ends_with":    binaryStringToBoolSpec("ends_with", "suffix"),
-	"matches":      binaryStringToBoolSpec("matches", "regex"),
-	"list_len":     {name: "list_len", category: scalarFunction, check: checkListLenSignature},
-	"list_contains": {
-		name:     "list_contains",
-		category: scalarFunction,
-		check:    checkListContainsSignature,
-	},
-	"coalesce": {name: "coalesce", category: specialFormFunction, check: checkCoalesceSignature},
-	"if":       {name: "if", category: specialFormFunction, check: checkIfSignature},
-	"count":    {name: "count", category: aggregateFunction},
-	"sum":      {name: "sum", category: aggregateFunction},
-	"avg":      {name: "avg", category: aggregateFunction},
-	"min":      {name: "min", category: aggregateFunction},
-	"max":      {name: "max", category: aggregateFunction},
-	"first":    {name: "first", category: aggregateFunction},
-	"last":     {name: "last", category: aggregateFunction},
 }
 
 func bindExpression(expr ast.Expr, t *table.Table) (boundExpr, error) {
@@ -281,12 +238,12 @@ func bindReduceExpression(expr ast.Expr, nestedSchema *table.TypeDescriptor) (bo
 		}
 		return &boundUnary{raw: e, operand: operand}, nil
 	case *ast.FuncCallExpr:
-		spec, ok := scalarFunctionSpecs[e.Name]
+		spec, ok := builtinCatalog[e.Name]
 		if !ok {
 			return nil, fmt.Errorf("unknown function %q", e.Name)
 		}
-		if spec.category != aggregateFunction {
-			return nil, fmt.Errorf("non-aggregate function %q in reduce context", e.Name)
+		if spec.Category != builtinAggregate {
+			return nil, nonAggregateReduceFunctionError(e.Name)
 		}
 		args, err := bindAggregateArgs(e, nestedSchema)
 		if err != nil {
@@ -449,18 +406,18 @@ func typeCheckExpression(expr boundExpr) (typedExpr, error) {
 			}
 			args[i] = typed
 		}
-		spec, ok := scalarFunctionSpecs[e.raw.Name]
+		spec, ok := builtinCatalog[e.raw.Name]
 		if !ok {
 			return typedExpr{}, fmt.Errorf("unknown function %q", e.raw.Name)
 		}
-		if spec.category == aggregateFunction {
-			return typedExpr{}, fmt.Errorf("aggregate function %q can only be used inside 'reduce'", e.raw.Name)
+		if spec.Category == builtinAggregate {
+			return typedExpr{}, aggregateOutsideReduceError(e.raw.Name)
 		}
-		typ, err := spec.check(args)
+		typ, err := spec.Check(args)
 		if err != nil {
 			return typedExpr{}, err
 		}
-		out := typedExpr{bound: expr, raw: e.raw, typ: typ, args: args}
+		out := typedExpr{bound: expr, raw: e.raw, typ: typ, args: args, callEval: spec.TypedEval}
 		switch e.raw.Name {
 		case "coalesce":
 			if typedArgsNeedCoercion(args, typ) {
@@ -556,14 +513,14 @@ func typeCheckReduceExpression(expr boundExpr) (typedExpr, error) {
 			}
 			args[i] = typed
 		}
-		spec, ok := scalarFunctionSpecs[e.raw.Name]
+		spec, ok := builtinCatalog[e.raw.Name]
 		if !ok {
 			return typedExpr{}, fmt.Errorf("unknown function %q", e.raw.Name)
 		}
-		if spec.category != aggregateFunction {
-			return typedExpr{}, fmt.Errorf("non-aggregate function %q in reduce context", e.raw.Name)
+		if spec.Category != builtinAggregate {
+			return typedExpr{}, nonAggregateReduceFunctionError(e.raw.Name)
 		}
-		typ, err := checkAggregateSignature(e.raw.Name, args)
+		typ, err := spec.Check(args)
 		if err != nil {
 			return typedExpr{}, err
 		}
@@ -673,8 +630,8 @@ func checkUnarySignature(op string, operand typedExpr) (*table.TypeDescriptor, e
 	}
 }
 
-func unaryStringSpec(name string) functionSpec {
-	return functionSpec{name: name, category: scalarFunction, check: func(args []typedExpr) (*table.TypeDescriptor, error) {
+func unaryStringSpec(name string) func(args []typedExpr) (*table.TypeDescriptor, error) {
+	return func(args []typedExpr) (*table.TypeDescriptor, error) {
 		if len(args) != 1 {
 			return nil, fmt.Errorf("%s() takes 1 argument, got %d", name, len(args))
 		}
@@ -682,11 +639,11 @@ func unaryStringSpec(name string) functionSpec {
 			return nil, fmt.Errorf("%s() requires a string, got %s", name, schemaString(args[0].typ))
 		}
 		return nullableSchema(table.TypeString, args[0].typ), nil
-	}}
+	}
 }
 
-func unaryStringToIntSpec(name string) functionSpec {
-	return functionSpec{name: name, category: scalarFunction, check: func(args []typedExpr) (*table.TypeDescriptor, error) {
+func unaryStringToIntSpec(name string) func(args []typedExpr) (*table.TypeDescriptor, error) {
+	return func(args []typedExpr) (*table.TypeDescriptor, error) {
 		if len(args) != 1 {
 			return nil, fmt.Errorf("%s() takes 1 argument, got %d", name, len(args))
 		}
@@ -694,11 +651,11 @@ func unaryStringToIntSpec(name string) functionSpec {
 			return nil, fmt.Errorf("%s() requires a string, got %s", name, schemaString(args[0].typ))
 		}
 		return nullableSchema(table.TypeInt, args[0].typ), nil
-	}}
+	}
 }
 
-func binaryStringToBoolSpec(name, secondArgLabel string) functionSpec {
-	return functionSpec{name: name, category: scalarFunction, check: func(args []typedExpr) (*table.TypeDescriptor, error) {
+func binaryStringToBoolSpec(name, secondArgLabel string) func(args []typedExpr) (*table.TypeDescriptor, error) {
+	return func(args []typedExpr) (*table.TypeDescriptor, error) {
 		if len(args) != 2 {
 			return nil, fmt.Errorf("%s() takes 2 arguments, got %d", name, len(args))
 		}
@@ -709,7 +666,7 @@ func binaryStringToBoolSpec(name, secondArgLabel string) functionSpec {
 			return nil, fmt.Errorf("%s() requires a string %s, got %s", name, secondArgLabel, schemaString(args[1].typ))
 		}
 		return nullableSchema(table.TypeBool, args[0].typ, args[1].typ), nil
-	}}
+	}
 }
 
 func checkSubstrSignature(args []typedExpr) (*table.TypeDescriptor, error) {

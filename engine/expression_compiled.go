@@ -267,6 +267,10 @@ func comparisonPredicateResult(op string, cmp int, unordered bool) bool {
 }
 
 func compileFastStringPredicate(name string, args []typedExpr, t *table.Table) (rowPredicateEvaluator, bool) {
+	spec, ok := builtinCatalog[name]
+	if !ok || spec.Category != builtinScalar || spec.TypedEval == nil {
+		return nil, false
+	}
 	if len(args) != 2 {
 		return nil, false
 	}

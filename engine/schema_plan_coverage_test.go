@@ -482,9 +482,8 @@ func TestRuntimeFunctionEdgeDiagnostics(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := evalScalarFunction(tc.fn, len(tc.args), func(i int) (table.Value, error) {
-				return tc.args[i], nil
-			})
+			spec := builtinCatalog[tc.fn]
+			got, err := spec.TypedEval(typedExprsForValues(tc.args), &EvalContext{})
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("expected error containing %q, got value=%v err=%v", tc.wantErr, got, err)

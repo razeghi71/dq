@@ -1211,10 +1211,10 @@ func (p *Parser) parsePrimary() (ast.Expr, error) {
 		firstTok := p.advance()
 		// Check if it's a function call
 		if p.peek().Type == lexer.TokenLParen {
-			if strings.EqualFold(tok.Val, "struct") {
+			if tok.Val == "struct" {
 				return p.parseStructExpr(firstTok)
 			}
-			if strings.EqualFold(tok.Val, "list") {
+			if tok.Val == "list" {
 				return p.parseListExpr(firstTok)
 			}
 			return p.parseFuncCall(firstTok)
@@ -1328,7 +1328,7 @@ func (p *Parser) parseListExpr(nameTok lexer.Token) (ast.Expr, error) {
 
 func (p *Parser) parseFuncCall(nameTok lexer.Token) (ast.Expr, error) {
 	p.advance() // consume (
-	name := strings.ToLower(nameTok.Val)
+	name := nameTok.Val
 
 	var args []ast.Expr
 	if p.peek().Type != lexer.TokenRParen {

@@ -7,6 +7,8 @@ import (
 	"github.com/razeghi71/dq/table"
 )
 
+type typedCallEvaluator func(args []typedExpr, ctx *EvalContext) (table.Value, error)
+
 func evalTypedExpression(expr typedExpr, ctx *EvalContext) (table.Value, error) {
 	var (
 		v   table.Value
@@ -22,7 +24,7 @@ func evalTypedExpression(expr typedExpr, ctx *EvalContext) (table.Value, error) 
 	case *boundUnary:
 		v, err = evalTypedUnary(e.raw.Op, expr.operand, ctx)
 	case *boundCall:
-		v, err = evalTypedCall(e.raw.Name, expr.args, ctx)
+		v, err = evalTypedCall(expr, ctx)
 	case *boundStruct:
 		v, err = evalTypedStruct(expr.fields, ctx)
 	case *boundList:
@@ -118,10 +120,14 @@ func evalTypedUnary(op string, operandExpr *typedExpr, ctx *EvalContext) (table.
 	}
 }
 
-func evalTypedCall(name string, args []typedExpr, ctx *EvalContext) (table.Value, error) {
-	return evalScalarFunction(name, len(args), func(i int) (table.Value, error) {
-		return evalTypedExpression(args[i], ctx)
-	})
+func evalTypedCall(expr typedExpr, ctx *EvalContext) (table.Value, error) {
+	if expr.callEval == nil {
+		if call, ok := expr.bound.(*boundCall); ok {
+			return table.Null(), fmt.Errorf("missing runtime evaluator for function %q", call.raw.Name)
+		}
+		return table.Null(), fmt.Errorf("missing runtime evaluator for function call")
+	}
+	return expr.callEval(expr.args, ctx)
 }
 
 func evalTypedStruct(fields []typedStructField, ctx *EvalContext) (table.Value, error) {

@@ -334,6 +334,7 @@ General — `coalesce(a, b, ...)`, `if(cond, then, else)`, `struct(field = expr,
 Dates — `year(d)`, `month(d)`, `day(d)`
 
 Indexes are 0-based. `matches()` uses RE2 regex (unanchored by default; use `^...$` for a full-string match).
+Function names are case-sensitive, and aggregate functions are only valid in `reduce`.
 
 **Operators** — in any expression:
 `+`, `-`, `*`, `/`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `and`, `or`, `not`
@@ -348,6 +349,8 @@ dq 'logs.csv | filter { str_contains(upper(message), "ERROR") }'
 dq 'logs.csv | filter { starts_with(level, "WARN") }'
 dq 'access.csv | filter { ends_with(path, ".json") }'
 dq 'logs.csv | filter { matches(message, "timeout|refused") }'
+dq 'users.csv | transform x = Upper(name)' # error: unknown function "Upper"
+dq 'users.csv | transform n = count()'     # error: count is reduce-only
 ```
 
 ## Nested records
