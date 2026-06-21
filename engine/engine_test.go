@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -102,6 +103,35 @@ func TestSortMixedDirections(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("row %d: expected %v, got %v", i, want[i], got[i])
 		}
+	}
+}
+
+func TestSortNullsLastInAscendingAndDescending(t *testing.T) {
+	tbl := table.NewTable([]string{"id", "a"})
+	tbl.AddRow([]table.Value{table.StrVal("two"), table.IntVal(2)})
+	tbl.AddRow([]table.Value{table.StrVal("null"), table.Null()})
+	tbl.AddRow([]table.Value{table.StrVal("one"), table.IntVal(1)})
+
+	cases := []struct {
+		name  string
+		query string
+		want  []string
+	}{
+		{name: "ascending", query: "sort a", want: []string{"one", "two", "null"}},
+		{name: "descending", query: "sort -a", want: []string{"two", "one", "null"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := runQuery(t, tbl, tc.query)
+			if result.NumRows != len(tc.want) {
+				t.Fatalf("row count: got %d, want %d", result.NumRows, len(tc.want))
+			}
+			for i, want := range tc.want {
+				if got := result.GetAt(i, result.ColIndex("id")).Str; got != want {
+					t.Fatalf("row %d id: got %q, want %q; table=%s", i, got, want, result.String())
+				}
+			}
+		})
 	}
 }
 
@@ -340,6 +370,24 @@ func TestDistinct(t *testing.T) {
 	}
 }
 
+func TestDistinctWithoutColumnsDeduplicatesFullRows(t *testing.T) {
+	tbl := table.NewTable([]string{"name", "age"})
+	tbl.AddRow([]table.Value{table.StrVal("Alice"), table.IntVal(30)})
+	tbl.AddRow([]table.Value{table.StrVal("Alice"), table.IntVal(30)})
+	tbl.AddRow([]table.Value{table.StrVal("Alice"), table.IntVal(31)})
+
+	result := runQuery(t, tbl, "distinct | sort age")
+	if result.NumRows != 2 {
+		t.Fatalf("expected 2 full-row distinct records, got %d: %s", result.NumRows, result.String())
+	}
+	if got := result.GetAt(0, result.ColIndex("age")); got.Type != table.TypeInt || got.Int != 30 {
+		t.Fatalf("first age: got %v, want 30", got)
+	}
+	if got := result.GetAt(1, result.ColIndex("age")); got.Type != table.TypeInt || got.Int != 31 {
+		t.Fatalf("second age: got %v, want 31", got)
+	}
+}
+
 func TestDistinctCommaColumnList(t *testing.T) {
 	result := runQuery(t, usersTable(), "distinct city, age")
 	if result.NumRows != 6 {
@@ -358,6 +406,29 @@ func TestTransform(t *testing.T) {
 	// Alice: age=30, doubled=60
 	if result.GetAt(0, 3).Int != 60 {
 		t.Errorf("expected 60, got %d", result.GetAt(0, 3).Int)
+	}
+}
+
+func TestAppendOnlyTypedTransformDoesNotAllocatePerRow(t *testing.T) {
+	const rows = 2000
+	tbl := table.NewTable([]string{"age"})
+	for i := 0; i < rows; i++ {
+		tbl.AddRow([]table.Value{table.IntVal(int64(i))})
+	}
+	q, err := parser.Parse("test.csv | transform age2 = age + 1 | select age2 | count")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	var execErr error
+	allocs := testing.AllocsPerRun(20, func() {
+		_, execErr = Execute(q, tbl, nil)
+	})
+	if execErr != nil {
+		t.Fatalf("exec error: %v", execErr)
+	}
+	if allocs > 500 {
+		t.Fatalf("append-only typed transform allocations scale with rows: got %.0f allocations for %d rows", allocs, rows)
 	}
 }
 
@@ -504,9 +575,435 @@ func TestListConstructorWithListContainsUsesStrictElementTypes(t *testing.T) {
 		t.Fatalf("expected all rows to match string element, got %v", got)
 	}
 
-	result = runQuery(t, usersTable(), `filter { list_contains(list(1), "1") } | count`)
+	expectQueryErrContains(t, usersTable(), `filter { list_contains(list(1), "1") } | count`, "list_contains() element type mismatch")
+}
+
+func TestExpressionNumericPromotionRuntimeMatchesPlanner(t *testing.T) {
+	result := runQuery(t, usersTable(), `filter { age == 30.0 } | count`)
+	if got := result.Get(0, "count"); got.Type != table.TypeInt || got.Int != 1 {
+		t.Fatalf("age == 30.0: got %v, want count 1", got)
+	}
+
+	result = runQuery(t, usersTable(), `filter { age < 30.5 } | count`)
+	if got := result.Get(0, "count"); got.Type != table.TypeInt || got.Int != 4 {
+		t.Fatalf("age < 30.5: got %v, want count 4", got)
+	}
+
+	result = runQuery(t, usersTable(), `filter { list_contains(list(1), 1.0) } | count`)
+	if got := result.Get(0, "count"); got.Type != table.TypeInt || got.Int != int64(usersTable().NumRows) {
+		t.Fatalf("list_contains(list(1), 1.0): got %v, want all rows", got)
+	}
+
+	result = runQuery(t, usersTable(), `filter { list_contains(list(struct(x = 1)), struct(x = 1.0)) } | count`)
+	if got := result.Get(0, "count"); got.Type != table.TypeInt || got.Int != int64(usersTable().NumRows) {
+		t.Fatalf("record element numeric promotion: got %v, want all rows", got)
+	}
+}
+
+func TestRecordEqualityRuntimeMatchesPlannedRecordSchema(t *testing.T) {
+	wantAllRows := int64(usersTable().NumRows)
+
+	result := runQuery(t, usersTable(), `filter { if(age == 30, struct(x = 1), struct(x = 1, y = null)) == struct(x = 1, y = null) } | count`)
+	if got := result.Get(0, "count"); got.Type != table.TypeInt || got.Int != wantAllRows {
+		t.Fatalf("inline record comparison: got %v, want count %d", got, wantAllRows)
+	}
+
+	result = runQuery(t, usersTable(), `transform r = if(age == 30, struct(x = 1), struct(x = 1, y = null)) | filter { r == struct(x = 1, y = null) } | count`)
+	if got := result.Get(0, "count"); got.Type != table.TypeInt || got.Int != wantAllRows {
+		t.Fatalf("staged record comparison: got %v, want count %d", got, wantAllRows)
+	}
+
+	result = runQuery(t, usersTable(), `filter { list_contains(list(struct(x = 1, y = null)), struct(x = 1)) } | count`)
+	if got := result.Get(0, "count"); got.Type != table.TypeInt || got.Int != wantAllRows {
+		t.Fatalf("list_contains record comparison: got %v, want count %d", got, wantAllRows)
+	}
+
+	result = runQuery(t, usersTable(), `filter { struct(x = 1) == struct(x = 1, y = 2) } | count`)
 	if got := result.Get(0, "count"); got.Type != table.TypeInt || got.Int != 0 {
-		t.Fatalf("expected no rows for string needle in int list, got %v", got)
+		t.Fatalf("missing non-null record field: got %v, want count 0", got)
+	}
+}
+
+func TestRecordEqualityMissingFieldAdjacentExpressionForms(t *testing.T) {
+	wantAllRows := int64(usersTable().NumRows)
+	trueCases := []struct {
+		name  string
+		query string
+	}{
+		{
+			name:  "symmetric_missing_null_field",
+			query: `filter { struct(x = 1, y = null) == struct(x = 1) } | count`,
+		},
+		{
+			name:  "empty_record_missing_only_null_fields",
+			query: `filter { struct() == struct(y = null) } | count`,
+		},
+		{
+			name:  "nested_record_missing_null_field",
+			query: `filter { struct(n = struct(x = 1)) == struct(n = struct(x = 1, y = null)) } | count`,
+		},
+		{
+			name:  "list_equality_recurses_into_records",
+			query: `filter { list(struct(x = 1)) == list(struct(x = 1, y = null)) } | count`,
+		},
+		{
+			name:  "list_contains_value_has_missing_null_field",
+			query: `filter { list_contains(list(struct(x = 1)), struct(x = 1, y = null)) } | count`,
+		},
+		{
+			name:  "coalesce_result_compares_with_unified_record_schema",
+			query: `filter { coalesce(null, struct(x = 1), struct(x = 1, y = null)) == struct(x = 1, y = null) } | count`,
+		},
+		{
+			name:  "staged_sibling_record_columns_compare_after_transform",
+			query: `transform a = struct(x = 1), b = struct(x = 1, y = null) | filter { a == b } | count`,
+		},
+		{
+			name:  "staged_if_record_compares_to_smaller_shape",
+			query: `transform r = if(age == 30, struct(x = 1), struct(x = 1, y = null)) | filter { r == struct(x = 1) } | count`,
+		},
+	}
+	for _, tc := range trueCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := runQuery(t, usersTable(), tc.query)
+			if got := result.Get(0, "count"); got.Type != table.TypeInt || got.Int != wantAllRows {
+				t.Fatalf("%s: got %v, want count %d", tc.query, got, wantAllRows)
+			}
+		})
+	}
+
+	falseCases := []struct {
+		name  string
+		query string
+	}{
+		{
+			name:  "empty_record_missing_non_null_field",
+			query: `filter { struct() == struct(y = 2) } | count`,
+		},
+		{
+			name:  "nested_record_missing_non_null_field",
+			query: `filter { struct(n = struct(x = 1)) == struct(n = struct(x = 1, y = "present")) } | count`,
+		},
+		{
+			name:  "list_contains_missing_non_null_field",
+			query: `filter { list_contains(list(struct(x = 1)), struct(x = 1, y = 2)) } | count`,
+		},
+		{
+			name:  "list_length_mismatch_remains_false",
+			query: `filter { list(struct(x = 1)) == list(struct(x = 1), struct(x = 1, y = null)) } | count`,
+		},
+	}
+	for _, tc := range falseCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := runQuery(t, usersTable(), tc.query)
+			if got := result.Get(0, "count"); got.Type != table.TypeInt || got.Int != 0 {
+				t.Fatalf("%s: got %v, want count 0", tc.query, got)
+			}
+		})
+	}
+
+	errorCases := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{
+			name:  "common_field_incompatible_types_rejected",
+			query: `filter { false } | filter { struct(x = 1) == struct(x = "1") } | count`,
+			want:  "cannot compare record with record",
+		},
+		{
+			name:  "list_contains_record_element_incompatible_field_rejected",
+			query: `filter { false } | filter { list_contains(list(struct(x = 1)), struct(x = "1")) } | count`,
+			want:  "list_contains() element type mismatch",
+		},
+	}
+	for _, tc := range errorCases {
+		t.Run(tc.name, func(t *testing.T) {
+			expectQueryErrContains(t, usersTable(), tc.query, tc.want)
+		})
+	}
+}
+
+func TestExpressionIntegerComparisonRemainsExactForLargeValues(t *testing.T) {
+	tbl := table.NewTable([]string{"id"})
+	tbl.AddRow([]table.Value{table.IntVal(9007199254740992)})
+	tbl.AddRow([]table.Value{table.IntVal(9007199254740993)})
+
+	result := runQuery(t, tbl, `filter { id == 9007199254740993 } | count`)
+	if got := result.Get(0, "count"); got.Type != table.TypeInt || got.Int != 1 {
+		t.Fatalf("large int exact equality: got %v, want count 1", got)
+	}
+
+	result = runQuery(t, tbl, `filter { id < 9007199254740993 } | count`)
+	if got := result.Get(0, "count"); got.Type != table.TypeInt || got.Int != 1 {
+		t.Fatalf("large int exact ordering: got %v, want count 1", got)
+	}
+}
+
+func TestExpressionMixedNumericComparisonRemainsExactForLargeValues(t *testing.T) {
+	tbl := table.NewTable([]string{"id"})
+	tbl.AddRow([]table.Value{table.IntVal(9007199254740993)})
+
+	assertCount := func(query string, want int64) {
+		t.Helper()
+		result := runQuery(t, tbl, query)
+		if got := result.Get(0, "count"); got.Type != table.TypeInt || got.Int != want {
+			t.Fatalf("%s: got %v, want count %d", query, got, want)
+		}
+	}
+
+	assertCount(`filter { id == 9007199254740992.0 } | count`, 0)
+	assertCount(`filter { id != 9007199254740992.0 } | count`, 1)
+	assertCount(`filter { id > 9007199254740992.0 } | count`, 1)
+	assertCount(`filter { 9007199254740992.0 < id } | count`, 1)
+	assertCount(`filter { id <= 9007199254740992.0 } | count`, 0)
+	assertCount(`filter { list_contains(list(9007199254740993), 9007199254740992.0) } | count`, 0)
+	assertCount(`filter { list_contains(list(9007199254740992.0), id) } | count`, 0)
+	assertCount(`filter { struct(x = id) == struct(x = 9007199254740992.0) } | count`, 0)
+	assertCount(`filter { struct(x = id) != struct(x = 9007199254740992.0) } | count`, 1)
+	assertCount(`filter { list(struct(x = id)) == list(struct(x = 9007199254740992.0)) } | count`, 0)
+}
+
+func TestPlannedNumericPromotionCoercesDirectExpressionValues(t *testing.T) {
+	tbl := table.NewTable([]string{"id"})
+	tbl.AddRow([]table.Value{table.IntVal(9007199254740993)})
+
+	assertCount := func(query string, want int64) {
+		t.Helper()
+		result := runQuery(t, tbl, query)
+		if got := result.Get(0, "count"); got.Type != table.TypeInt || got.Int != want {
+			t.Fatalf("%s: got %v, want count %d", query, got, want)
+		}
+	}
+
+	cases := []struct {
+		name   string
+		direct string
+		staged string
+	}{
+		{
+			name:   "coalesce_promotes_to_planned_float",
+			direct: `filter { coalesce(id, 0.0) == 9007199254740992.0 } | count`,
+			staged: `transform y = coalesce(id, 0.0) | filter { y == 9007199254740992.0 } | count`,
+		},
+		{
+			name:   "if_promotes_to_planned_float",
+			direct: `filter { if(true, id, 0.0) == 9007199254740992.0 } | count`,
+			staged: `transform y = if(true, id, 0.0) | filter { y == 9007199254740992.0 } | count`,
+		},
+		{
+			name:   "list_literal_elements_promote_to_planned_float",
+			direct: `filter { list_contains(list(id, 0.0), 9007199254740992.0) } | count`,
+			staged: `transform xs = list(id, 0.0) | filter { list_contains(xs, 9007199254740992.0) } | count`,
+		},
+		{
+			name:   "record_field_promotes_inside_planned_expression",
+			direct: `filter { struct(x = coalesce(id, 0.0)) == struct(x = 9007199254740992.0) } | count`,
+			staged: `transform r = struct(x = coalesce(id, 0.0)) | filter { r == struct(x = 9007199254740992.0) } | count`,
+		},
+		{
+			name:   "list_record_field_promotes_inside_planned_expression",
+			direct: `filter { list_contains(list(struct(x = id), struct(x = 0.0)), struct(x = 9007199254740992.0)) } | count`,
+			staged: `transform xs = list(struct(x = id), struct(x = 0.0)) | filter { list_contains(xs, struct(x = 9007199254740992.0)) } | count`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertCount(tc.direct, 1)
+			assertCount(tc.staged, 1)
+		})
+	}
+}
+
+func TestPlannedDivisionRuntimeMatchesPlannerAndStagedValues(t *testing.T) {
+	tbl := table.NewTable([]string{"id"})
+	tbl.AddRow([]table.Value{table.IntVal(9007199254740993)})
+
+	assertCount := func(query string, want int64) {
+		t.Helper()
+		result := runQuery(t, tbl, query)
+		if got := result.Get(0, "count"); got.Type != table.TypeInt || got.Int != want {
+			t.Fatalf("%s: got %v, want count %d", query, got, want)
+		}
+	}
+	assertBool := func(query string, want bool) {
+		t.Helper()
+		result := runQuery(t, tbl, query)
+		got := result.Get(0, "ok")
+		if got.Type != table.TypeBool || got.Bool != want {
+			t.Fatalf("%s: got %v, want ok=%v", query, got, want)
+		}
+	}
+	assertFloat := func(query string, want float64) {
+		t.Helper()
+		result := runQuery(t, tbl, query)
+		got := result.Get(0, "y")
+		if got.Type != table.TypeFloat || got.Float != want {
+			t.Fatalf("%s: got %v, want float %v", query, got, want)
+		}
+	}
+
+	assertCount(`filter { (id / 1) == 9007199254740992.0 } | count`, 1)
+	assertCount(`transform y = id / 1 | filter { y == 9007199254740992.0 } | count`, 1)
+	assertBool(`transform ok = (id / 1) == 9007199254740992.0 | select ok`, true)
+	assertBool(`transform y = id / 1 | transform ok = y == 9007199254740992.0 | select ok`, true)
+	assertCount(`filter { list_contains(list(id / 1), 9007199254740992.0) } | count`, 1)
+	assertCount(`filter { struct(y = id / 1) == struct(y = 9007199254740992.0) } | count`, 1)
+	assertFloat(`transform y = id / 1 | select y`, 9007199254740992)
+}
+
+func TestPlannedIntegerArithmeticRuntimePreservesExactIntValues(t *testing.T) {
+	tbl := table.NewTable([]string{"id"})
+	tbl.AddRow([]table.Value{table.IntVal(9007199254740993)})
+
+	result := runQuery(t, tbl, `transform add = id + 0, sub = id - 0, mul = id * 1 | select add, sub, mul`)
+	for _, col := range []string{"add", "sub", "mul"} {
+		got := result.Get(0, col)
+		if got.Type != table.TypeInt || got.Int != 9007199254740993 {
+			t.Fatalf("%s: got %v, want exact int 9007199254740993", col, got)
+		}
+	}
+
+	for _, query := range []string{
+		`filter { id + 0 == 9007199254740993 } | count`,
+		`filter { id - 0 == 9007199254740993 } | count`,
+		`filter { id * 1 == 9007199254740993 } | count`,
+	} {
+		t.Run(query, func(t *testing.T) {
+			result := runQuery(t, tbl, query)
+			if got := result.Get(0, "count"); got.Type != table.TypeInt || got.Int != 1 {
+				t.Fatalf("%s: got %v, want count 1", query, got)
+			}
+		})
+	}
+}
+
+func TestPlannedIntegerArithmeticOverflowErrors(t *testing.T) {
+	cases := []struct {
+		name  string
+		value int64
+		query string
+	}{
+		{name: "add", value: math.MaxInt64, query: `transform y = id + 1 | select y`},
+		{name: "subtract", value: math.MinInt64, query: `transform y = id - 1 | select y`},
+		{name: "multiply", value: math.MaxInt64/2 + 1, query: `transform y = id * 2 | select y`},
+		{name: "unary_negate", value: math.MinInt64, query: `transform y = -id | select y`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl := table.NewTable([]string{"id"})
+			tbl.AddRow([]table.Value{table.IntVal(tc.value)})
+			expectQueryErrContains(t, tbl, tc.query, "integer overflow")
+		})
+	}
+}
+
+func TestPlannedReduceDivisionRuntimeMatchesPlannerAndStagedValues(t *testing.T) {
+	tbl := table.NewTable([]string{"g", "id"})
+	tbl.AddRow([]table.Value{table.StrVal("a"), table.IntVal(9007199254740993)})
+
+	assertCount := func(query string, want int64) {
+		t.Helper()
+		result := runQuery(t, tbl, query)
+		if got := result.Get(0, "count"); got.Type != table.TypeInt || got.Int != want {
+			t.Fatalf("%s: got %v, want count %d", query, got, want)
+		}
+	}
+	assertBool := func(query string, want bool) {
+		t.Helper()
+		result := runQuery(t, tbl, query)
+		got := result.Get(0, "ok")
+		if got.Type != table.TypeBool || got.Bool != want {
+			t.Fatalf("%s: got %v, want ok=%v", query, got, want)
+		}
+	}
+	assertFloat := func(query string, want float64) {
+		t.Helper()
+		result := runQuery(t, tbl, query)
+		got := result.Get(0, "avg_id")
+		if got.Type != table.TypeFloat || got.Float != want {
+			t.Fatalf("%s: got %v, want float %v", query, got, want)
+		}
+	}
+
+	assertBool(`group g | reduce ok = (sum(id) / count()) == 9007199254740992.0 | remove grouped | select ok`, true)
+	assertBool(`group g | reduce avg_id = sum(id) / count() | remove grouped | transform ok = avg_id == 9007199254740992.0 | select ok`, true)
+	assertCount(`group g | reduce avg_id = sum(id) / count() | remove grouped | filter { avg_id == 9007199254740992.0 } | count`, 1)
+	assertFloat(`group g | reduce avg_id = sum(id) / count() | remove grouped | select avg_id`, 9007199254740992)
+}
+
+func TestPlannedReduceIntegerArithmeticRuntimePreservesExactIntValues(t *testing.T) {
+	tbl := table.NewTable([]string{"g", "id"})
+	tbl.AddRow([]table.Value{table.StrVal("a"), table.IntVal(9007199254740993)})
+
+	result := runQuery(t, tbl, `group g | reduce add = sum(id) + 0, sub = sum(id) - 0, mul = sum(id) * 1 | remove grouped | select add, sub, mul`)
+	for _, col := range []string{"add", "sub", "mul"} {
+		got := result.Get(0, col)
+		if got.Type != table.TypeInt || got.Int != 9007199254740993 {
+			t.Fatalf("%s: got %v, want exact int 9007199254740993", col, got)
+		}
+	}
+
+	result = runQuery(t, tbl, `group g | reduce total = sum(id) + 0 | remove grouped | filter { total == 9007199254740993 } | count`)
+	if got := result.Get(0, "count"); got.Type != table.TypeInt || got.Int != 1 {
+		t.Fatalf("staged reduce exact filter: got %v, want count 1", got)
+	}
+}
+
+func TestPlannedReduceIntegerArithmeticOverflowErrors(t *testing.T) {
+	t.Run("sum_overflow", func(t *testing.T) {
+		tbl := table.NewTable([]string{"g", "id"})
+		tbl.AddRow([]table.Value{table.StrVal("a"), table.IntVal(math.MaxInt64)})
+		tbl.AddRow([]table.Value{table.StrVal("a"), table.IntVal(1)})
+		expectQueryErrContains(t, tbl, `group g | reduce total = sum(id) | remove grouped | select total`, "integer overflow")
+	})
+
+	t.Run("reduce_expression_overflow", func(t *testing.T) {
+		tbl := table.NewTable([]string{"g", "id"})
+		tbl.AddRow([]table.Value{table.StrVal("a"), table.IntVal(math.MaxInt64)})
+		expectQueryErrContains(t, tbl, `group g | reduce total = sum(id) + 1 | remove grouped | select total`, "integer overflow")
+	})
+}
+
+func TestPlannedExpressionEvaluatorRunsSharedScalarFunctions(t *testing.T) {
+	tbl := table.NewTable([]string{"name", "code", "xs", "date", "flag", "n"})
+	tbl.AddRow([]table.Value{
+		table.StrVal(" Alice "),
+		table.StrVal("abcdef"),
+		table.ListVal([]table.Value{table.IntVal(1), table.IntVal(2), table.IntVal(3)}),
+		table.StrVal("2024-05-06"),
+		table.BoolVal(true),
+		table.IntVal(7),
+	})
+
+	result := runQuery(t, tbl, `transform neg = -n, not_flag = not flag, upper_name = upper(name), lower_name = lower(name), trimmed = trim(name), name_len = str_len(name), xs_len = list_len(xs), sub = substr(code, 1, 3), has_cd = str_contains(code, "cd"), starts_ab = starts_with(code, "ab"), ends_ef = ends_with(code, "ef"), matched = matches(code, "^[a-z]+$"), year_part = year(date), month_part = month(date), day_part = day(date), chosen = if(flag, n, 0), fallback = coalesce(null, n) | select neg, not_flag, upper_name, lower_name, trimmed, name_len, xs_len, sub, has_cd, starts_ab, ends_ef, matched, year_part, month_part, day_part, chosen, fallback`)
+
+	want := map[string]table.Value{
+		"neg":        table.IntVal(-7),
+		"not_flag":   table.BoolVal(false),
+		"upper_name": table.StrVal(" ALICE "),
+		"lower_name": table.StrVal(" alice "),
+		"trimmed":    table.StrVal("Alice"),
+		"name_len":   table.IntVal(7),
+		"xs_len":     table.IntVal(3),
+		"sub":        table.StrVal("bcd"),
+		"has_cd":     table.BoolVal(true),
+		"starts_ab":  table.BoolVal(true),
+		"ends_ef":    table.BoolVal(true),
+		"matched":    table.BoolVal(true),
+		"year_part":  table.IntVal(2024),
+		"month_part": table.IntVal(5),
+		"day_part":   table.IntVal(6),
+		"chosen":     table.IntVal(7),
+		"fallback":   table.IntVal(7),
+	}
+	for col, wantVal := range want {
+		if got := result.Get(0, col); !table.Equal(got, wantVal) {
+			t.Fatalf("%s: got %v, want %v", col, got, wantVal)
+		}
 	}
 }
 
@@ -515,7 +1012,7 @@ func TestFilterBareListConstructorErrorsAsNonBoolean(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected non-boolean filter error")
 	}
-	if !strings.Contains(err.Error(), "did not return boolean") || !strings.Contains(err.Error(), "[1]") {
+	if !strings.Contains(err.Error(), "filter expression must return bool") || !strings.Contains(err.Error(), "list<int>") {
 		t.Fatalf("expected non-boolean list filter error, got: %v", err)
 	}
 }
@@ -540,17 +1037,41 @@ func TestReduceStructConstructorUnsupported(t *testing.T) {
 	}
 }
 
-func TestTransformListScalarMixedColumnWidensToString(t *testing.T) {
+func TestTransformListScalarMixedColumnRejectsIncompatibleBranches(t *testing.T) {
 	tbl := table.NewTable([]string{"name", "active"})
 	tbl.AddRow([]table.Value{table.StrVal("a"), table.BoolVal(true)})
 	tbl.AddRow([]table.Value{table.StrVal("b"), table.BoolVal(false)})
 
-	result := runQuery(t, tbl, `transform xs = if(active, list(1, 2), "off") | select xs`)
-	if got := result.GetAt(0, 0); got.Type != table.TypeString || got.Str != "[1, 2]" {
-		t.Fatalf("row 0: expected widened string [1, 2], got %v (%s)", got.Type, got.AsString())
+	expectQueryErrContains(t, tbl, `transform xs = if(active, list(1, 2), "off") | select xs`, "if() branches do not have one common type")
+}
+
+func TestTransformRejectsDuplicateAssignmentTargets(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{
+			name:  "with_rows",
+			query: `transform x = 1, x = 2 | select x`,
+			want:  `transform target "x" assigned more than once`,
+		},
+		{
+			name:  "after_zero_row_filter",
+			query: `filter { false } | transform x = 1, x = 2 | describe`,
+			want:  `transform target "x" assigned more than once`,
+		},
+		{
+			name:  "overwrite_existing_column",
+			query: `transform age = age + 1, age = age + 2 | select age`,
+			want:  `transform target "age" assigned more than once`,
+		},
 	}
-	if got := result.GetAt(1, 0); got.Type != table.TypeString || got.Str != "off" {
-		t.Fatalf("row 1: expected string off, got %v (%s)", got.Type, got.AsString())
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			expectQueryErrContains(t, usersTable(), tc.query, tc.want)
+		})
 	}
 }
 
@@ -756,27 +1277,12 @@ func TestCoalesce(t *testing.T) {
 	}
 }
 
-func TestEvalExpr(t *testing.T) {
+func TestPlannedExpressionPrecedence(t *testing.T) {
 	tbl := table.NewTable([]string{"x"})
 	tbl.AddRow([]table.Value{table.IntVal(5)})
-	ctx := &EvalContext{Table: tbl, RowIdx: 0}
-
-	// Test: x + 3 * 2 should be 5 + 6 = 11 (not 16)
-	expr := &ast.BinaryExpr{
-		Op:   "+",
-		Left: &ast.ColumnExpr{Path: []string{"x"}},
-		Right: &ast.BinaryExpr{
-			Op:    "*",
-			Left:  &ast.LiteralExpr{Kind: "int", Int: 3},
-			Right: &ast.LiteralExpr{Kind: "int", Int: 2},
-		},
-	}
-	val, err := Eval(expr, ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if val.Int != 11 {
-		t.Errorf("expected 11, got %d", val.Int)
+	result := runQuery(t, tbl, "transform y = x + 3 * 2 | select y")
+	if val := result.GetAt(0, 0); val.Type != table.TypeInt || val.Int != 11 {
+		t.Errorf("expected 11, got %v", val)
 	}
 }
 
@@ -1094,7 +1600,7 @@ func TestListContains(t *testing.T) {
 		{"string_hit", `filter { list_contains(tags, "admin") }`, []string{"Alice"}},
 		{"string_exact_type", `filter { list_contains(nums, "1") }`, []string{"Bob"}},
 		{"float_exact_type_after_numeric_widening", `filter { list_contains(nums, 1.0) }`, []string{"Alice"}},
-		{"int_miss_after_numeric_widening", `filter { list_contains(nums, 1) }`, nil},
+		{"int_hit_after_numeric_widening", `filter { list_contains(nums, 1) }`, []string{"Alice"}},
 		{"string_miss", `filter { list_contains(tags, "missing") }`, nil},
 		{"empty_list", `filter { list_contains(empty, "x") }`, nil},
 		{"null_list_drops", `filter { list_contains(nilcol, "x") }`, nil},
@@ -1459,49 +1965,51 @@ func TestUnionDotPathTraversalRejectedInExpressions(t *testing.T) {
 
 func TestUnionTypeSpecificOperationsFailClosedFromSchema(t *testing.T) {
 	cases := []struct {
-		name  string
-		input *table.Table
-		query string
+		name    string
+		input   *table.Table
+		query   string
+		wantErr string
 	}{
-		{"transform_arithmetic_active_int", scalarUnionTable(t, false), "transform x = u + 0"},
-		{"transform_string_function_active_string", scalarUnionStringRowsTable(t), "transform y = upper(u)"},
-		{"filter_boolean_active_bool", boolUnionTable(t), "filter { u }"},
-		{"reduce_sum_active_int", scalarUnionTable(t, false), "group k | reduce total = sum(u)"},
-		{"reduce_min_active_int", scalarUnionTable(t, false), "group k | reduce total = min(u)"},
-		{"reduce_max_active_int", scalarUnionTable(t, false), "group k | reduce total = max(u)"},
+		{"transform_arithmetic_active_int", scalarUnionTable(t, false), "transform x = u + 0", "requires numeric operands"},
+		{"transform_string_function_active_string", scalarUnionStringRowsTable(t), "transform y = upper(u)", "requires a string"},
+		{"filter_boolean_active_bool", boolUnionTable(t), "filter { u }", "filter expression must return bool"},
+		{"reduce_sum_active_int", scalarUnionTable(t, false), "group k | reduce total = sum(u)", "requires a numeric column"},
+		{"reduce_min_active_int", scalarUnionTable(t, false), "group k | reduce total = min(u)", "requires an orderable column"},
+		{"reduce_max_active_int", scalarUnionTable(t, false), "group k | reduce total = max(u)", "requires an orderable column"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			expectQueryErrContains(t, tc.input, tc.query, "cannot use union values")
+			expectQueryErrContains(t, tc.input, tc.query, tc.wantErr)
 		})
 	}
 }
 
-func TestUnionComparisonsFailClosedWhenOperandSchemaInferenceFails(t *testing.T) {
+func TestUnionComparisonsFailClosedThroughTypedPlanning(t *testing.T) {
 	intOnly := scalarUnionTable(t, false)
 	mixed := scalarUnionTable(t, true)
 	cases := []struct {
-		name  string
-		input *table.Table
-		query string
+		name    string
+		input   *table.Table
+		query   string
+		wantErr string
 	}{
-		{"filter_arithmetic_int_only", intOnly, "filter { u + 0 == 7 } | count"},
-		{"filter_arithmetic_mixed", mixed, "filter { u + 0 == 7 } | count"},
-		{"filter_coalesce_int_only", intOnly, "filter { coalesce(u, 1.5) == 7 } | count"},
-		{"filter_coalesce_mixed", mixed, "filter { coalesce(u, 1.5) == 7 } | count"},
-		{"filter_unary_operand", intOnly, "filter { -u == -7 } | count"},
-		{"filter_struct_operand", intOnly, "filter { struct(x = u + 0) == struct(x = 7) } | count"},
-		{"filter_list_operand", intOnly, "filter { list(u + 0) == list(7) } | count"},
-		{"transform_arithmetic", intOnly, "transform eq = u + 0 == 7"},
-		{"transform_coalesce", intOnly, "transform eq = coalesce(u, 1.5) == 7"},
-		{"transform_if_condition", intOnly, `transform label = if(u + 0 == 7, "yes", "no")`},
-		{"transform_struct_field", intOnly, "transform wrapped = struct(eq = u + 0 == 7)"},
-		{"transform_list_element", intOnly, "transform xs = list(u + 0 == 7)"},
-		{"reduce_first_arithmetic", intOnly, "group k | reduce eq = first(u) + 0 == 7"},
+		{"filter_arithmetic_int_only", intOnly, "filter { u + 0 == 7 } | count", "requires numeric operands"},
+		{"filter_arithmetic_mixed", mixed, "filter { u + 0 == 7 } | count", "requires numeric operands"},
+		{"filter_coalesce_int_only", intOnly, "filter { coalesce(u, 1.5) == 7 } | count", "cannot compare union values"},
+		{"filter_coalesce_mixed", mixed, "filter { coalesce(u, 1.5) == 7 } | count", "cannot compare union values"},
+		{"filter_unary_operand", intOnly, "filter { -u == -7 } | count", "requires numeric operand"},
+		{"filter_struct_operand", intOnly, "filter { struct(x = u + 0) == struct(x = 7) } | count", "requires numeric operands"},
+		{"filter_list_operand", intOnly, "filter { list(u + 0) == list(7) } | count", "requires numeric operands"},
+		{"transform_arithmetic", intOnly, "transform eq = u + 0 == 7", "requires numeric operands"},
+		{"transform_coalesce", intOnly, "transform eq = coalesce(u, 1.5) == 7", "cannot compare union values"},
+		{"transform_if_condition", intOnly, `transform label = if(u + 0 == 7, "yes", "no")`, "requires numeric operands"},
+		{"transform_struct_field", intOnly, "transform wrapped = struct(eq = u + 0 == 7)", "requires numeric operands"},
+		{"transform_list_element", intOnly, "transform xs = list(u + 0 == 7)", "requires numeric operands"},
+		{"reduce_first_arithmetic", intOnly, "group k | reduce eq = first(u) + 0 == 7", "requires numeric operands"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			expectQueryErrContains(t, tc.input, tc.query, "cannot compare union values")
+			expectQueryErrContains(t, tc.input, tc.query, tc.wantErr)
 		})
 	}
 }
@@ -2075,53 +2583,49 @@ func TestReduceMinLastAndAggregateExpression(t *testing.T) {
 	}
 }
 
-func TestEvalUnaryBranches(t *testing.T) {
+func TestPlannedUnaryBranches(t *testing.T) {
 	tbl := table.NewTable([]string{"flag", "n", "f", "missing"})
 	tbl.AddRow([]table.Value{table.BoolVal(false), table.IntVal(4), table.FloatVal(1.5), table.Null()})
-	ctx := &EvalContext{Table: tbl, RowIdx: 0}
 
 	cases := []struct {
 		name string
-		expr ast.Expr
+		expr string
 		want table.Value
 	}{
 		{
 			name: "not",
-			expr: &ast.UnaryExpr{Op: "not", Operand: &ast.ColumnExpr{Path: []string{"flag"}}},
+			expr: "not flag",
 			want: table.BoolVal(true),
 		},
 		{
 			name: "negative_int",
-			expr: &ast.UnaryExpr{Op: "-", Operand: &ast.ColumnExpr{Path: []string{"n"}}},
+			expr: "-n",
 			want: table.IntVal(-4),
 		},
 		{
 			name: "negative_float",
-			expr: &ast.UnaryExpr{Op: "-", Operand: &ast.ColumnExpr{Path: []string{"f"}}},
+			expr: "-f",
 			want: table.FloatVal(-1.5),
 		},
 		{
 			name: "negative_null",
-			expr: &ast.UnaryExpr{Op: "-", Operand: &ast.ColumnExpr{Path: []string{"missing"}}},
+			expr: "-missing",
 			want: table.Null(),
 		},
 	}
 
 	for _, tc := range cases {
-		got, err := Eval(tc.expr, ctx)
-		if err != nil {
-			t.Fatalf("%s: unexpected error: %v", tc.name, err)
-		}
+		result := runQuery(t, tbl, "transform out = "+tc.expr+" | select out")
+		got := result.GetAt(0, 0)
 		if !table.Equal(got, tc.want) {
 			t.Fatalf("%s: want %v, got %v", tc.name, tc.want, got)
 		}
 	}
 
-	if _, err := Eval(&ast.UnaryExpr{Op: "-", Operand: &ast.ColumnExpr{Path: []string{"flag"}}}, ctx); err == nil {
+	if err := runQueryExpectErr(t, tbl, "transform out = -flag"); err == nil {
 		t.Fatal("expected bool negation to fail")
-	}
-	if _, err := Eval(&ast.UnaryExpr{Op: "bad", Operand: &ast.ColumnExpr{Path: []string{"n"}}}, ctx); err == nil {
-		t.Fatal("expected unknown unary operator to fail")
+	} else if !strings.Contains(err.Error(), "numeric") {
+		t.Fatalf("expected numeric unary error, got %v", err)
 	}
 }
 
@@ -2146,83 +2650,32 @@ func TestCmpResultCoversAllOperators(t *testing.T) {
 	}
 }
 
-func TestEvalArithDirectBranches(t *testing.T) {
-	got, err := evalArith("+", table.StrVal("a"), table.StrVal("b"))
-	if err != nil || got.Type != table.TypeString || got.Str != "ab" {
-		t.Fatalf("string concat: want ab, got %v err=%v", got, err)
+func TestPlannedArithmeticBranches(t *testing.T) {
+	tbl := table.NewTable([]string{"dummy"})
+	tbl.AddRow([]table.Value{table.IntVal(0)})
+
+	result := runQuery(t, tbl, `transform out = "a" + "b" | select out`)
+	if got := result.GetAt(0, 0); got.Type != table.TypeString || got.Str != "ab" {
+		t.Fatalf("string concat: want ab, got %v", got)
 	}
 
-	got, err = evalArith("/", table.IntVal(4), table.IntVal(2))
-	if err != nil || got.Type != table.TypeInt || got.Int != 2 {
-		t.Fatalf("whole int division: want 2, got %v err=%v", got, err)
+	result = runQuery(t, tbl, `transform out = 4 / 2 | select out`)
+	if got := result.GetAt(0, 0); got.Type != table.TypeFloat || got.Float != 2 {
+		t.Fatalf("whole int division: want float 2, got %v", got)
 	}
 
-	got, err = evalArith("/", table.IntVal(5), table.IntVal(2))
-	if err != nil || got.Type != table.TypeFloat || got.Float != 2.5 {
-		t.Fatalf("fractional int division: want 2.5, got %v err=%v", got, err)
+	result = runQuery(t, tbl, `transform out = 5 / 2 | select out`)
+	if got := result.GetAt(0, 0); got.Type != table.TypeFloat || got.Float != 2.5 {
+		t.Fatalf("fractional int division: want 2.5, got %v", got)
 	}
 
-	got, err = evalArith("/", table.IntVal(5), table.IntVal(0))
-	if err != nil || !got.IsNull() {
-		t.Fatalf("division by zero: want null, got %v err=%v", got, err)
+	result = runQuery(t, tbl, `transform out = 5 / 0 | select out`)
+	if got := result.GetAt(0, 0); !got.IsNull() {
+		t.Fatalf("division by zero: want null, got %v", got)
 	}
 
-	if _, err := evalArith("+", table.StrVal("a"), table.IntVal(1)); err == nil {
+	if err := runQueryExpectErr(t, tbl, `transform out = "a" + 1`); err == nil {
 		t.Fatal("expected mixed string/int arithmetic to fail")
-	}
-}
-
-func TestEvalAggregateEdgeCases(t *testing.T) {
-	empty := table.NewTable([]string{"x"})
-	count, err := EvalAggregate(&ast.FuncCallExpr{Name: "count"}, empty)
-	if err != nil || count.Type != table.TypeInt || count.Int != 0 {
-		t.Fatalf("count(empty): want 0, got %v err=%v", count, err)
-	}
-
-	for _, name := range []string{"sum", "avg", "min", "max", "first", "last"} {
-		got, err := EvalAggregate(&ast.FuncCallExpr{Name: name, Args: []ast.Expr{&ast.ColumnExpr{Path: []string{"x"}}}}, empty)
-		if err != nil {
-			t.Fatalf("%s(empty): unexpected error: %v", name, err)
-		}
-		if !got.IsNull() {
-			t.Fatalf("%s(empty): want null, got %v", name, got)
-		}
-	}
-
-	lit, err := EvalAggregate(&ast.LiteralExpr{Kind: "int", Int: 7}, empty)
-	if err != nil || lit.Type != table.TypeInt || lit.Int != 7 {
-		t.Fatalf("literal aggregate expression: want 7, got %v err=%v", lit, err)
-	}
-
-	nullExpr := &ast.BinaryExpr{
-		Op:    "+",
-		Left:  &ast.FuncCallExpr{Name: "sum", Args: []ast.Expr{&ast.ColumnExpr{Path: []string{"x"}}}},
-		Right: &ast.LiteralExpr{Kind: "int", Int: 1},
-	}
-	got, err := EvalAggregate(nullExpr, empty)
-	if err != nil || !got.IsNull() {
-		t.Fatalf("null aggregate expression: want null, got %v err=%v", got, err)
-	}
-
-	bad := table.NewTable([]string{"x"})
-	bad.AddRow([]table.Value{table.StrVal("nope")})
-	for _, name := range []string{"sum", "avg", "min", "max"} {
-		if _, err := EvalAggregate(&ast.FuncCallExpr{Name: name, Args: []ast.Expr{&ast.ColumnExpr{Path: []string{"x"}}}}, bad); err == nil {
-			t.Fatalf("expected %s over strings to fail", name)
-		}
-	}
-
-	errorCases := []ast.Expr{
-		&ast.FuncCallExpr{Name: "upper", Args: []ast.Expr{&ast.ColumnExpr{Path: []string{"x"}}}},
-		&ast.FuncCallExpr{Name: "sum", Args: []ast.Expr{&ast.LiteralExpr{Kind: "int", Int: 1}}},
-		&ast.StructExpr{},
-		&ast.ListExpr{},
-		&ast.ColumnExpr{Path: []string{"x"}},
-	}
-	for _, expr := range errorCases {
-		if _, err := EvalAggregate(expr, empty); err == nil {
-			t.Fatalf("expected %T aggregate expression to fail", expr)
-		}
 	}
 }
 
@@ -2395,6 +2848,67 @@ func TestJoinUsesExactStructuralKeys(t *testing.T) {
 	}
 }
 
+func TestJoinConfigurationAndTopLevelKeyErrors(t *testing.T) {
+	left := table.NewTable([]string{"id"})
+	left.AddRow([]table.Value{table.IntVal(1)})
+	right := table.NewTable([]string{"id"})
+	right.AddRow([]table.Value{table.IntVal(1)})
+
+	t.Run("loader_not_configured", func(t *testing.T) {
+		q, err := parser.Parse("left.csv | join right.csv on id")
+		if err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		_, err = Execute(q, left, nil)
+		if err == nil || !strings.Contains(err.Error(), "loader not configured") {
+			t.Fatalf("expected loader configuration error, got %v", err)
+		}
+	})
+
+	t.Run("stdin_join_source_rejected", func(t *testing.T) {
+		_, err := execJoin(&ast.JoinOp{
+			Filename: "-",
+			Keys:     []ast.JoinKey{{Left: []string{"id"}, Right: []string{"id"}}},
+		}, left, func(string, ast.LoadOptions) (*table.Table, error) { return right, nil })
+		if err == nil || !strings.Contains(err.Error(), "stdin is not supported") {
+			t.Fatalf("expected stdin join source error, got %v", err)
+		}
+	})
+
+	t.Run("load_error_wrapped", func(t *testing.T) {
+		q, err := parser.Parse("left.csv | join right.csv on id")
+		if err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		_, err = Execute(q, left, func(filename string, _ ast.LoadOptions) (*table.Table, error) {
+			return nil, fmt.Errorf("boom %s", filename)
+		})
+		if err == nil || !strings.Contains(err.Error(), `load "right.csv"`) || !strings.Contains(err.Error(), "boom") {
+			t.Fatalf("expected wrapped join load error, got %v", err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		on   string
+		want string
+	}{
+		{name: "missing_left_top_level_key", on: "missing == id", want: `left join key column "missing" not found`},
+		{name: "missing_right_top_level_key", on: "id == missing", want: `right join key column "missing" not found`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, err := parser.Parse("left.csv | join right.csv on " + tc.on)
+			if err != nil {
+				t.Fatalf("parse error: %v", err)
+			}
+			_, err = Execute(q, left, func(string, ast.LoadOptions) (*table.Table, error) { return right, nil })
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
 // TestJoinKeepsRightColumnCollidingWithLeftKeyName guards against dropping a
 // right column merely because its name matches a left join-key name. Only the
 // actual right join-key column should be dropped; collisions must be renamed.
@@ -2466,6 +2980,56 @@ func TestJoinSurfacesRightKeyPathError(t *testing.T) {
 	load := func(string, ast.LoadOptions) (*table.Table, error) { return right, nil }
 	if _, err := Execute(q, left, load); err == nil {
 		t.Fatal("expected error for invalid right dot-path join key, got nil")
+	}
+}
+
+func TestJoinRejectsMissingNestedKeyFieldFromSchema(t *testing.T) {
+	recordSchema := &table.TypeDescriptor{
+		Kind: table.TypeRecord,
+		Fields: []table.FieldDescriptor{
+			{Name: "city", Type: &table.TypeDescriptor{Kind: table.TypeString}},
+		},
+	}
+	left := table.NewTableWithSchemas([]string{"address", "name"}, []*table.TypeDescriptor{
+		recordSchema,
+		{Kind: table.TypeString},
+	})
+	right := table.NewTableWithSchemas([]string{"address", "note"}, []*table.TypeDescriptor{
+		recordSchema,
+		{Kind: table.TypeString},
+	})
+	load := func(string, ast.LoadOptions) (*table.Table, error) { return right, nil }
+
+	cases := []struct {
+		name string
+		kind string
+		on   string
+	}{
+		{name: "inner_left_missing_field", on: "address.missing == address.city"},
+		{name: "left_left_missing_field", kind: "left ", on: "address.missing == address.city"},
+		{name: "right_left_missing_field", kind: "right ", on: "address.missing == address.city"},
+		{name: "full_left_missing_field", kind: "full ", on: "address.missing == address.city"},
+		{name: "right_missing_field", on: "address.city == address.missing"},
+		{name: "shorthand_missing_field", on: "address.missing"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			q, err := parser.Parse("left.csv | join " + tc.kind + "right.csv on " + tc.on)
+			if err != nil {
+				t.Fatalf("parse error: %v", err)
+			}
+			_, err = Execute(q, left, load)
+			if err == nil {
+				t.Fatalf("expected missing nested join key error for %q", tc.on)
+			}
+			msg := err.Error()
+			for _, want := range []string{"join", "missing", "not found"} {
+				if !strings.Contains(msg, want) {
+					t.Fatalf("expected error to contain %q, got %v", want, err)
+				}
+			}
+		})
 	}
 }
 

@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/razeghi71/dq/ast"
 	"github.com/razeghi71/dq/table"
 )
 
@@ -45,33 +44,6 @@ func evalTransformLiteral(t *testing.T, expr string) table.Value {
 	return result.GetAt(0, 0)
 }
 
-func evalLiteralExpr(t *testing.T, expr ast.Expr) table.Value {
-	t.Helper()
-	tbl := table.NewTable([]string{"dummy"})
-	tbl.AddRow([]table.Value{table.IntVal(0)})
-	val, err := Eval(expr, &EvalContext{Table: tbl, RowIdx: 0})
-	if err != nil {
-		t.Fatalf("eval error: %v", err)
-	}
-	return val
-}
-
-func boolLit(b bool) *ast.LiteralExpr {
-	return &ast.LiteralExpr{Kind: "bool", Bool: b}
-}
-
-func nullLit() *ast.LiteralExpr {
-	return &ast.LiteralExpr{Kind: "null"}
-}
-
-func binExpr(op string, left, right ast.Expr) *ast.BinaryExpr {
-	return &ast.BinaryExpr{Op: op, Left: left, Right: right}
-}
-
-func unaryNot(operand ast.Expr) *ast.UnaryExpr {
-	return &ast.UnaryExpr{Op: "not", Operand: operand}
-}
-
 func nullableBoolTable() *table.Table {
 	tbl := table.NewTable([]string{"flag"})
 	tbl.AddRow([]table.Value{table.Null()})
@@ -88,18 +60,20 @@ func nullableNamedBoolTable() *table.Table {
 	return tbl
 }
 
+func nullableNamedIntTable() *table.Table {
+	tbl := table.NewTable([]string{"name", "n"})
+	tbl.AddRow([]table.Value{table.StrVal("unknown"), table.Null()})
+	tbl.AddRow([]table.Value{table.StrVal("one"), table.IntVal(1)})
+	tbl.AddRow([]table.Value{table.StrVal("two"), table.IntVal(2)})
+	return tbl
+}
+
 func groupedNullableBoolBatchTable() *table.Table {
 	tbl := table.NewTable([]string{"batch", "name", "flag"})
 	tbl.AddRow([]table.Value{table.StrVal("g"), table.StrVal("unknown"), table.Null()})
 	tbl.AddRow([]table.Value{table.StrVal("g"), table.StrVal("yes"), table.BoolVal(true)})
 	tbl.AddRow([]table.Value{table.StrVal("g"), table.StrVal("no"), table.BoolVal(false)})
 	return tbl
-}
-
-func TestThreeValuedLogicNotNullLiteralViaEval(t *testing.T) {
-	// Parser rejects `not null` in queries (006); runtime 3VL still defines not(null) = null.
-	got := evalLiteralExpr(t, unaryNot(nullLit()))
-	assertTruth(t, got, truthNull)
 }
 
 func TestThreeValuedLogicChained(t *testing.T) {
@@ -168,6 +142,34 @@ func TestThreeValuedLogicNullableBoolColumn(t *testing.T) {
 		assertTruth(t, result.GetAt(1, 0), truthTrue)
 		assertTruth(t, result.GetAt(2, 0), truthFalse)
 	})
+}
+
+func TestThreeValuedLogicNullableComparisons(t *testing.T) {
+	tbl := nullableNamedIntTable()
+	result := runQuery(t, tbl, `transform eq = n == 1, ne = n != 1, lt = n < 2, gt = n > 1 | select name, eq, ne, lt, gt | sort name`)
+
+	cases := map[string]struct {
+		eq truth
+		ne truth
+		lt truth
+		gt truth
+	}{
+		"one":     {eq: truthTrue, ne: truthFalse, lt: truthTrue, gt: truthFalse},
+		"two":     {eq: truthFalse, ne: truthTrue, lt: truthFalse, gt: truthTrue},
+		"unknown": {eq: truthNull, ne: truthNull, lt: truthNull, gt: truthNull},
+	}
+
+	for row := 0; row < result.NumRows; row++ {
+		name := result.GetAt(row, result.ColIndex("name")).Str
+		want, ok := cases[name]
+		if !ok {
+			t.Fatalf("unexpected row name %q", name)
+		}
+		assertTruth(t, result.GetAt(row, result.ColIndex("eq")), want.eq)
+		assertTruth(t, result.GetAt(row, result.ColIndex("ne")), want.ne)
+		assertTruth(t, result.GetAt(row, result.ColIndex("lt")), want.lt)
+		assertTruth(t, result.GetAt(row, result.ColIndex("gt")), want.gt)
+	}
 }
 
 func TestThreeValuedLogicIfUnchanged(t *testing.T) {
@@ -258,6 +260,26 @@ func TestThreeValuedLogicFilterSemantics(t *testing.T) {
 		}
 	})
 
+	t.Run("nullable_not_equal_drops_unknown", func(t *testing.T) {
+		result := runQuery(t, nullableNamedIntTable(), "filter { n != 1 } | select name | sort name")
+		assertSortedNames(t, result, []string{"two"})
+	})
+
+	t.Run("nullable_equality_drops_unknown", func(t *testing.T) {
+		result := runQuery(t, nullableNamedIntTable(), "filter { n == 1 } | select name | sort name")
+		assertSortedNames(t, result, []string{"one"})
+	})
+
+	t.Run("nullable_ordering_drops_unknown", func(t *testing.T) {
+		result := runQuery(t, nullableNamedIntTable(), "filter { n < 2 } | select name | sort name")
+		assertSortedNames(t, result, []string{"one"})
+	})
+
+	t.Run("explicit_null_check_keeps_unknown", func(t *testing.T) {
+		result := runQuery(t, nullableNamedIntTable(), "filter { n != 1 or n is null } | select name | sort name")
+		assertSortedNames(t, result, []string{"two", "unknown"})
+	})
+
 	t.Run("null_and_true_drops_all", func(t *testing.T) {
 		result := runQuery(t, usersTable(), "filter { null and true } | count")
 		if result.GetAt(0, 0).Int != 0 {
@@ -337,7 +359,7 @@ func TestThreeValuedLogicNonBooleanErrors(t *testing.T) {
 		{"or_int", "transform x = 1 or false", "'or' requires boolean operands"},
 		{"not_int", "transform x = not 1", "'not' requires boolean operand"},
 		{"not_string", "transform x = not name", "'not' requires boolean operand"},
-		{"filter_non_bool", "filter { age + 1 }", "did not return boolean"},
+		{"filter_non_bool", "filter { age + 1 }", "filter expression must return bool"},
 	}
 
 	tbl := usersTable()
@@ -354,43 +376,37 @@ func TestThreeValuedLogicNonBooleanErrors(t *testing.T) {
 	}
 }
 
-func TestThreeValuedLogicEvalDirectAndOrNot(t *testing.T) {
-	// Direct Eval coverage mirroring truth tables (no parser involved).
+func TestThreeValuedLogicLiteralAndOrTruthTables(t *testing.T) {
 	andCases := []struct {
-		name        string
-		left, right ast.Expr
-		want        truth
+		name string
+		expr string
+		want truth
 	}{
-		{"true_and_true", boolLit(true), boolLit(true), truthTrue},
-		{"true_and_null", boolLit(true), nullLit(), truthNull},
-		{"null_and_false", nullLit(), boolLit(false), truthFalse},
-		{"null_and_null", nullLit(), nullLit(), truthNull},
+		{"true_and_true", "true and true", truthTrue},
+		{"true_and_null", "true and null", truthNull},
+		{"null_and_false", "null and false", truthFalse},
+		{"null_and_null", "null and null", truthNull},
 	}
 	for _, tc := range andCases {
 		t.Run("and_"+tc.name, func(t *testing.T) {
-			got := evalLiteralExpr(t, binExpr("and", tc.left, tc.right))
+			got := evalTransformLiteral(t, tc.expr)
 			assertTruth(t, got, tc.want)
 		})
 	}
 
 	orCases := []struct {
-		name        string
-		left, right ast.Expr
-		want        truth
+		name string
+		expr string
+		want truth
 	}{
-		{"false_or_null", boolLit(false), nullLit(), truthNull},
-		{"null_or_false", nullLit(), boolLit(false), truthNull},
-		{"null_or_true", nullLit(), boolLit(true), truthTrue},
+		{"false_or_null", "false or null", truthNull},
+		{"null_or_false", "null or false", truthNull},
+		{"null_or_true", "null or true", truthTrue},
 	}
 	for _, tc := range orCases {
 		t.Run("or_"+tc.name, func(t *testing.T) {
-			got := evalLiteralExpr(t, binExpr("or", tc.left, tc.right))
+			got := evalTransformLiteral(t, tc.expr)
 			assertTruth(t, got, tc.want)
 		})
 	}
-
-	t.Run("not_null", func(t *testing.T) {
-		got := evalLiteralExpr(t, unaryNot(nullLit()))
-		assertTruth(t, got, truthNull)
-	})
 }

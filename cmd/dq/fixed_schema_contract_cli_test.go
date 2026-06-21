@@ -270,91 +270,37 @@ func TestCLIFixedSchemaContractEmptyBinaryOutputsPreserveSchemas(t *testing.T) {
 	}
 }
 
-func TestCLIFixedSchemaContractPermissiveTransformFallbackFeedsFilter(t *testing.T) {
-	bin := buildCLI(t)
-	out := runCLIQuery(t, bin, `../../testdata/users.csv | transform r = if(age == 30, struct(x = 1), struct(x = "a")) | filter { true } | count | json`)
-
-	var rows []struct {
-		Count int64 `json:"count"`
-	}
-	if err := json.Unmarshal(out, &rows); err != nil {
-		t.Fatalf("invalid JSON: %v\n%s", err, out)
-	}
-	if len(rows) != 1 || rows[0].Count != 6 {
-		t.Fatalf("count rows: got %+v, want one row with count=6", rows)
-	}
-}
-
-func TestCLIFixedSchemaContractPermissiveTransformFallbackNormalizesLateNestedValues(t *testing.T) {
+func TestCLIFixedSchemaContractIncompatibleTransformBranchesFailDuringPlanning(t *testing.T) {
 	bin := buildCLI(t)
 
-	t.Run("record_select_dot_path", func(t *testing.T) {
-		out := runCLIQuery(t, bin, `../../testdata/users.csv | transform r = if(city == "LA", struct(x = "a"), struct(x = age)) | select r.x | json`)
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{
+			name:  "record_field_type_conflict",
+			query: `../../testdata/users.csv | transform r = if(age == 30, struct(x = 1), struct(x = "a")) | filter { true } | count | json`,
+		},
+		{
+			name:  "late_record_field_type_conflict",
+			query: `../../testdata/users.csv | transform r = if(city == "LA", struct(x = "a"), struct(x = age)) | select r.x | json`,
+		},
+		{
+			name:  "nested_record_field_type_conflict",
+			query: `../../testdata/users.csv | transform r = if(age == 30, struct(x = 1, y = "z"), if(city == "LA", struct(x = "a", y = "b"), struct(x = age))) | select r.y | json`,
+		},
+		{
+			name:  "numeric_string_field_conflict",
+			query: `../../testdata/users.csv | transform r = if(age == 30, struct(x = 1, y = 1), if(city == "LA", struct(x = 2.5, y = "b"), struct(x = age, y = 2))) | filter { r.x == 1.0 } | count | json`,
+		},
+	}
 
-		var rows []struct {
-			X string `json:"r_x"`
-		}
-		if err := json.Unmarshal(out, &rows); err != nil {
-			t.Fatalf("invalid JSON: %v\n%s", err, out)
-		}
-		want := []string{"30", "a", "35", "28", "a", "40"}
-		if len(rows) != len(want) {
-			t.Fatalf("rows: got %+v, want %d rows", rows, len(want))
-		}
-		for i, row := range rows {
-			if row.X != want[i] {
-				t.Fatalf("row %d r_x: got %q, want %q", i, row.X, want[i])
-			}
-		}
-	})
-
-	t.Run("list_select_count", func(t *testing.T) {
-		out := runCLIQuery(t, bin, `../../testdata/users.csv | transform xs = if(city == "LA", list(struct(x = "a")), list(struct(x = age))) | select xs | count | json`)
-
-		var rows []struct {
-			Count int64 `json:"count"`
-		}
-		if err := json.Unmarshal(out, &rows); err != nil {
-			t.Fatalf("invalid JSON: %v\n%s", err, out)
-		}
-		if len(rows) != 1 || rows[0].Count != 6 {
-			t.Fatalf("count rows: got %+v, want one row with count=6", rows)
-		}
-	})
-
-	t.Run("nested_if_record_select_dot_path", func(t *testing.T) {
-		out := runCLIQuery(t, bin, `../../testdata/users.csv | transform r = if(age == 30, struct(x = 1, y = "z"), if(city == "LA", struct(x = "a", y = "b"), struct(x = age))) | select r.y | json`)
-
-		var rows []struct {
-			Y *string `json:"r_y"`
-		}
-		if err := json.Unmarshal(out, &rows); err != nil {
-			t.Fatalf("invalid JSON: %v\n%s", err, out)
-		}
-		want := []*string{strPtr("z"), strPtr("b"), nil, nil, strPtr("b"), nil}
-		if len(rows) != len(want) {
-			t.Fatalf("rows: got %+v, want %d rows", rows, len(want))
-		}
-		for i, row := range rows {
-			if !sameOptionalString(row.Y, want[i]) {
-				t.Fatalf("row %d r_y: got %v, want %v", i, row.Y, want[i])
-			}
-		}
-	})
-
-	t.Run("numeric_record_filter_float_comparison", func(t *testing.T) {
-		out := runCLIQuery(t, bin, `../../testdata/users.csv | transform r = if(age == 30, struct(x = 1, y = 1), if(city == "LA", struct(x = 2.5, y = "b"), struct(x = age, y = 2))) | filter { r.x == 1.0 } | count | json`)
-
-		var rows []struct {
-			Count int64 `json:"count"`
-		}
-		if err := json.Unmarshal(out, &rows); err != nil {
-			t.Fatalf("invalid JSON: %v\n%s", err, out)
-		}
-		if len(rows) != 1 || rows[0].Count != 1 {
-			t.Fatalf("count rows: got %+v, want one row with count=1", rows)
-		}
-	})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := runCLIQueryExpectError(t, bin, tc.query)
+			assertCLIExpressionErrorContains(t, out, "if() branches", "common type")
+		})
+	}
 }
 
 func TestCLIFixedSchemaContractZeroRowNullPropagatingFunctionSchemas(t *testing.T) {
@@ -452,15 +398,4 @@ func TestCLIFixedSchemaContractListStructPreservesFieldOrder(t *testing.T) {
 	if want := "bundle\n\"[{name:Alice, age:30}]\"\n"; string(out) != want {
 		t.Fatalf("csv output:\ngot:\n%q\nwant:\n%q", string(out), want)
 	}
-}
-
-func strPtr(s string) *string {
-	return &s
-}
-
-func sameOptionalString(a, b *string) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return *a == *b
 }

@@ -113,7 +113,23 @@ dq 'users.csv | filter { false } | describe'
 # age  -> int,    row_count 0
 ```
 
-Numeric types promote from `int` to `float` when needed. Heterogeneous values inside one JSON/list value are preserved as `mixed`, such as `[1, "two"] -> list<mixed>`. Outside that explicit list heterogeneity case, incompatible native JSON types are bad records instead of silently becoming strings.
+Expressions are checked against the current pipeline schema before rows run. Misspelled columns, missing fields in known records, and wrong function argument types fail even if the table currently has zero rows:
+
+```bash
+dq 'users.csv | filter { agge > 20 }'                         # error: column "agge" not found
+dq 'users.csv | filter { false } | transform x = upper(age)'  # error: upper() needs string
+dq 'nested.json | select address.missing'                     # error: field not found
+```
+
+Each pipeline stage sees the columns produced by previous stages. Within one `transform` or `reduce`, assignment target names must be unique and all right-hand sides see the input schema only:
+
+```bash
+dq 'users.csv | transform age2 = age + 1 | filter { age2 > 20 }'
+dq 'users.csv | transform age2 = age + 1, age3 = age2 + 1'    # error: age2 not visible yet
+dq 'users.csv | group city | reduce x = count(), x = sum(age)' # error: duplicate x target
+```
+
+Numeric types promote from `int` to `float` when needed for schemas and arithmetic. Planned expression evaluation applies those schemas before runtime comparison, so an inline expression such as `coalesce(id, 0.0)` behaves the same as materializing it with `transform` first. Comparisons and `list_contains` allow `int`/`float` pairs, but compare the exact represented numeric values rather than rounding integers through `float64`. If either top-level comparison operand is null, the result is null; use `is null` / `is not null` for definite null checks. Integer `+`, `-`, `*`, `sum(int)`, and unary `-` fail on `int64` overflow. Division `/` is always float-valued, so very large integers can lose precision when divided; division by zero returns null. Heterogeneous values inside one JSON/list value are preserved as `mixed`, such as `[1, "two"] -> list<mixed>`. Outside that explicit list heterogeneity case, incompatible native JSON types are bad records instead of silently becoming strings.
 
 Avro unions with incompatible branches load as `union<...>` from file metadata, even for empty files:
 
@@ -174,7 +190,7 @@ dq 'data.json | filter { address.city == "NY" }'    # nested field access
 
 ### `sort` - Sort rows
 
-Ascending by default. Prefix a column with `-` to sort it descending. Mix directions across multiple columns in one `sort`.
+Ascending by default. Prefix a column with `-` to sort it descending. Mix directions across multiple columns in one `sort`. Sort keys must be orderable: `int`, `float`, or `string`. Nulls sort last.
 
 ```bash
 dq 'users.csv | sort age'              # youngest first (ascending)
@@ -217,6 +233,8 @@ dq 'users.csv | transform age2 = age * 2'
 dq 'users.csv | transform name = upper(name), age_months = age * 12'
 dq 'sales.csv | transform total = coalesce(quantity, 0) * coalesce(price, 0)'
 ```
+
+Assignment target names must be unique within one `transform`.
 
 ### `group` - Group rows by column values
 
@@ -263,6 +281,14 @@ dq 'users.csv | group city as people | reduce people avg_age = avg(age)'
 dq 'orders.parquet | reduce orders total = sum(amount), n = count()'
 ```
 
+Reduce expressions are checked against the nested row schema before groups run. Aggregate arguments must be column paths from the nested rows, so mistakes fail even when there are no groups:
+
+```bash
+dq 'users.csv | filter { false } | group city | reduce bad = upper(name)' # error
+dq 'users.csv | group city | reduce x = count(), x = sum(age)'            # error
+dq 'users.csv | filter { false } | group city | reduce total = sum(age)'  # valid
+```
+
 ### `group` + `reduce` - Putting them together
 
 ```bash
@@ -284,7 +310,7 @@ dq 'users.csv | join full orders.csv on id == customer_id and region == region'
 dq 'users.csv | join orders.dat with format=csv, delim=";" on user_id'
 ```
 
-Join keys can use dot paths for nested fields; a dot-path key gets its own flattened output column (`address.city` -> `address_city`, suffixed with `_2` if taken). If both tables share a column name, the right table's column is prefixed with the join file's basename (e.g. `orders_amount` from `orders.csv`).
+Join keys can use dot paths for nested fields; a dot-path key gets its own flattened output column (`address.city` -> `address_city`, suffixed with `_2` if taken). Dot-path keys must exist in the current schemas, so a misspelled key such as `address.missing` fails instead of producing zero matches. If both tables share a column name, the right table's column is prefixed with the join file's basename (e.g. `orders_amount` from `orders.csv`).
 
 Notes:
 
@@ -295,7 +321,7 @@ Notes:
 ## Functions
 
 **`reduce`** — aggregate over nested rows:
-`count()`, `sum(col)`, `avg(col)`, `min(col)`, `max(col)`, `first(col)`, `last(col)`
+`count()`, `sum(col)` / `avg(col)` for numeric columns, `min(col)` / `max(col)` for orderable columns (`int`, `float`, `string`), `first(col)`, `last(col)`
 
 **`transform`** — per-row values:
 
@@ -343,7 +369,7 @@ dq 'users.csv | transform profile = struct(name = name, age = age, meta = struct
 dq 'users.csv | transform empty = struct(), nullable = struct(a = null)'
 ```
 
-Struct field names are identifiers; use backticks for names with spaces or keywords such as `` `and` ``. `select` and `group` flatten dot paths to underscore names (`address.city` → `address_city`). Missing sub-fields return null. Null fields inside constructed records are preserved; schema-based writers infer their concrete field type from other non-null values, or fall back to nullable string when every value is null.
+Struct field names are identifiers; use backticks for names with spaces or keywords such as `` `and` ``. `select`, `group`, and dot-path join keys flatten dot paths to underscore names (`address.city` → `address_city`). Missing fields in a known record schema are errors; nullable existing fields still return null for rows where the parent or field is null. Null fields inside constructed records are preserved; schema-based writers infer their concrete field type from other non-null values, or fall back to nullable string when every value is null.
 
 Dot paths cannot step through a union branch because different rows may hold different branch shapes. Select the union column itself, or normalize it first once branch-specific helpers exist.
 
@@ -360,7 +386,7 @@ dq 'nested.json | filter { list_contains(tags, "admin") } | select name'
 dq 'nested.json | reduce orders total = sum(amount) | select name, total'
 ```
 
-Use `list(expr, ...)` to construct list values row-by-row. `list()` returns an empty list and null elements are preserved. Lists and records use exact structural equality. Use `list_contains(xs, x)` for membership and `list_len(xs)` for size checks; `tags == "admin"` and `tags == 1` error on type mismatch, and `filter { tags }` is an error.
+Use `list(expr, ...)` to construct list values row-by-row. `list()` returns an empty list; it can adopt a typed list context such as `if(cond, orders, list())` or `coalesce(orders, list())`, and standalone `list()` describes as `list<string?>`. Null elements are preserved. Lists and records use structural equality; numeric `int`/`float` pairs compare by exact represented value. Use `list_contains(xs, x)` for membership and `list_len(xs)` for size checks; `tags == "admin"` and `tags == 1` error on type mismatch, and `filter { tags }` is an error.
 
 ## Output Formats
 

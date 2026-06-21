@@ -195,12 +195,7 @@ func TestListLenDotPathCrossFormat(t *testing.T) {
 }
 
 func TestListLenMissingDotPath(t *testing.T) {
-	result := loadAndQuery(t, testdataDir+"/nested.json", "transform n = list_len(profile.missing) | select name, n")
-	for i := 0; i < result.NumRows; i++ {
-		if !result.GetAt(i, result.ColIndex("n")).IsNull() {
-			t.Errorf("row %d: want null for missing sub-field, got %v", i, result.GetAt(i, result.ColIndex("n")).AsString())
-		}
-	}
+	expectLoadAndQueryErrContains(t, testdataDir+"/nested.json", "transform n = list_len(profile.missing) | select name, n", `field "missing" not found`)
 }
 
 func TestListLenDotPathRecordError(t *testing.T) {

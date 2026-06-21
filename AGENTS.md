@@ -327,11 +327,12 @@ Strict and permissive APIs must remain distinct:
 * `TypeUnion` storage preserves each active branch value instead of stringifying it. JSON/JSONL/table/CSV outputs render the active value; `group`, `distinct`, and `join` keys use the active value's exact dq type and structural key, so `int(7)` and `string("7")` do not collide. They do not include Avro branch names/tags, so two named Avro record branches with the same dq schema and value are indistinguishable.
 * Direct comparison and ordering over union-typed expressions are rejected unless an explicit future branch-normalization operation is added. Dot paths may project a union-typed field, but they must not step through a union branch such as `select u.x` when `u` is `union<record<x:int>,string>`.
 * Engine operators that preserve or can plan their output schema use fixed-schema result tables and strict append for those planned columns. This includes `filter`, `select`, `group`, `count`, `describe`, `distinct`, `rename`, `remove`, typed `transform` assignments, typed `reduce` assignments, and schema-compatible joins.
-* `transform`, `reduce`, and joins fall back to permissive append only for unplanned or schema-incompatible result shapes. Do not expand or remove that fallback without updating the operator-level schema contract and tests.
+* Planned expression operators must not use permissive append to hide type mistakes. Incompatible `if` branches, incompatible `coalesce` arguments, bad function argument types, and incompatible comparisons fail during planning even when the current table has zero rows.
+* `reduce` and joins may still use permissive append only for unplanned or schema-incompatible result shapes outside typed expression planning. Do not expand or remove that fallback without updating the operator-level schema contract and tests.
 * Schema-preserving operations must keep column schemas even when they produce zero rows. For example, `users.csv | filter { false } | describe` reports the loaded `name:string` and `age:int` schemas with `row_count = 0`, not `null` types.
-* Dot-path projections and group keys first use the parent column's logical schema. If the parent schema is unavailable because the column started null-only, the engine may infer the dot-path schema from materialized row values; if the values are incompatible, the operation falls back to the permissive path or reports the existing path error.
+* Dot-path projections, expression column references, sort keys, distinct keys, group keys, and join keys bind against the current logical schema before row execution. A missing top-level column or a missing field inside a known record schema is an error. A nullable existing parent field makes the projected child nullable and produces runtime nulls when the parent is null. Dot paths must not step through lists or union branches.
 
-Null-only finalization remains part of the user-visible contract: when a schema position is still `TypeNull` at finalization, it renders as nullable string. This is why all-null CSV columns, header-only CSV columns, empty lists, and null-only nested fields fall back to `string?` in schema strings where a concrete type is required.
+Null-only finalization remains part of the user-visible contract: when a schema position is still `TypeNull` at finalization, it renders as nullable string. This is why all-null CSV columns, header-only CSV columns, standalone empty list literals, and null-only nested fields fall back to `string?` in schema strings where a concrete type is required. Before finalization, an empty list literal has no determining element schema and can adopt a typed list context through strict expression unification.
 
 ---
 
@@ -402,6 +403,7 @@ Separate assignments with **commas**. Use a single **`=`** (not `==`).
 Rules:
 * `rename` pairs use `old=new` bindings (same `=` style as `transform`; whitespace around `=` is ignored).
 * `reduce` takes an optional nested column name as a **single identifier** before the assignments: `reduce entries max_age = max(age), count = count()`.
+* `transform` and `reduce` assignment targets must be unique within one operation. `transform x = 1, x = 2` and `reduce x = count(), x = sum(age)` are errors rather than last-write-wins.
 * A trailing comma is invalid: `transform x = upper(name),` and `rename name=first_name,` are parse errors.
 
 ### Comparisons (double `==`, not comma lists)
@@ -440,6 +442,27 @@ op ::= + | - | * | / | == | != | < | > | <= | >= | and | or | not
   parse errors.
 * Null checks: `age is null`, `age is not null` (do NOT use `== null`)
 * Logical `and`, `or`, `not` use SQL three-valued logic (see below)
+
+### Expression binding, IR, and type checking
+
+The parser produces the raw AST only. It must not resolve column names, choose function overloads, or infer expression result types. Semantic planning happens after the source has loaded and after each preceding pipeline stage has produced its current table schema:
+
+```
+tokens -> raw AST -> bound expression IR -> typed expression -> operator plan -> row execution
+```
+
+The bound expression IR covers the whole expression tree, not only function calls. It resolves every column/dot-path reference to a top-level column index, nested path, and logical schema. The typed expression annotates every bound node with its result schema. Operators then use those typed results to build fixed output schemas before iterating rows.
+
+Binding and type checking are stage-local:
+* `users.csv | transform age2 = age + 1 | filter { age2 > 20 }` is valid because the `filter` sees the table produced by the previous `transform`.
+* `users.csv | transform age2 = age + 1, age3 = age2 + 1` is invalid because all RHS expressions in one `transform` see only the input schema, not sibling assignments from the same operation.
+* `users.csv | group city | reduce total = sum(age), doubled = total * 2` is invalid for the same reason: all RHS expressions in one `reduce` see only the nested row schema and aggregate results inside their own expression, not sibling assignments.
+* `users.csv | group city | reduce x = count(), x = sum(age)` is invalid because assignment targets in one `reduce` must be unique.
+* `users.csv | filter { false } | transform out = upper(age)` still fails because `upper` requires a string even though no row will execute.
+* `users.csv | filter { false } | group city | reduce bad = upper(name)` still fails because reduce expressions must use aggregate functions over nested row columns.
+* `nested.json | select address.missing` fails when `address` has a known record schema without `missing`. Missing JSON object fields observed during loading are represented as nullable fields; absent fields after schema inference are not invented by later expressions.
+
+Type checking uses the central `table.TypeDescriptor` helpers. Numeric expressions may promote `int` to `float` for schemas and arithmetic. Runtime evaluation of planned expressions must use explicit coercion nodes with finalized target schemas only where the planner needs a common runtime shape, such as promoted `if`, `coalesce`, and list literal results; do not coerce every expression node unconditionally. Direct filters such as `coalesce(id, 0.0) == 1.0` and staged transforms such as `transform y = coalesce(id, 0.0) | filter { y == 1.0 }` must use the same values. Runtime `int + int`, `int - int`, and `int * int` evaluate in `int64` and must error on overflow rather than wrapping or rounding through `float64`; unary `-` over `math.MinInt64` and `sum(int)` overflow also error. Division is planned and evaluated as float-valued; division by zero returns null. Runtime comparisons and `list_contains` must allow planned-compatible `int`/`float` pairs, including inside nested list/record equality, but compare exact represented numeric values rather than rounding `int64` through `float64`. Top-level comparison operators (`==`, `!=`, `<`, `>`, `<=`, `>=`) use three-valued logic: if either operand evaluates to `null`, the comparison result is `null`; use `is null` / `is not null` for definite null checks. Record equality compares by field name over the union of field names and treats missing fields as `null`, matching strict record unification where missing fields become nullable. `if` and `coalesce` use strict common-type unification and must not silently widen incompatible branches to `string` or top-level `mixed`. `list_contains(list<T>, value)` requires `T` and `value` to be strictly unifiable/comparable unless the list element schema is already `mixed`; for records, missing fields compare as `null`, so comparable records with extra nullable fields are valid but may still compare false at runtime. Filters must type-check to `bool`, `bool?`, or the null-only expression schema; any other result type is a planning error.
 
 **Three-valued logic (`and`, `or`, `not`):**
 
@@ -521,7 +544,7 @@ dq 'users.csv | tail 5'
 
 ### 4. `sort [-]col1, [-]col2, ...`
 
-Sort by columns (comma-separated). Ascending by default; prefix a column with `-` to sort it descending. Directions can be mixed per column.
+Sort by columns (comma-separated). Ascending by default; prefix a column with `-` to sort it descending. Directions can be mixed per column. Sort keys must be orderable (`int`, `float`, or `string`); bool, list, record, union, and mixed schemas are rejected. Nulls sort last.
 
 ```
 dq 'users.csv | sort age, name'         // both ascending
@@ -543,6 +566,8 @@ Filter rows by expression. Expression is wrapped in braces `{ }` for clear bound
 ```
 dq 'users.csv | filter { age > 20 and city == "NY" }'
 ```
+
+The expression is bound and type-checked before row execution. It must return `bool`, `bool?`, or null-only; numbers, strings, lists, and records are invalid filter predicates.
 
 **Null and boolean handling:**
 
@@ -604,10 +629,15 @@ Row-wise transformation — create or overwrite columns with computed values.
 dq 'users.csv | transform age2 = age * 2, city = upper(city)'
 ```
 
+All assignment right-hand sides bind against the input table schema for this `transform`. Newly created or overwritten columns are visible to later pipeline stages, but not to sibling assignments in the same `transform`. Assignment target names must be unique within one `transform`.
+
 **Arithmetic propagates nulls by default:**
 ```
 dq 'sales.csv | transform total = quantity * price'  // null if either is null
 ```
+
+Integer arithmetic is exact within `int64`. Overflow in `+`, `-`, `*`,
+unary `-`, or `sum(int)` is a query error; division by zero returns null.
 
 Use `coalesce` for defaults:
 ```
@@ -636,6 +666,8 @@ b    | [ {age:25,city:z} ]                | 25      | 1
 ```
 dq 'users.csv | group name as entries | reduce entries max_age = max(age), count = count()'
 ```
+
+All assignment right-hand sides bind and type-check against the nested row schema before group rows are executed. Aggregate arguments must be column references or dot paths in that nested schema (`sum(amount)`, `first(address.city)`), not arbitrary expressions (`sum(amount + 1)`) or scalar row functions (`upper(name)`). Newly created reduce columns are visible to later pipeline stages, but not to sibling assignments in the same `reduce`. Assignment target names must be unique within one `reduce`.
 
 To drop the nested field, use `remove`:
 
@@ -690,7 +722,7 @@ dq 'users.csv | join left orders.csv on user_id'
 dq 'users.csv | join full orders.csv on id == customer_id and region == region'
 ```
 
-Each key is either a column path (same name on both sides) or `left_path == right_path`. Join key columns appear once under the left-side name; dot-path keys get a flattened column (`address.city` -> `address_city`, suffixed if taken). Colliding right-side columns are prefixed with the join file basename (for globs, derived from the pattern — e.g. `orders/*.csv` with colliding column `note` -> `orders_note`).
+Each key is either a column path (same name on both sides) or `left_path == right_path`. Join key paths bind against each side's logical schema before row execution; a missing nested field such as `address.missing` is an error, not a nullable synthetic key. Join key columns appear once under the left-side name; dot-path keys get a flattened column (`address.city` -> `address_city`, suffixed if taken). Colliding right-side columns are prefixed with the join file basename (for globs, derived from the pattern — e.g. `orders/*.csv` with colliding column `note` -> `orders_note`).
 
 The join file's format comes from its extension unless overridden with `with format=...` on the join path. Join sources support globs (`orders/part-*.csv`); matched files are concatenated before the join. Null keys never match. Keys match by exact dq type and structural value (consistent with `group`/`distinct`), so integer `1` does not match string `"1"` across formats or Avro union branches. Avro branch names/tags are not part of the key.
 
@@ -761,21 +793,21 @@ These are available in `transform` and `reduce` expressions:
 
 **Aggregations (for `reduce` only):**
 * `count()` — number of rows in group
-* `sum(col)` — sum of values (nulls ignored)
-* `avg(col)` — average (nulls ignored)
-* `min(col)`, `max(col)` — min/max (nulls ignored)
+* `sum(col)` — sum of numeric values (nulls ignored)
+* `avg(col)` — average of numeric values (nulls ignored)
+* `min(col)`, `max(col)` — min/max of orderable values (`int`, `float`, `string`; nulls ignored)
 * `first(col)`, `last(col)` — first/last value in group
 
 **Transformations (for `transform` only):**
 * `upper(s)`, `lower(s)` — case conversion (`TypeString` only)
 * `str_len(s)` — string length in Unicode code points, 0-based indexing companion (`TypeString` only)
-* `list(expr, ...)` — construct an ordered list value row-by-row. `list()` returns an empty list. Elements are positional, evaluated left-to-right, and null elements are preserved. Lists may contain mixed element types, including records from `struct(...)`.
+* `list(expr, ...)` — construct an ordered list value row-by-row. `list()` returns an empty list with no determining element schema until contextual unification or finalization resolves it. It can adopt the other typed list schema in `if`, `coalesce`, equality, and `list_contains`; when no context determines the element schema, finalization renders it as `list<string?>`. Elements are positional, evaluated left-to-right, and null elements are preserved. Lists may contain mixed element types, including records from `struct(...)`.
 * `list_len(xs)` — list element count (`TypeList` only)
-* `list_contains(xs, x)` — true if list `xs` contains `x`, using strict structural equality (`TypeList` only for `xs`)
+* `list_contains(xs, x)` — true if list `xs` contains `x`, using structural equality with exact represented-value comparison for numeric `int`/`float` pairs (`TypeList` only for `xs`; `x` must be strictly unifiable/comparable with the list element schema unless the element schema is already `mixed`; missing record fields compare as `null`)
 * `substr(s, start, length)` — substring by **0-based code point** index and length (`TypeString` only for `s`; `start` and `length` must be `TypeInt`); negative `start` counts from the end (Python-style); `length` must be non-negative
 * `trim(s)` — remove whitespace (`TypeString` only)
-* `coalesce(a, b, ...)` — first non-null value
-* `if(cond, then, else)` — conditional; only explicit `true` takes then, `false` and `null` take else
+* `coalesce(a, b, ...)` — first non-null value; arguments must have one strict common type
+* `if(cond, then, else)` — conditional; only explicit `true` takes then, `false` and `null` take else; branches must have one strict common type
 * `struct(field = expr, ...)` — construct an ordered nested record. Field names are identifiers; use backticks for names with spaces or keywords such as `` `and` ``. `struct()` returns an empty record. Null field values are preserved; schema-based writers infer null-only field types from other rows, or fall back to nullable string when all values are null.
 * `year(date)`, `month(date)`, `day(date)` — extract year, month, or day from a date string (`TypeString` only). Supported formats include `YYYY-MM-DD`, ISO timestamps, `YYYY-MM-DD HH:MM:SS`, and common slash-separated forms (see `engine/functions.go` `dateFormats`). Null input → null. Unparseable strings **error** and fail the query (same strict parse semantics as BigQuery `PARSE_DATE`, Trino `date_parse`, PostgreSQL `::date` — not silent null).
 

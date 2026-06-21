@@ -826,6 +826,43 @@ func (c *Column) Len() int { return len(c.nulls) }
 // ColType returns the column's ValueType.
 func (c *Column) ColType() ValueType { return c.typ }
 
+// IsNullAt reports whether row i is out of range or null.
+func (c *Column) IsNullAt(i int) bool {
+	return c == nil || i < 0 || i >= len(c.nulls) || c.nulls[i]
+}
+
+// IntAt returns the int value at row i when the column stores a non-null int.
+func (c *Column) IntAt(i int) (int64, bool) {
+	if c == nil || c.typ != TypeInt || c.IsNullAt(i) {
+		return 0, false
+	}
+	return c.ints[i], true
+}
+
+// FloatAt returns the float value at row i when the column stores a non-null float.
+func (c *Column) FloatAt(i int) (float64, bool) {
+	if c == nil || c.typ != TypeFloat || c.IsNullAt(i) {
+		return 0, false
+	}
+	return c.floats[i], true
+}
+
+// StringAt returns the string value at row i when the column stores a non-null string.
+func (c *Column) StringAt(i int) (string, bool) {
+	if c == nil || c.typ != TypeString || c.IsNullAt(i) {
+		return "", false
+	}
+	return c.strs[i], true
+}
+
+// BoolAt returns the bool value at row i when the column stores a non-null bool.
+func (c *Column) BoolAt(i int) (bool, bool) {
+	if c == nil || c.typ != TypeBool || c.IsNullAt(i) {
+		return false, false
+	}
+	return c.bools[i], true
+}
+
 // Schema returns the column's recursive type descriptor, when known.
 func (c *Column) Schema() *TypeDescriptor {
 	if c == nil {
@@ -978,23 +1015,53 @@ func (t *Table) AppendTypedComputedColumns(names []string, schemas []*TypeDescri
 	if len(valuesByColumn) != len(names) {
 		return nil, fmt.Errorf("computed columns: got %d value columns for %d columns", len(valuesByColumn), len(names))
 	}
+	for i, name := range names {
+		if len(valuesByColumn[i]) != t.NumRows {
+			return nil, fmt.Errorf("computed column %q has %d values for %d rows", name, len(valuesByColumn[i]), t.NumRows)
+		}
+	}
+	return t.AppendTypedComputedColumnsFunc(names, schemas, func(row int, values []Value) error {
+		for i := range names {
+			values[i] = valuesByColumn[i][row]
+		}
+		return nil
+	})
+}
 
+// AppendTypedComputedColumnsFunc returns a new table that shares the receiver's
+// existing columns and streams computed columns validated against fixed schemas.
+// The compute callback receives a scratch row buffer with one slot per computed
+// column. The buffer is reused across rows and must not be retained.
+func (t *Table) AppendTypedComputedColumnsFunc(names []string, schemas []*TypeDescriptor, compute func(row int, values []Value) error) (*Table, error) {
+	if len(schemas) != len(names) {
+		return nil, fmt.Errorf("computed columns: got %d schemas for %d columns", len(schemas), len(names))
+	}
+	if compute == nil {
+		return nil, fmt.Errorf("computed columns: compute function is nil")
+	}
 	result := &Table{
 		Columns: make([]string, len(t.Columns)+len(names)),
 		cols:    make([]*Column, len(t.cols)+len(names)),
-		NumRows: t.NumRows,
 	}
 	copy(result.Columns, t.Columns)
 	copy(result.cols, t.cols)
 	copy(result.Columns[len(t.Columns):], names)
 
 	for i, name := range names {
-		if len(valuesByColumn[i]) != t.NumRows {
-			return nil, fmt.Errorf("computed column %q has %d values for %d rows", name, len(valuesByColumn[i]), t.NumRows)
-		}
 		col := newColumnWithSchema(name, schemas[i])
 		preallocateColumnStorage(col, t.NumRows)
-		for _, v := range valuesByColumn[i] {
+		result.cols[len(t.cols)+i] = col
+	}
+
+	values := make([]Value, len(names))
+	for row := 0; row < t.NumRows; row++ {
+		clear(values)
+		if err := compute(row, values); err != nil {
+			return nil, err
+		}
+		for i, v := range values {
+			name := names[i]
+			col := result.cols[len(t.cols)+i]
 			cv, err := coerceValueForTypedAppend(v, col.schema, name)
 			if err != nil {
 				return nil, err
@@ -1012,7 +1079,7 @@ func (t *Table) AppendTypedComputedColumns(names []string, schemas []*TypeDescri
 			}
 			col.appendCoerced(cv)
 		}
-		result.cols[len(t.cols)+i] = col
+		result.NumRows++
 	}
 	return result, nil
 }
@@ -1158,12 +1225,14 @@ func typedAppendNeedsSchemaMerge(schema *TypeDescriptor, v Value) bool {
 }
 
 func valueMayChangeSchemaNullability(schema *TypeDescriptor, v Value) bool {
-	schema = FinalizeSchema(schema)
 	if schema == nil {
 		return false
 	}
+	if schema.Kind == TypeNull {
+		return false
+	}
 	if v.Type == TypeNull {
-		return !schema.Nullable && schema.Kind != TypeNull
+		return !schema.Nullable
 	}
 	if schema.Kind == TypeUnion {
 		return valueContainsNull(v)

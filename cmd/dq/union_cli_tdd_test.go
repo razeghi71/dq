@@ -571,19 +571,20 @@ func TestCLIAvroUnionTypesTDD(t *testing.T) {
 		queries := []struct {
 			name string
 			q    string
+			want []string
 		}{
-			{"filter_arithmetic_int_only", intOnly + " | filter { u + 0 == 7 } | count | json"},
-			{"filter_arithmetic_mixed", mixed + " | filter { u + 0 == 7 } | count | json"},
-			{"filter_coalesce_int_only", intOnly + " | filter { coalesce(u, 1.5) == 7 } | count | json"},
-			{"filter_coalesce_mixed", mixed + " | filter { coalesce(u, 1.5) == 7 } | count | json"},
-			{"transform_arithmetic", intOnly + " | transform eq = u + 0 == 7 | json"},
-			{"transform_coalesce", intOnly + " | transform eq = coalesce(u, 1.5) == 7 | json"},
-			{"transform_if_condition", intOnly + ` | transform label = if(u + 0 == 7, "yes", "no") | json`},
+			{"filter_arithmetic_int_only", intOnly + " | filter { u + 0 == 7 } | count | json", []string{"union", "numeric operands"}},
+			{"filter_arithmetic_mixed", mixed + " | filter { u + 0 == 7 } | count | json", []string{"union", "numeric operands"}},
+			{"filter_coalesce_int_only", intOnly + " | filter { coalesce(u, 1.5) == 7 } | count | json", []string{"union", "compare"}},
+			{"filter_coalesce_mixed", mixed + " | filter { coalesce(u, 1.5) == 7 } | count | json", []string{"union", "compare"}},
+			{"transform_arithmetic", intOnly + " | transform eq = u + 0 == 7 | json", []string{"union", "numeric operands"}},
+			{"transform_coalesce", intOnly + " | transform eq = coalesce(u, 1.5) == 7 | json", []string{"union", "compare"}},
+			{"transform_if_condition", intOnly + ` | transform label = if(u + 0 == 7, "yes", "no") | json`, []string{"union", "numeric operands"}},
 		}
 		for _, tc := range queries {
 			t.Run(tc.name, func(t *testing.T) {
 				out := strings.ToLower(string(runCLIQueryExpectError(t, bin, tc.q)))
-				for _, part := range []string{"union", "compare"} {
+				for _, part := range tc.want {
 					if !strings.Contains(out, part) {
 						t.Fatalf("%s union comparison error missing %q:\n%s", tc.name, part, out)
 					}

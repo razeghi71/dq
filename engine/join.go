@@ -136,18 +136,13 @@ func execJoin(o *ast.JoinOp, left *table.Table, load LoadFunc) (*table.Table, er
 type resolvedJoinKey struct {
 	path    []string
 	colName string // dot-path flattened to underscores (matches select/group convention)
+	typ     *table.TypeDescriptor
 }
 
 func resolveJoinKeys(keys []ast.JoinKey, left, right *table.Table) ([]resolvedJoinKey, []resolvedJoinKey, error) {
 	leftKeys := make([]resolvedJoinKey, len(keys))
 	rightKeys := make([]resolvedJoinKey, len(keys))
 	for i, k := range keys {
-		if err := validatePathDoesNotTraverseUnion("join", left, k.Left); err != nil {
-			return nil, nil, err
-		}
-		if err := validatePathDoesNotTraverseUnion("join", right, k.Right); err != nil {
-			return nil, nil, err
-		}
 		lk, err := resolveJoinKeySide(k.Left, left, "left")
 		if err != nil {
 			return nil, nil, fmt.Errorf("join: %w", err)
@@ -166,7 +161,11 @@ func resolveJoinKeySide(path []string, t *table.Table, side string) (resolvedJoi
 	if t.ColIndex(path[0]) < 0 {
 		return resolvedJoinKey{}, fmt.Errorf("%s join key column %q not found", side, path[0])
 	}
-	return resolvedJoinKey{path: path, colName: pathToColumnName(path)}, nil
+	bound, err := bindColumnPath(t, path, &ast.ColumnExpr{Path: path})
+	if err != nil {
+		return resolvedJoinKey{}, fmt.Errorf("%s join key %q: %w", side, strings.Join(path, "."), err)
+	}
+	return resolvedJoinKey{path: path, colName: pathToColumnName(path), typ: bound.typ}, nil
 }
 
 // buildJoinSchema computes the output schema. It returns the output column
@@ -240,8 +239,8 @@ func buildJoinOutputSchemas(left, right *table.Table, leftKeys, rightKeys []reso
 
 	for i := range leftKeys {
 		outIdx := leftKeyOutIdx[i]
-		leftSchema := schemaForPath(left, leftKeys[i].path)
-		rightSchema := schemaForPath(right, rightKeys[i].path)
+		leftSchema := leftKeys[i].typ
+		rightSchema := rightKeys[i].typ
 		if leftSchema == nil {
 			leftSchema = rightSchema
 		}

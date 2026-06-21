@@ -92,6 +92,17 @@ func loadAndQueryExpectErr(t *testing.T, source, query string) error {
 	return err
 }
 
+func expectLoadAndQueryErrContains(t *testing.T, source, query, want string) {
+	t.Helper()
+	err := loadAndQueryExpectErr(t, source, query)
+	if err == nil {
+		t.Fatalf("expected error containing %q", want)
+	}
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("expected error containing %q, got: %v", want, err)
+	}
+}
+
 func flatUserFormatFiles() []struct {
 	name string
 	file string
@@ -412,14 +423,8 @@ func assertNestedQueries(t *testing.T, file string) {
 		}
 	})
 
-	t.Run("missing_subfield_null", func(t *testing.T) {
-		result := loadAndQuery(t, file, "transform x = address.nonexistent | select name, x")
-		xIdx := result.ColIndex("x")
-		for i := 0; i < result.NumRows; i++ {
-			if !result.GetAt(i, xIdx).IsNull() {
-				t.Errorf("row %d: expected null for missing field, got %v", i, result.GetAt(i, xIdx))
-			}
-		}
+	t.Run("missing_subfield_error", func(t *testing.T) {
+		expectLoadAndQueryErrContains(t, file, "transform x = address.nonexistent | select name, x", `field "nonexistent" not found`)
 	})
 
 	t.Run("sort_by_nested", func(t *testing.T) {
@@ -1756,10 +1761,7 @@ func TestIntegrationEmptyCSV(t *testing.T) {
 	})
 
 	t.Run("select", func(t *testing.T) {
-		result := loadAndQuery(t, path, "select name")
-		if result.NumRows != 0 || len(result.Columns) != 1 || result.Columns[0] != "name" {
-			t.Fatalf("expected empty projected table, got %s", result.String())
-		}
+		expectLoadAndQueryErrContains(t, path, "select name", `column "name" not found`)
 	})
 
 	t.Run("describe_zero_column_source", func(t *testing.T) {
@@ -1768,9 +1770,6 @@ func TestIntegrationEmptyCSV(t *testing.T) {
 	})
 
 	t.Run("describe_after_select_on_empty_source", func(t *testing.T) {
-		result := loadAndQuery(t, path, "select name | describe")
-		assertDescribeRows(t, result, map[string]describeMeta{
-			"name": {typ: "null", rows: 0},
-		})
+		expectLoadAndQueryErrContains(t, path, "select name | describe", `column "name" not found`)
 	})
 }

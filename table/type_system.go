@@ -113,6 +113,28 @@ func CoerceValueToSchemaModeAtPath(v Value, schema *TypeDescriptor, mode ValueCo
 	}
 }
 
+// CoerceValueToFinalSchemaMode validates and coerces a value against a schema
+// the caller has already finalized and cached.
+func CoerceValueToFinalSchemaMode(v Value, schema *TypeDescriptor, mode ValueCoerceMode) (Value, error) {
+	return CoerceValueToFinalSchemaModeAtPath(v, schema, mode, "")
+}
+
+// CoerceValueToFinalSchemaModeAtPath is CoerceValueToFinalSchemaMode with a
+// diagnostic path prefix.
+func CoerceValueToFinalSchemaModeAtPath(v Value, schema *TypeDescriptor, mode ValueCoerceMode, path string) (Value, error) {
+	if err := ValidateSchemaAtPath(schema, path); err != nil {
+		return Null(), err
+	}
+	switch mode {
+	case CoerceExactMode:
+		return coerceValueToExactUnionBranch(v, schema, path)
+	case CoerceCoerciveMode:
+		return coerceValueToSchema(v, schema, path)
+	default:
+		return coerceValueToSchema(v, schema, path)
+	}
+}
+
 // ValidateSchema rejects ambiguous descriptors such as records with duplicate
 // field names. Nil schemas are accepted as unknown schemas.
 func ValidateSchema(schema *TypeDescriptor) error {

@@ -246,7 +246,7 @@ func TestFixedSchemaContractZeroRowTransformPropagatesNullability(t *testing.T) 
 		"both":      {typ: "bool", rows: 0, schema: "bool?"},
 		"either":    {typ: "bool", rows: 0, schema: "bool?"},
 		"lt":        {typ: "bool", rows: 0, schema: "bool?"},
-		"eq":        {typ: "bool", rows: 0, schema: "bool"},
+		"eq":        {typ: "bool", rows: 0, schema: "bool?"},
 		"is_null":   {typ: "bool", rows: 0, schema: "bool"},
 	})
 }
@@ -573,220 +573,42 @@ func TestFixedSchemaContractJoinSchemas(t *testing.T) {
 	})
 }
 
-func TestFixedSchemaContractPermissiveTransformFallbackFeedsLaterStrictOps(t *testing.T) {
-	recordTransform := `transform r = if(age == 30, struct(x = 1), struct(x = "a"))`
-	listTransform := `transform xs = if(age == 30, list(struct(x = 1)), list(struct(x = "a")))`
-	lateRecordTransform := `transform r = if(city == "LA", struct(x = "a"), struct(x = age))`
-	lateListTransform := `transform xs = if(city == "LA", list(struct(x = "a")), list(struct(x = age)))`
-	nestedIfRecordTransform := `transform r = if(age == 30, struct(x = 1, y = "z"), if(city == "LA", struct(x = "a", y = "b"), struct(x = age)))`
-	nestedIfListTransform := `transform xs = if(age == 30, list(struct(x = 1, y = "z")), if(city == "LA", list(struct(x = "a", y = "b")), list(struct(x = age))))`
-	numericRecordTransform := `transform r = if(age == 30, struct(x = 1, y = 1), if(city == "LA", struct(x = 2.5, y = "b"), struct(x = age, y = 2)))`
-	numericListTransform := `transform xs = if(age == 30, list(struct(x = 1, y = 1)), if(city == "LA", list(struct(x = 2.5, y = "b")), list(struct(x = age, y = 2))))`
-
+func TestFixedSchemaContractIncompatibleTransformBranchesFailDuringPlanning(t *testing.T) {
 	cases := []struct {
 		name  string
 		query string
-		count int64
 	}{
-		{
-			name:  "record_then_filter",
-			query: recordTransform + ` | filter { true } | count`,
-			count: 6,
-		},
-		{
-			name:  "record_then_select_dot_path",
-			query: recordTransform + ` | select r.x | count`,
-			count: 6,
-		},
-		{
-			name:  "record_then_group_dot_path",
-			query: recordTransform + ` | group r.x | count`,
-			count: 2,
-		},
-		{
-			name:  "record_then_distinct",
-			query: recordTransform + ` | distinct r | count`,
-			count: 2,
-		},
-		{
-			name:  "list_then_filter",
-			query: listTransform + ` | filter { true } | count`,
-			count: 6,
-		},
-		{
-			name:  "list_then_select",
-			query: listTransform + ` | select xs | count`,
-			count: 6,
-		},
-		{
-			name:  "list_then_group",
-			query: listTransform + ` | group xs | count`,
-			count: 2,
-		},
-		{
-			name:  "list_then_distinct",
-			query: listTransform + ` | distinct xs | count`,
-			count: 2,
-		},
-		{
-			name:  "late_record_then_filter_select_dot_path",
-			query: lateRecordTransform + ` | filter { true } | select r.x | count`,
-			count: 6,
-		},
-		{
-			name:  "late_record_then_group_dot_path",
-			query: lateRecordTransform + ` | group r.x | count`,
-			count: 5,
-		},
-		{
-			name:  "late_record_then_distinct",
-			query: lateRecordTransform + ` | distinct r | count`,
-			count: 5,
-		},
-		{
-			name:  "late_list_then_select",
-			query: lateListTransform + ` | select xs | count`,
-			count: 6,
-		},
-		{
-			name:  "late_list_then_group",
-			query: lateListTransform + ` | group xs | count`,
-			count: 5,
-		},
-		{
-			name:  "late_list_then_distinct",
-			query: lateListTransform + ` | distinct xs | count`,
-			count: 5,
-		},
-		{
-			name:  "nested_if_record_then_filter_select_dot_path",
-			query: nestedIfRecordTransform + ` | filter { true } | select r.y | count`,
-			count: 6,
-		},
-		{
-			name:  "nested_if_record_then_group_dot_path",
-			query: nestedIfRecordTransform + ` | group r.y | count`,
-			count: 3,
-		},
-		{
-			name:  "nested_if_record_then_distinct",
-			query: nestedIfRecordTransform + ` | distinct r | count`,
-			count: 5,
-		},
-		{
-			name:  "nested_if_list_then_select",
-			query: nestedIfListTransform + ` | select xs | count`,
-			count: 6,
-		},
-		{
-			name:  "nested_if_list_then_group",
-			query: nestedIfListTransform + ` | group xs | count`,
-			count: 5,
-		},
-		{
-			name:  "nested_if_list_then_distinct",
-			query: nestedIfListTransform + ` | distinct xs | count`,
-			count: 5,
-		},
-		{
-			name:  "numeric_record_then_float_comparison_filter",
-			query: numericRecordTransform + ` | filter { r.x == 1.0 } | count`,
-			count: 1,
-		},
-		{
-			name:  "numeric_record_then_group_dot_path",
-			query: numericRecordTransform + ` | group r.x | count`,
-			count: 5,
-		},
-		{
-			name:  "numeric_record_then_distinct",
-			query: numericRecordTransform + ` | distinct r | count`,
-			count: 5,
-		},
-		{
-			name:  "numeric_list_then_select",
-			query: numericListTransform + ` | select xs | count`,
-			count: 6,
-		},
-		{
-			name:  "numeric_list_then_group",
-			query: numericListTransform + ` | group xs | count`,
-			count: 5,
-		},
-		{
-			name:  "numeric_list_then_distinct",
-			query: numericListTransform + ` | distinct xs | count`,
-			count: 5,
-		},
+		{"record_field_type_conflict", `transform r = if(age == 30, struct(x = 1), struct(x = "a"))`},
+		{"list_record_field_type_conflict", `transform xs = if(age == 30, list(struct(x = 1)), list(struct(x = "a")))`},
+		{"late_record_field_type_conflict", `transform r = if(city == "LA", struct(x = "a"), struct(x = age))`},
+		{"late_list_field_type_conflict", `transform xs = if(city == "LA", list(struct(x = "a")), list(struct(x = age)))`},
+		{"nested_record_field_type_conflict", `transform r = if(age == 30, struct(x = 1, y = "z"), if(city == "LA", struct(x = "a", y = "b"), struct(x = age)))`},
+		{"list_scalar_conflict", `transform xs = if(age == 30, list(1, 2), "off")`},
+		{"numeric_string_field_conflict", `transform r = if(age == 30, struct(x = 1, y = 1), if(city == "LA", struct(x = 2.5, y = "b"), struct(x = age, y = 2)))`},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			requireFixedSchemaContractCount(t, runQuery(t, usersTable(), tc.query), tc.count)
+			expectQueryErrContains(t, usersTable(), tc.query, "if() branches do not have one common type")
 		})
 	}
 }
 
-func TestFixedSchemaContractPermissiveTransformFallbackNormalizesNestedNumericValues(t *testing.T) {
-	result := runQuery(t, usersTable(), `transform r = if(age == 30, struct(x = 1, y = 1), if(city == "LA", struct(x = 2.5, y = "b"), struct(x = age, y = 2))) | select r.x, r.y`)
-	if result.NumRows != 6 {
-		t.Fatalf("row count: got %d, want 6", result.NumRows)
-	}
-	xIdx := result.ColIndex("r_x")
-	yIdx := result.ColIndex("r_y")
-	if xIdx < 0 || yIdx < 0 {
-		t.Fatalf("expected r_x and r_y columns, got %v", result.Columns)
-	}
-	for row, want := range []float64{1, 2.5, 35, 28, 2.5, 40} {
-		got := result.GetAt(row, xIdx)
-		if got.Type != table.TypeFloat || got.Float != want {
-			t.Fatalf("row %d r_x: got %v, want float %g", row, got, want)
-		}
-	}
-	for row, want := range []string{"1", "b", "2", "2", "b", "2"} {
-		got := result.GetAt(row, yIdx)
-		if got.Type != table.TypeString || got.Str != want {
-			t.Fatalf("row %d r_y: got %v, want string %q", row, got, want)
-		}
-	}
+func TestFixedSchemaContractCompatibleTransformBranchesProducePlannedSchemas(t *testing.T) {
+	result := runQuery(t, usersTable(), `transform r = if(age == 30, struct(x = 1, y = 1), if(city == "LA", struct(x = 2.5, y = 2), struct(x = age, y = 2))) | select r.x, r.y | describe`)
+	assertDescribeSchemaRows(t, result, map[string]describeSchemaMeta{
+		"r_x": {typ: "float", rows: 6, schema: "float"},
+		"r_y": {typ: "int", rows: 6, schema: "int"},
+	})
 
-	listResult := runQuery(t, usersTable(), `transform xs = if(age == 30, list(struct(x = 1, y = 1)), if(city == "LA", list(struct(x = 2.5, y = "b")), list(struct(x = age, y = 2)))) | select xs`)
-	xsIdx := listResult.ColIndex("xs")
-	if xsIdx < 0 {
-		t.Fatalf("xs column not found in %v", listResult.Columns)
-	}
-	for row, want := range []float64{1, 2.5, 35, 28, 2.5, 40} {
-		xs := listResult.GetAt(row, xsIdx)
-		if xs.Type != table.TypeList || len(xs.List) != 1 || xs.List[0].Type != table.TypeRecord {
-			t.Fatalf("row %d xs: got %v, want one record", row, xs)
-		}
-		fields := recordValuesForTest(t, xs.List[0])
-		got := fields["x"]
-		if got.Type != table.TypeFloat || got.Float != want {
-			t.Fatalf("row %d xs[0].x: got %v, want float %g", row, got, want)
-		}
-	}
+	listResult := runQuery(t, usersTable(), `transform xs = if(age == 30, list(struct(x = 1, y = 1)), if(city == "LA", list(struct(x = 2.5, y = 2)), list(struct(x = age, y = 2)))) | select xs | describe`)
+	assertDescribeSchemaRows(t, listResult, map[string]describeSchemaMeta{
+		"xs": {typ: "list", rows: 6, schema: "list<record<x:float, y:int>>"},
+	})
 }
 
-func TestFixedSchemaContractPermissiveTransformFallbackNormalizesLateDotPathValues(t *testing.T) {
-	result := runQuery(t, usersTable(), `transform r = if(city == "LA", struct(x = "a"), struct(x = age)) | select r.x`)
-	if result.NumRows != 6 {
-		t.Fatalf("row count: got %d, want 6", result.NumRows)
-	}
-	xIdx := result.ColIndex("r_x")
-	if xIdx < 0 {
-		t.Fatalf("r_x column not found in %v", result.Columns)
-	}
-	for row, want := range []string{"30", "a", "35", "28", "a", "40"} {
-		got := result.GetAt(row, xIdx)
-		if got.Type != table.TypeString || got.Str != want {
-			t.Fatalf("row %d r_x: got %v, want string %q", row, got, want)
-		}
-	}
-}
-
-func TestFixedSchemaContractPermissiveTransformFallbackHandlesUnplannedNestedIf(t *testing.T) {
-	result := runQuery(t, usersTable(), `transform r = if(age == 30, struct(x = 1, y = "z"), if(city == "LA", struct(x = "a", y = "b"), struct(x = age))) | select r.y`)
+func TestFixedSchemaContractRecordBranchMissingFieldsRemainNullable(t *testing.T) {
+	result := runQuery(t, usersTable(), `transform r = if(age == 30, struct(x = 1, y = "z"), struct(x = age)) | select r.y`)
 	if result.NumRows != 6 {
 		t.Fatalf("row count: got %d, want 6", result.NumRows)
 	}
@@ -794,29 +616,17 @@ func TestFixedSchemaContractPermissiveTransformFallbackHandlesUnplannedNestedIf(
 	if yIdx < 0 {
 		t.Fatalf("r_y column not found in %v", result.Columns)
 	}
-	for row, want := range []table.Value{table.StrVal("z"), table.StrVal("b"), table.Null(), table.Null(), table.StrVal("b"), table.Null()} {
+	for row, want := range []table.Value{table.StrVal("z"), table.Null(), table.Null(), table.Null(), table.Null(), table.Null()} {
 		got := result.GetAt(row, yIdx)
 		if !table.Equal(got, want) {
 			t.Fatalf("row %d r_y: got %v, want %v", row, got, want)
 		}
 	}
-}
 
-func TestFixedSchemaContractPermissiveTransformFallbackNormalizesSelectedDotPathValues(t *testing.T) {
-	result := runQuery(t, usersTable(), `transform r = if(age == 30, struct(x = 1), struct(x = "a")) | select name, r.x`)
-	if result.NumRows != 6 {
-		t.Fatalf("row count: got %d, want 6", result.NumRows)
-	}
-	xIdx := result.ColIndex("r_x")
-	if xIdx < 0 {
-		t.Fatalf("r_x column not found in %v", result.Columns)
-	}
-	for row, want := range []string{"1", "a"} {
-		got := result.GetAt(row, xIdx)
-		if got.Type != table.TypeString || got.Str != want {
-			t.Fatalf("row %d r_x: got %v, want string %q", row, got, want)
-		}
-	}
+	describe := runQuery(t, usersTable(), `transform r = if(age == 30, struct(x = 1, y = "z"), struct(x = age)) | select r.y | describe`)
+	assertDescribeSchemaRows(t, describe, map[string]describeSchemaMeta{
+		"r_y": {typ: "string", rows: 6, schema: "string?"},
+	})
 }
 
 func requireFixedSchemaContractCount(t *testing.T, result *table.Table, want int64) {

@@ -2,7 +2,6 @@ package engine
 
 import (
 	"fmt"
-	"math"
 	"regexp"
 	"strings"
 	"sync"
@@ -13,84 +12,43 @@ import (
 	"github.com/razeghi71/dq/table"
 )
 
-// evalFunc dispatches function calls to the appropriate implementation.
-func evalFunc(e *ast.FuncCallExpr, ctx *EvalContext) (table.Value, error) {
-	switch e.Name {
-	// Transform functions
+type scalarArgEvaluator func(int) (table.Value, error)
+
+func evalScalarFunction(name string, argc int, evalArg scalarArgEvaluator) (table.Value, error) {
+	switch name {
 	case "upper":
-		return callUpper(e.Args, ctx)
+		return evalStringUnaryFunction(name, argc, evalArg, strings.ToUpper)
 	case "lower":
-		return callLower(e.Args, ctx)
-	case "str_len":
-		return callStrLen(e.Args, ctx)
-	case "list_len":
-		return callListLen(e.Args, ctx)
-	case "substr":
-		return callSubstr(e.Args, ctx)
+		return evalStringUnaryFunction(name, argc, evalArg, strings.ToLower)
 	case "trim":
-		return callTrim(e.Args, ctx)
+		return evalStringUnaryFunction(name, argc, evalArg, strings.TrimSpace)
+	case "str_len":
+		return evalStringToIntFunction(name, argc, evalArg, stringCodePointCount)
+	case "list_len":
+		return evalListLenFunction(argc, evalArg)
+	case "substr":
+		return evalSubstrFunction(argc, evalArg)
 	case "str_contains":
-		return callStrContains(e.Args, ctx)
+		return evalStringPredicateFunction(name, "substring", argc, evalArg, strings.Contains)
 	case "list_contains":
-		return callListContains(e.Args, ctx)
+		return evalListContainsFunction(argc, evalArg)
 	case "starts_with":
-		return callStartsWith(e.Args, ctx)
+		return evalStringPredicateFunction(name, "prefix", argc, evalArg, strings.HasPrefix)
 	case "ends_with":
-		return callEndsWith(e.Args, ctx)
+		return evalStringPredicateFunction(name, "suffix", argc, evalArg, strings.HasSuffix)
 	case "matches":
-		return callMatches(e.Args, ctx)
+		return evalMatchesFunction(argc, evalArg)
 	case "coalesce":
-		return callCoalesce(e.Args, ctx)
+		return evalCoalesceFunction(argc, evalArg)
 	case "if":
-		return callIf(e.Args, ctx)
-	case "year":
-		return callDatePart(e.Args, ctx, "year")
-	case "month":
-		return callDatePart(e.Args, ctx, "month")
-	case "day":
-		return callDatePart(e.Args, ctx, "day")
-
-	// Aggregate functions (only valid inside reduce, handled by engine)
+		return evalIfFunction(argc, evalArg)
+	case "year", "month", "day":
+		return evalDatePartFunction(name, argc, evalArg)
 	case "count", "sum", "avg", "min", "max", "first", "last":
-		return table.Null(), fmt.Errorf("aggregate function %q can only be used inside 'reduce'", e.Name)
-
+		return table.Null(), fmt.Errorf("aggregate function %q can only be used inside 'reduce'", name)
 	default:
-		return table.Null(), fmt.Errorf("unknown function %q", e.Name)
+		return table.Null(), fmt.Errorf("unknown function %q", name)
 	}
-}
-
-func callUpper(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
-	if len(args) != 1 {
-		return table.Null(), fmt.Errorf("upper() takes 1 argument, got %d", len(args))
-	}
-	v, err := Eval(args[0], ctx)
-	if err != nil {
-		return table.Null(), err
-	}
-	if v.IsNull() {
-		return table.Null(), nil
-	}
-	if v.Type != table.TypeString {
-		return table.Null(), fmt.Errorf("upper() requires a string, got %s", valueTypeName(v))
-	}
-	return table.StrVal(strings.ToUpper(v.Str)), nil
-}
-
-func callLower(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
-	if len(args) != 1 {
-		return table.Null(), fmt.Errorf("lower() takes 1 argument, got %d", len(args))
-	}
-	v, err := Eval(args[0], ctx)
-	if err != nil {
-		return table.Null(), err
-	}
-	if v.IsNull() {
-		return table.Null(), nil
-	}
-	if v.Type != table.TypeString {
-		return table.Null(), fmt.Errorf("lower() requires a string, got %s", valueTypeName(v))
-	}
-	return table.StrVal(strings.ToLower(v.Str)), nil
 }
 
 func valueTypeName(v table.Value) string {
@@ -114,11 +72,11 @@ func valueTypeName(v table.Value) string {
 	}
 }
 
-func callStrLen(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
-	if len(args) != 1 {
-		return table.Null(), fmt.Errorf("str_len() takes 1 argument, got %d", len(args))
+func evalStringUnaryFunction(name string, argc int, evalArg scalarArgEvaluator, fn func(string) string) (table.Value, error) {
+	if argc != 1 {
+		return table.Null(), fmt.Errorf("%s() takes 1 argument, got %d", name, argc)
 	}
-	v, err := Eval(args[0], ctx)
+	v, err := evalArg(0)
 	if err != nil {
 		return table.Null(), err
 	}
@@ -126,16 +84,33 @@ func callStrLen(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
 		return table.Null(), nil
 	}
 	if v.Type != table.TypeString {
-		return table.Null(), fmt.Errorf("str_len() requires a string, got %s", valueTypeName(v))
+		return table.Null(), fmt.Errorf("%s() requires a string, got %s", name, valueTypeName(v))
 	}
-	return table.IntVal(int64(stringCodePointCount(v.Str))), nil
+	return table.StrVal(fn(v.Str)), nil
 }
 
-func callListLen(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
-	if len(args) != 1 {
-		return table.Null(), fmt.Errorf("list_len() takes 1 argument, got %d", len(args))
+func evalStringToIntFunction(name string, argc int, evalArg scalarArgEvaluator, fn func(string) int) (table.Value, error) {
+	if argc != 1 {
+		return table.Null(), fmt.Errorf("%s() takes 1 argument, got %d", name, argc)
 	}
-	v, err := Eval(args[0], ctx)
+	v, err := evalArg(0)
+	if err != nil {
+		return table.Null(), err
+	}
+	if v.IsNull() {
+		return table.Null(), nil
+	}
+	if v.Type != table.TypeString {
+		return table.Null(), fmt.Errorf("%s() requires a string, got %s", name, valueTypeName(v))
+	}
+	return table.IntVal(int64(fn(v.Str))), nil
+}
+
+func evalListLenFunction(argc int, evalArg scalarArgEvaluator) (table.Value, error) {
+	if argc != 1 {
+		return table.Null(), fmt.Errorf("list_len() takes 1 argument, got %d", argc)
+	}
+	v, err := evalArg(0)
 	if err != nil {
 		return table.Null(), err
 	}
@@ -199,11 +174,11 @@ func substrByCodePoints(s string, start, length int) string {
 	return b.String()
 }
 
-func callSubstr(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
-	if len(args) != 3 {
-		return table.Null(), fmt.Errorf("substr() takes 3 arguments (string, start, length), got %d", len(args))
+func evalSubstrFunction(argc int, evalArg scalarArgEvaluator) (table.Value, error) {
+	if argc != 3 {
+		return table.Null(), fmt.Errorf("substr() takes 3 arguments (string, start, length), got %d", argc)
 	}
-	sv, err := Eval(args[0], ctx)
+	sv, err := evalArg(0)
 	if err != nil {
 		return table.Null(), err
 	}
@@ -213,13 +188,11 @@ func callSubstr(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
 	if sv.Type != table.TypeString {
 		return table.Null(), fmt.Errorf("substr() requires a string, got %s", valueTypeName(sv))
 	}
-	s := sv.Str
-
-	startV, err := Eval(args[1], ctx)
+	startV, err := evalArg(1)
 	if err != nil {
 		return table.Null(), err
 	}
-	lenV, err := Eval(args[2], ctx)
+	lenV, err := evalArg(2)
 	if err != nil {
 		return table.Null(), err
 	}
@@ -245,38 +218,21 @@ func callSubstr(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
 	if length < 0 {
 		return table.Null(), fmt.Errorf("substr: length must not be negative")
 	}
-	return table.StrVal(substrByCodePoints(s, start, length)), nil
-}
-
-func callTrim(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
-	if len(args) != 1 {
-		return table.Null(), fmt.Errorf("trim() takes 1 argument, got %d", len(args))
-	}
-	v, err := Eval(args[0], ctx)
-	if err != nil {
-		return table.Null(), err
-	}
-	if v.IsNull() {
-		return table.Null(), nil
-	}
-	if v.Type != table.TypeString {
-		return table.Null(), fmt.Errorf("trim() requires a string, got %s", valueTypeName(v))
-	}
-	return table.StrVal(strings.TrimSpace(v.Str)), nil
+	return table.StrVal(substrByCodePoints(sv.Str, start, length)), nil
 }
 
 // strPredicateArgs evaluates the two arguments of a binary string predicate.
 // Both arguments must be TypeString (non-string types error); null yields ok=false
 // so the caller can propagate null. On success, returns the haystack and needle strings.
-func strPredicateArgs(name, secondArgLabel string, args []ast.Expr, ctx *EvalContext) (s, sub string, ok bool, err error) {
-	if len(args) != 2 {
-		return "", "", false, fmt.Errorf("%s() takes 2 arguments (string, %s), got %d", name, secondArgLabel, len(args))
+func evalStringPredicateArgs(name, secondArgLabel string, argc int, evalArg scalarArgEvaluator) (s, sub string, ok bool, err error) {
+	if argc != 2 {
+		return "", "", false, fmt.Errorf("%s() takes 2 arguments (string, %s), got %d", name, secondArgLabel, argc)
 	}
-	sv, err := Eval(args[0], ctx)
+	sv, err := evalArg(0)
 	if err != nil {
 		return "", "", false, err
 	}
-	subv, err := Eval(args[1], ctx)
+	subv, err := evalArg(1)
 	if err != nil {
 		return "", "", false, err
 	}
@@ -292,26 +248,26 @@ func strPredicateArgs(name, secondArgLabel string, args []ast.Expr, ctx *EvalCon
 	return sv.Str, subv.Str, true, nil
 }
 
-func callStrContains(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
-	s, sub, ok, err := strPredicateArgs("str_contains", "substring", args, ctx)
+func evalStringPredicateFunction(name, secondArgLabel string, argc int, evalArg scalarArgEvaluator, fn func(string, string) bool) (table.Value, error) {
+	s, sub, ok, err := evalStringPredicateArgs(name, secondArgLabel, argc, evalArg)
 	if err != nil {
 		return table.Null(), err
 	}
 	if !ok {
 		return table.Null(), nil
 	}
-	return table.BoolVal(strings.Contains(s, sub)), nil
+	return table.BoolVal(fn(s, sub)), nil
 }
 
-func callListContains(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
-	if len(args) != 2 {
-		return table.Null(), fmt.Errorf("list_contains() takes 2 arguments (list, element), got %d", len(args))
+func evalListContainsFunction(argc int, evalArg scalarArgEvaluator) (table.Value, error) {
+	if argc != 2 {
+		return table.Null(), fmt.Errorf("list_contains() takes 2 arguments (list, element), got %d", argc)
 	}
-	listV, err := Eval(args[0], ctx)
+	listV, err := evalArg(0)
 	if err != nil {
 		return table.Null(), err
 	}
-	elemV, err := Eval(args[1], ctx)
+	elemV, err := evalArg(1)
 	if err != nil {
 		return table.Null(), err
 	}
@@ -322,33 +278,15 @@ func callListContains(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
 		return table.Null(), fmt.Errorf("list_contains() requires a list, got %s", valueTypeName(listV))
 	}
 	for _, elem := range listV.List {
-		if table.Equal(elem, elemV) {
+		eq, err := expressionValuesEqual(elem, elemV, false)
+		if err != nil {
+			return table.Null(), err
+		}
+		if eq {
 			return table.BoolVal(true), nil
 		}
 	}
 	return table.BoolVal(false), nil
-}
-
-func callStartsWith(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
-	s, sub, ok, err := strPredicateArgs("starts_with", "prefix", args, ctx)
-	if err != nil {
-		return table.Null(), err
-	}
-	if !ok {
-		return table.Null(), nil
-	}
-	return table.BoolVal(strings.HasPrefix(s, sub)), nil
-}
-
-func callEndsWith(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
-	s, sub, ok, err := strPredicateArgs("ends_with", "suffix", args, ctx)
-	if err != nil {
-		return table.Null(), err
-	}
-	if !ok {
-		return table.Null(), nil
-	}
-	return table.BoolVal(strings.HasSuffix(s, sub)), nil
 }
 
 var (
@@ -373,8 +311,8 @@ func compileRegex(pattern string) (*regexp.Regexp, error) {
 	return re, nil
 }
 
-func callMatches(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
-	s, pattern, ok, err := strPredicateArgs("matches", "regex", args, ctx)
+func evalMatchesFunction(argc int, evalArg scalarArgEvaluator) (table.Value, error) {
+	s, pattern, ok, err := evalStringPredicateArgs("matches", "regex", argc, evalArg)
 	if err != nil {
 		return table.Null(), err
 	}
@@ -388,12 +326,12 @@ func callMatches(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
 	return table.BoolVal(re.MatchString(s)), nil
 }
 
-func callCoalesce(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
-	if len(args) == 0 {
+func evalCoalesceFunction(argc int, evalArg scalarArgEvaluator) (table.Value, error) {
+	if argc == 0 {
 		return table.Null(), fmt.Errorf("coalesce() requires at least 1 argument")
 	}
-	for _, arg := range args {
-		v, err := Eval(arg, ctx)
+	for i := 0; i < argc; i++ {
+		v, err := evalArg(i)
 		if err != nil {
 			return table.Null(), err
 		}
@@ -404,11 +342,11 @@ func callCoalesce(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
 	return table.Null(), nil
 }
 
-func callIf(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
-	if len(args) != 3 {
-		return table.Null(), fmt.Errorf("if() takes 3 arguments (condition, then, else), got %d", len(args))
+func evalIfFunction(argc int, evalArg scalarArgEvaluator) (table.Value, error) {
+	if argc != 3 {
+		return table.Null(), fmt.Errorf("if() takes 3 arguments (condition, then, else), got %d", argc)
 	}
-	cond, err := Eval(args[0], ctx)
+	cond, err := evalArg(0)
 	if err != nil {
 		return table.Null(), err
 	}
@@ -416,9 +354,9 @@ func callIf(args []ast.Expr, ctx *EvalContext) (table.Value, error) {
 		return table.Null(), fmt.Errorf("if: condition must be boolean")
 	}
 	if cond.IsExplicitTrue() {
-		return Eval(args[1], ctx)
+		return evalArg(1)
 	}
-	return Eval(args[2], ctx)
+	return evalArg(2)
 }
 
 var dateFormats = []string{
@@ -431,11 +369,11 @@ var dateFormats = []string{
 	"2006/01/02",
 }
 
-func callDatePart(args []ast.Expr, ctx *EvalContext, part string) (table.Value, error) {
-	if len(args) != 1 {
-		return table.Null(), fmt.Errorf("%s() takes 1 argument, got %d", part, len(args))
+func evalDatePartFunction(part string, argc int, evalArg scalarArgEvaluator) (table.Value, error) {
+	if argc != 1 {
+		return table.Null(), fmt.Errorf("%s() takes 1 argument, got %d", part, argc)
 	}
-	v, err := Eval(args[0], ctx)
+	v, err := evalArg(0)
 	if err != nil {
 		return table.Null(), err
 	}
@@ -445,18 +383,17 @@ func callDatePart(args []ast.Expr, ctx *EvalContext, part string) (table.Value, 
 	if v.Type != table.TypeString {
 		return table.Null(), fmt.Errorf("%s() requires a string, got %s", part, valueTypeName(v))
 	}
-	s := v.Str
 
 	var t time.Time
 	parsed := false
 	for _, fmt := range dateFormats {
-		if t, err = time.Parse(fmt, s); err == nil {
+		if t, err = time.Parse(fmt, v.Str); err == nil {
 			parsed = true
 			break
 		}
 	}
 	if !parsed {
-		return table.Null(), fmt.Errorf("%s(): cannot parse %q as a date", part, s)
+		return table.Null(), fmt.Errorf("%s(): cannot parse %q as a date", part, v.Str)
 	}
 
 	switch part {
@@ -472,47 +409,27 @@ func callDatePart(args []ast.Expr, ctx *EvalContext, part string) (table.Value, 
 
 // --- Aggregate evaluation (used by reduce) ---
 
-// EvalAggregate evaluates an aggregate expression over a nested table.
-func EvalAggregate(expr ast.Expr, nested *table.Table) (table.Value, error) {
-	switch e := expr.(type) {
-	case *ast.FuncCallExpr:
-		if err := validateAggregateFunctionArity(e); err != nil {
-			return table.Null(), err
-		}
-		switch e.Name {
-		case "count":
-			return table.IntVal(int64(nested.NumRows)), nil
-		case "sum":
-			return aggSum(e, nested)
-		case "avg":
-			return aggAvg(e, nested)
-		case "min":
-			return aggMin(e, nested)
-		case "max":
-			return aggMax(e, nested)
-		case "first":
-			return aggFirst(e, nested)
-		case "last":
-			return aggLast(e, nested)
-		default:
-			// Non-aggregate function: this shouldn't happen in reduce context
-			// but if it does, try evaluating row-wise (error)
-			return table.Null(), fmt.Errorf("non-aggregate function %q in reduce context", e.Name)
-		}
-	case *ast.BinaryExpr:
-		return evalAggregateBinary(e, nested)
-	case *ast.UnaryExpr:
-		return evalAggregateUnary(e, nested)
-	case *ast.LiteralExpr:
-		return evalLiteral(e), nil
-	case *ast.IsNullExpr:
-		return evalAggregateIsNull(e, nested)
-	case *ast.StructExpr:
-		return table.Null(), fmt.Errorf("struct constructor is not supported in reduce")
-	case *ast.ListExpr:
-		return table.Null(), fmt.Errorf("list constructor is not supported in reduce")
+func evalAggregateCall(e *ast.FuncCallExpr, nested *table.Table) (table.Value, error) {
+	if err := validateAggregateFunctionArity(e); err != nil {
+		return table.Null(), err
+	}
+	switch e.Name {
+	case "count":
+		return table.IntVal(int64(nested.NumRows)), nil
+	case "sum":
+		return aggSum(e, nested)
+	case "avg":
+		return aggAvg(e, nested)
+	case "min":
+		return aggMin(e, nested)
+	case "max":
+		return aggMax(e, nested)
+	case "first":
+		return aggFirst(e, nested)
+	case "last":
+		return aggLast(e, nested)
 	default:
-		return table.Null(), fmt.Errorf("unsupported expression type %T in reduce", expr)
+		return table.Null(), fmt.Errorf("non-aggregate function %q in reduce context", e.Name)
 	}
 }
 
@@ -528,71 +445,6 @@ func validateAggregateFunctionArity(e *ast.FuncCallExpr) error {
 		}
 	}
 	return nil
-}
-
-func evalAggregateBinary(e *ast.BinaryExpr, nested *table.Table) (table.Value, error) {
-	left, err := EvalAggregate(e.Left, nested)
-	if err != nil {
-		return table.Null(), err
-	}
-	right, err := EvalAggregate(e.Right, nested)
-	if err != nil {
-		return table.Null(), err
-	}
-
-	switch e.Op {
-	case "+", "-", "*", "/":
-		if left.IsNull() || right.IsNull() {
-			return table.Null(), nil
-		}
-		return evalArith(e.Op, left, right)
-	case "==", "!=", "<", ">", "<=", ">=":
-		return evalComparison(e.Op, left, right)
-	case "and":
-		return table.EvalTruthAnd(left, right)
-	case "or":
-		return table.EvalTruthOr(left, right)
-	default:
-		return table.Null(), fmt.Errorf("unknown operator %q", e.Op)
-	}
-}
-
-func evalAggregateUnary(e *ast.UnaryExpr, nested *table.Table) (table.Value, error) {
-	operand, err := EvalAggregate(e.Operand, nested)
-	if err != nil {
-		return table.Null(), err
-	}
-
-	switch e.Op {
-	case "not":
-		return table.EvalTruthNot(operand)
-	case "-":
-		if operand.IsNull() {
-			return table.Null(), nil
-		}
-		switch operand.Type {
-		case table.TypeInt:
-			return table.IntVal(-operand.Int), nil
-		case table.TypeFloat:
-			return table.FloatVal(-operand.Float), nil
-		default:
-			return table.Null(), fmt.Errorf("cannot negate %v", operand.AsString())
-		}
-	default:
-		return table.Null(), fmt.Errorf("unknown unary operator %q", e.Op)
-	}
-}
-
-func evalAggregateIsNull(e *ast.IsNullExpr, nested *table.Table) (table.Value, error) {
-	operand, err := EvalAggregate(e.Operand, nested)
-	if err != nil {
-		return table.Null(), err
-	}
-	isNull := operand.IsNull()
-	if e.Negated {
-		isNull = !isNull
-	}
-	return table.BoolVal(isNull), nil
 }
 
 func getColValues(e *ast.FuncCallExpr, nested *table.Table) ([]table.Value, error) {
@@ -625,6 +477,7 @@ func aggSum(e *ast.FuncCallExpr, nested *table.Table) (table.Value, error) {
 	var sum float64
 	hasInt := true
 	var intSum int64
+	var intOverflow error
 	any := false
 	for _, v := range vals {
 		if v.IsNull() {
@@ -637,7 +490,14 @@ func aggSum(e *ast.FuncCallExpr, nested *table.Table) (table.Value, error) {
 		sum += f
 		any = true
 		if v.Type == table.TypeInt {
-			intSum += v.Int
+			if hasInt && intOverflow == nil {
+				next, err := evalIntArith("+", intSum, v.Int)
+				if err != nil {
+					intOverflow = fmt.Errorf("sum: %w", err)
+				} else {
+					intSum = next
+				}
+			}
 		} else {
 			hasInt = false
 		}
@@ -646,6 +506,9 @@ func aggSum(e *ast.FuncCallExpr, nested *table.Table) (table.Value, error) {
 		return table.Null(), nil
 	}
 	if hasInt {
+		if intOverflow != nil {
+			return table.Null(), intOverflow
+		}
 		return table.IntVal(intSum), nil
 	}
 	return table.FloatVal(sum), nil
@@ -676,75 +539,44 @@ func aggAvg(e *ast.FuncCallExpr, nested *table.Table) (table.Value, error) {
 }
 
 func aggMin(e *ast.FuncCallExpr, nested *table.Table) (table.Value, error) {
-	vals, err := getColValues(e, nested)
-	if err != nil {
-		return table.Null(), err
-	}
-	minVal := math.Inf(1)
-	any := false
-	isInt := true
-	var minInt int64
-	for _, v := range vals {
-		if v.IsNull() {
-			continue
-		}
-		f, ok := v.AsFloat()
-		if !ok {
-			return table.Null(), fmt.Errorf("min: non-numeric value %v", v.AsString())
-		}
-		if !any || f < minVal {
-			minVal = f
-			if v.Type == table.TypeInt {
-				minInt = v.Int
-			} else {
-				isInt = false
-			}
-		}
-		any = true
-	}
-	if !any {
-		return table.Null(), nil
-	}
-	if isInt {
-		return table.IntVal(minInt), nil
-	}
-	return table.FloatVal(minVal), nil
+	return aggOrderableExtremum(e, nested, "min", func(cmp int) bool { return cmp < 0 })
 }
 
 func aggMax(e *ast.FuncCallExpr, nested *table.Table) (table.Value, error) {
+	return aggOrderableExtremum(e, nested, "max", func(cmp int) bool { return cmp > 0 })
+}
+
+func aggOrderableExtremum(e *ast.FuncCallExpr, nested *table.Table, name string, better func(cmp int) bool) (table.Value, error) {
 	vals, err := getColValues(e, nested)
 	if err != nil {
 		return table.Null(), err
 	}
-	maxVal := math.Inf(-1)
+	var best table.Value
 	any := false
-	isInt := true
-	var maxInt int64
 	for _, v := range vals {
 		if v.IsNull() {
 			continue
 		}
-		f, ok := v.AsFloat()
-		if !ok {
-			return table.Null(), fmt.Errorf("max: non-numeric value %v", v.AsString())
+		if !any {
+			best = v
+			any = true
+			continue
 		}
-		if !any || f > maxVal {
-			maxVal = f
-			if v.Type == table.TypeInt {
-				maxInt = v.Int
-			} else {
-				isInt = false
-			}
+		cmp, unordered, err := expressionValuesCompare(v, best)
+		if err != nil {
+			return table.Null(), fmt.Errorf("%s: %s", name, err)
 		}
-		any = true
+		if unordered {
+			continue
+		}
+		if better(cmp) {
+			best = v
+		}
 	}
 	if !any {
 		return table.Null(), nil
 	}
-	if isInt {
-		return table.IntVal(maxInt), nil
-	}
-	return table.FloatVal(maxVal), nil
+	return best, nil
 }
 
 func aggFirst(e *ast.FuncCallExpr, nested *table.Table) (table.Value, error) {

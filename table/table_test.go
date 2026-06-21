@@ -100,6 +100,58 @@ func TestTableAddRowAndGetAt(t *testing.T) {
 	}
 }
 
+func TestColumnScalarAccessors(t *testing.T) {
+	tbl := NewTable([]string{"i", "f", "s", "b"})
+	tbl.AddRow([]Value{IntVal(7), FloatVal(1.5), StrVal("x"), BoolVal(true)})
+	tbl.AddRow([]Value{Null(), Null(), Null(), Null()})
+
+	if v, ok := tbl.Col(0).IntAt(0); !ok || v != 7 {
+		t.Fatalf("IntAt non-null: got %d/%v, want 7/true", v, ok)
+	}
+	if v, ok := tbl.Col(1).FloatAt(0); !ok || v != 1.5 {
+		t.Fatalf("FloatAt non-null: got %g/%v, want 1.5/true", v, ok)
+	}
+	if v, ok := tbl.Col(2).StringAt(0); !ok || v != "x" {
+		t.Fatalf("StringAt non-null: got %q/%v, want x/true", v, ok)
+	}
+	if v, ok := tbl.Col(3).BoolAt(0); !ok || !v {
+		t.Fatalf("BoolAt non-null: got %v/%v, want true/true", v, ok)
+	}
+	for idx, col := range []*Column{tbl.Col(0), tbl.Col(1), tbl.Col(2), tbl.Col(3)} {
+		if !col.IsNullAt(1) {
+			t.Fatalf("column %d row 1 should be null", idx)
+		}
+		if !col.IsNullAt(-1) || !col.IsNullAt(99) {
+			t.Fatalf("column %d out-of-range rows should be null", idx)
+		}
+	}
+	if _, ok := tbl.Col(0).StringAt(0); ok {
+		t.Fatal("StringAt on int column should fail")
+	}
+	if _, ok := tbl.Col(2).IntAt(0); ok {
+		t.Fatal("IntAt on string column should fail")
+	}
+	if _, ok := tbl.Col(2).FloatAt(0); ok {
+		t.Fatal("FloatAt on string column should fail")
+	}
+	if _, ok := tbl.Col(0).BoolAt(0); ok {
+		t.Fatal("BoolAt on int column should fail")
+	}
+	var nilCol *Column
+	if !nilCol.IsNullAt(0) {
+		t.Fatal("nil column should report null")
+	}
+	if _, ok := nilCol.IntAt(0); ok {
+		t.Fatal("nil column IntAt should fail")
+	}
+	if _, ok := nilCol.FloatAt(0); ok {
+		t.Fatal("nil column FloatAt should fail")
+	}
+	if _, ok := nilCol.BoolAt(0); ok {
+		t.Fatal("nil column BoolAt should fail")
+	}
+}
+
 func TestListToTableHappyPathAndErrors(t *testing.T) {
 	tbl, err := ListToTable(ListVal([]Value{
 		RecordVal([]RecordField{{Name: "id", Value: IntVal(1)}, {Name: "name", Value: StrVal("a")}}),
@@ -415,6 +467,189 @@ func TestAppendTypedComputedColumnsRejectsInvalidComputedValue(t *testing.T) {
 	}
 	if got, want := err.Error(), "bad expected int, got string"; got != want {
 		t.Fatalf("error: got %q, want %q", got, want)
+	}
+}
+
+func TestAppendTypedComputedColumnsFuncStreamsAndSharesExistingColumns(t *testing.T) {
+	tbl := NewTable([]string{"id", "amount"})
+	tbl.AddRow([]Value{IntVal(1), IntVal(10)})
+	tbl.AddRow([]Value{IntVal(2), IntVal(3)})
+
+	var rows []int
+	got, err := tbl.AppendTypedComputedColumnsFunc(
+		[]string{"total"},
+		[]*TypeDescriptor{ScalarSchema(TypeFloat)},
+		func(row int, values []Value) error {
+			rows = append(rows, row)
+			values[0] = IntVal(tbl.GetAt(row, tbl.ColIndex("amount")).Int * 2)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AppendTypedComputedColumnsFunc returned error: %v", err)
+	}
+	requireColumnOrder(t, got.Columns, []string{"id", "amount", "total"})
+	if got.NumRows != tbl.NumRows {
+		t.Fatalf("row count: got %d, want %d", got.NumRows, tbl.NumRows)
+	}
+	if got.Col(0) != tbl.Col(0) || got.Col(1) != tbl.Col(1) {
+		t.Fatal("existing columns should be shared")
+	}
+	if len(rows) != 2 || rows[0] != 0 || rows[1] != 1 {
+		t.Fatalf("compute rows: got %v, want [0 1]", rows)
+	}
+	if v := got.Get(0, "total"); v.Type != TypeFloat || v.Float != 20 {
+		t.Fatalf("row 0 total: got %v", v)
+	}
+	if v := got.Get(1, "total"); v.Type != TypeFloat || v.Float != 6 {
+		t.Fatalf("row 1 total: got %v", v)
+	}
+}
+
+func TestAppendTypedComputedColumnsFuncWidensSchemaForComputedNull(t *testing.T) {
+	tbl := NewTable([]string{"id"})
+	tbl.AddRow([]Value{IntVal(1)})
+	tbl.AddRow([]Value{IntVal(2)})
+	tbl.AddRow([]Value{IntVal(3)})
+
+	got, err := tbl.AppendTypedComputedColumnsFunc(
+		[]string{"maybe_id"},
+		[]*TypeDescriptor{ScalarSchema(TypeInt)},
+		func(row int, values []Value) error {
+			if row == 1 {
+				values[0] = Null()
+				return nil
+			}
+			values[0] = IntVal(tbl.GetAt(row, tbl.ColIndex("id")).Int)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AppendTypedComputedColumnsFunc returned error: %v", err)
+	}
+	if schema := Render(got.Col(got.ColIndex("maybe_id")).Schema()); schema != "int?" {
+		t.Fatalf("maybe_id schema: got %s, want int?", schema)
+	}
+	if got.Get(1, "maybe_id").Type != TypeNull {
+		t.Fatalf("row 1 maybe_id: got %v, want null", got.Get(1, "maybe_id"))
+	}
+}
+
+func TestValueMayChangeSchemaNullability(t *testing.T) {
+	intType := ScalarSchema(TypeInt)
+	nullableInt := WithNullable(ScalarSchema(TypeInt))
+	recordOf := func(field *TypeDescriptor) *TypeDescriptor {
+		return &TypeDescriptor{Kind: TypeRecord, Fields: []FieldDescriptor{{Name: "x", Type: field}}}
+	}
+	listOf := func(elem *TypeDescriptor) *TypeDescriptor {
+		return &TypeDescriptor{Kind: TypeList, Elem: elem}
+	}
+
+	cases := []struct {
+		name   string
+		schema *TypeDescriptor
+		value  Value
+		want   bool
+	}{
+		{name: "nil_schema", schema: nil, value: Null(), want: false},
+		{name: "null_schema", schema: &TypeDescriptor{Kind: TypeNull}, value: Null(), want: false},
+		{name: "null_into_non_nullable_scalar", schema: intType, value: Null(), want: true},
+		{name: "null_into_nullable_scalar", schema: nullableInt, value: Null(), want: false},
+		{name: "non_null_scalar", schema: intType, value: IntVal(1), want: false},
+		{name: "record_nested_null", schema: recordOf(intType), value: RecordVal([]RecordField{{Name: "x", Value: Null()}}), want: true},
+		{name: "record_nested_nullable_null", schema: recordOf(nullableInt), value: RecordVal([]RecordField{{Name: "x", Value: Null()}}), want: false},
+		{name: "list_nested_null", schema: listOf(intType), value: ListVal([]Value{IntVal(1), Null()}), want: true},
+		{name: "list_nested_nullable_null", schema: listOf(nullableInt), value: ListVal([]Value{IntVal(1), Null()}), want: false},
+		{name: "union_containing_null_value", schema: &TypeDescriptor{Kind: TypeUnion, Branches: []*TypeDescriptor{intType, ScalarSchema(TypeString)}}, value: ListVal([]Value{IntVal(1), Null()}), want: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := valueMayChangeSchemaNullability(tc.schema, tc.value); got != tc.want {
+				t.Fatalf("valueMayChangeSchemaNullability: got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAppendTypedComputedColumnsFuncReusesDestinationBuffer(t *testing.T) {
+	tbl := NewTable([]string{"id"})
+	tbl.AddRow([]Value{IntVal(1)})
+	tbl.AddRow([]Value{IntVal(2)})
+	tbl.AddRow([]Value{IntVal(3)})
+
+	var firstSlot *Value
+	got, err := tbl.AppendTypedComputedColumnsFunc(
+		[]string{"next", "double"},
+		[]*TypeDescriptor{ScalarSchema(TypeInt), ScalarSchema(TypeInt)},
+		func(row int, values []Value) error {
+			if len(values) != 2 {
+				t.Fatalf("scratch row width: got %d, want 2", len(values))
+			}
+			if row == 0 {
+				firstSlot = &values[0]
+			} else if &values[0] != firstSlot {
+				t.Fatalf("scratch row buffer was not reused")
+			}
+			id := tbl.GetAt(row, tbl.ColIndex("id")).Int
+			values[0] = IntVal(id + 1)
+			values[1] = IntVal(id * 2)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AppendTypedComputedColumnsFunc returned error: %v", err)
+	}
+	for row, want := range []struct {
+		next   int64
+		double int64
+	}{
+		{next: 2, double: 2},
+		{next: 3, double: 4},
+		{next: 4, double: 6},
+	} {
+		if gotNext := got.Get(row, "next"); gotNext.Type != TypeInt || gotNext.Int != want.next {
+			t.Fatalf("row %d next: got %v, want %d", row, gotNext, want.next)
+		}
+		if gotDouble := got.Get(row, "double"); gotDouble.Type != TypeInt || gotDouble.Int != want.double {
+			t.Fatalf("row %d double: got %v, want %d", row, gotDouble, want.double)
+		}
+	}
+}
+
+func TestAppendTypedComputedColumnsFuncRejectsInvalidRows(t *testing.T) {
+	tbl := NewTable([]string{"id"})
+	tbl.AddRow([]Value{IntVal(1)})
+
+	_, err := tbl.AppendTypedComputedColumnsFunc(
+		[]string{"bad"},
+		[]*TypeDescriptor{ScalarSchema(TypeInt)},
+		func(_ int, values []Value) error {
+			values[0] = StrVal("oops")
+			return nil
+		},
+	)
+	if err == nil {
+		t.Fatal("expected invalid computed value error")
+	}
+	for _, want := range []string{"bad", "expected int", "got string"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error: got %q, want token %q", err.Error(), want)
+		}
+	}
+
+	_, err = tbl.AppendTypedComputedColumnsFunc(
+		[]string{"bad"},
+		[]*TypeDescriptor{ScalarSchema(TypeInt)},
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected nil compute error")
+	}
+	for _, want := range []string{"computed columns", "compute function", "nil"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error: got %q, want token %q", err.Error(), want)
+		}
 	}
 }
 

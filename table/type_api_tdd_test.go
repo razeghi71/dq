@@ -150,6 +150,22 @@ func TestCentralTypeAPICoercionModes(t *testing.T) {
 	if got := fields["x"]; got.Type != TypeFloat || got.Float != 7 {
 		t.Fatalf("coercive mode: got %v, want float 7", got)
 	}
+
+	finalSchema := FinalizeSchema(schema)
+	got, err = CoerceValueToFinalSchemaMode(value, finalSchema, CoerceCoerciveMode)
+	if err != nil {
+		t.Fatalf("final-schema coercive mode returned error: %v", err)
+	}
+	fields = map[string]Value{}
+	for _, field := range got.Fields {
+		fields[field.Name] = field.Value
+	}
+	if got := fields["x"]; got.Type != TypeFloat || got.Float != 7 {
+		t.Fatalf("final-schema coercive mode: got %v, want float 7", got)
+	}
+	if _, err := CoerceValueToFinalSchemaMode(value, finalSchema, CoerceExactMode); err == nil {
+		t.Fatal("final-schema exact coercion should reject int into float field")
+	}
 }
 
 func TestCentralTypeAPIPredicates(t *testing.T) {
@@ -306,7 +322,6 @@ func TestCentralTypeAPIUnifyListLiteralElemsUsesMixedOnlyForLiteralHeterogeneity
 		in   []*TypeDescriptor
 		want string
 	}{
-		{name: "empty_literal", in: nil, want: "string?"},
 		{name: "numeric_promotion", in: []*TypeDescriptor{td(TypeInt), td(TypeFloat)}, want: "float"},
 		{name: "nullability", in: []*TypeDescriptor{td(TypeInt), nullLiteralType()}, want: "int?"},
 		{name: "scalar_heterogeneous", in: []*TypeDescriptor{td(TypeInt), td(TypeString)}, want: "mixed"},
@@ -334,6 +349,23 @@ func TestCentralTypeAPIUnifyListLiteralElemsUsesMixedOnlyForLiteralHeterogeneity
 			requireSchemaString(t, got, tc.want)
 		})
 	}
+}
+
+func TestCentralTypeAPIEmptyListLiteralElementSchemaIsNonDetermining(t *testing.T) {
+	elem := UnifyListLiteralElems(nil)
+	if elem != nil {
+		t.Fatalf("empty list literal element schema: got %s, want nil", elem.String())
+	}
+	requireSchemaString(t, FinalizeSchema(&TypeDescriptor{Kind: TypeList, Elem: elem}), "list<string?>")
+
+	got, err := UnifyStrict(
+		&TypeDescriptor{Kind: TypeList, Elem: elem},
+		&TypeDescriptor{Kind: TypeList, Elem: td(TypeInt)},
+	)
+	if err != nil {
+		t.Fatalf("empty list should unify with typed list: %v", err)
+	}
+	requireSchemaString(t, got, "list<int>")
 }
 
 func TestCentralTypeAPINumericResult(t *testing.T) {

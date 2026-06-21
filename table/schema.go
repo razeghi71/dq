@@ -381,10 +381,12 @@ func UnifyAllStrict(ts []*TypeDescriptor) (*TypeDescriptor, error) {
 
 // UnifyListLiteralElems merges element types for one list literal. Unlike
 // UnifyStrict, it may produce mixed for explicitly heterogeneous literal
-// contents.
+// contents. An empty list has no determining element schema yet; callers should
+// keep the nil element until a surrounding expression or finalization provides
+// a concrete schema.
 func UnifyListLiteralElems(ts []*TypeDescriptor) *TypeDescriptor {
 	if len(ts) == 0 {
-		return &TypeDescriptor{Kind: TypeString, Nullable: true}
+		return nil
 	}
 	var out *TypeDescriptor
 	for _, typ := range ts {
@@ -394,7 +396,7 @@ func UnifyListLiteralElems(ts []*TypeDescriptor) *TypeDescriptor {
 		}
 		out = merged
 	}
-	return NormalizeSchema(FinalizeSchema(out))
+	return NormalizeSchema(out)
 }
 
 // NumericResult returns the result type for numeric arithmetic.
