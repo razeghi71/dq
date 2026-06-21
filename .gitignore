@@ -1,6 +1,8 @@
 # Binary
 /dq
 
+# Local benchmark artifacts
+/local-test/
 # Go
 *.exe
 *.exe~
