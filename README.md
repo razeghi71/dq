@@ -113,12 +113,13 @@ dq 'users.csv | filter { false } | describe'
 # age  -> int,    row_count 0
 ```
 
-Expressions are checked against the current pipeline schema before rows run. Misspelled columns, missing fields in known records, and wrong function argument types fail even if the table currently has zero rows:
+Simple operations such as `filter`, `select`, `sort`, `rename`, `remove`, `distinct`, `count`, and `describe` are planned against the current schema before rows run. Expressions are checked there too. Misspelled columns, missing fields in known records, wrong function argument types, and unavailable columns from earlier projections fail even if the table currently has zero rows:
 
 ```bash
 dq 'users.csv | filter { agge > 20 }'                         # error: column "agge" not found
 dq 'users.csv | filter { false } | transform x = upper(age)'  # error: upper() needs string
 dq 'nested.json | select address.missing'                     # error: field not found
+dq 'users.csv | distinct city | select age'                   # error: age was projected away
 ```
 
 Each pipeline stage sees the columns produced by previous stages. Within one `transform` or `reduce`, assignment target names must be unique and all right-hand sides see the input schema only:
@@ -173,8 +174,11 @@ dq 'data.json | select name, address.city'        # nested field -> column "addr
 
 ### `remove` - Drop columns you don't need
 
+`remove` drops top-level columns only; it does not delete nested fields inside records.
+
 ```bash
 dq 'users.csv | remove password, ssn'
+dq 'nested.json | remove address.city'   # error: remove only accepts top-level columns
 ```
 
 ### `filter` - Keep rows that match a condition

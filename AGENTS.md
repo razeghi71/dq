@@ -327,6 +327,9 @@ Strict and permissive APIs must remain distinct:
 * `TypeUnion` storage preserves each active branch value instead of stringifying it. JSON/JSONL/table/CSV outputs render the active value; `group`, `distinct`, and `join` keys use the active value's exact dq type and structural key, so `int(7)` and `string("7")` do not collide. They do not include Avro branch names/tags, so two named Avro record branches with the same dq schema and value are indistinguishable.
 * Direct comparison and ordering over union-typed expressions are rejected unless an explicit future branch-normalization operation is added. Dot paths may project a union-typed field, but they must not step through a union branch such as `select u.x` when `u` is `union<record<x:int>,string>`.
 * Engine operators that preserve or can plan their output schema use fixed-schema result tables and strict append for those planned columns. This includes `filter`, `select`, `group`, `count`, `describe`, `distinct`, `rename`, `remove`, typed `transform` assignments, typed `reduce` assignments, and schema-compatible joins.
+* Simple operations (`head`, `tail`, `filter`, `select`, `sort`, `rename`, `remove`, `distinct`, `count`, and `describe`) have an explicit planner boundary. A simple-op span is planned as `input schema + raw ops -> planned ops + output schema` before row execution. Planning binds paths, validates operation-specific schema rules, and computes each next schema without inspecting rows.
+* Planned simple-op execution must consume planned metadata instead of rediscovering schemas or rebinding paths. This includes projection output names and schemas, bound sort/filter metadata, fixed `count`/`describe` schemas, and rename/remove result shapes.
+* Non-simple operators (`transform`, `group` / `reduce`, and `join`) keep their own planning/execution paths until their dedicated planner tickets own them. Mixed pipelines are handled by planning contiguous simple-op spans around those operators; each later span plans from the schema produced by the previous stage.
 * Planned expression operators must not use permissive append to hide type mistakes. Incompatible `if` branches, incompatible `coalesce` arguments, bad function argument types, and incompatible comparisons fail during planning even when the current table has zero rows.
 * `reduce` and joins may still use permissive append only for unplanned or schema-incompatible result shapes outside typed expression planning. Do not expand or remove that fallback without updating the operator-level schema contract and tests.
 * Schema-preserving operations must keep column schemas even when they produce zero rows. For example, `users.csv | filter { false } | describe` reports the loaded `name:string` and `age:int` schemas with `row_count = 0`, not `null` types.
@@ -383,7 +386,7 @@ Separate columns or sort keys with **commas**. A single item needs no comma.
 | `remove` | `remove password, ssn` |
 
 Rules:
-* Dot paths are one item: `address.city` is a single column, not two.
+* Dot paths are one item for operations that accept paths: `address.city` is a single item, not two. `remove` is the exception here: it removes top-level columns only and rejects dot paths such as `remove address.city`.
 * Backticks for names with spaces: `` select `first name`, age ``
 * `sort`: prefix `-` on a key for descending (`sort city, -age`).
 * `group`: optional `as nested_name` comes after the column list.
@@ -705,7 +708,7 @@ dq 'users.csv | rename `first name`=first_name, `last name`=last_name'
 
 ### 13. `remove col1, col2, ...`
 
-Remove columns from output.
+Remove top-level columns from output. `remove` does not delete nested record fields; `remove address.city` is an error rather than removing either the nested field or the top-level `address` column.
 
 ```
 dq 'users.csv | remove password, ssn'

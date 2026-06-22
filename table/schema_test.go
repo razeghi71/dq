@@ -1123,6 +1123,143 @@ func TestNewTableWithSchemasColumnSchemaAndAddRowTyped(t *testing.T) {
 	}
 }
 
+func TestNewSchemaPreservesNullOnlyDescriptor(t *testing.T) {
+	schema := NewSchema([]string{"empty"}, []*TypeDescriptor{{Kind: TypeNull, Nullable: true}})
+
+	requireSchemaString(t, schema.Columns[0].Type, "null?")
+}
+
+func TestSelectColsWithSchemaUsesPlannedNamesAndSchema(t *testing.T) {
+	tbl := NewTableWithSchemas(
+		[]string{"name", "age"},
+		[]*TypeDescriptor{{Kind: TypeString}, {Kind: TypeInt}},
+	)
+	if err := tbl.AddRowTyped([]Value{StrVal("Alice"), IntVal(30)}); err != nil {
+		t.Fatalf("AddRowTyped: %v", err)
+	}
+
+	projected, err := tbl.SelectColsWithSchema([]int{1}, Schema{Columns: []SchemaColumn{
+		{Name: "years", Type: &TypeDescriptor{Kind: TypeInt, Nullable: true}},
+	}})
+	if err != nil {
+		t.Fatalf("SelectColsWithSchema: %v", err)
+	}
+
+	if len(projected.Columns) != 1 || projected.Columns[0] != "years" {
+		t.Fatalf("columns: got %v, want [years]", projected.Columns)
+	}
+	requireSchemaString(t, projected.Col(0).Schema(), "int?")
+	if got := projected.GetAt(0, 0); got.Type != TypeInt || got.Int != 30 {
+		t.Fatalf("projected value: got %v, want int 30", got)
+	}
+}
+
+func TestSelectColsWithSchemaAllowsNullOnlyStorageForNullablePlannedSchema(t *testing.T) {
+	tbl := NewTable([]string{"nilcol"})
+	tbl.AddRow([]Value{Null()})
+	tbl.AddRow([]Value{Null()})
+
+	projected, err := tbl.SelectColsWithSchema([]int{0}, Schema{Columns: []SchemaColumn{
+		{Name: "renamed", Type: &TypeDescriptor{Kind: TypeString, Nullable: true}},
+	}})
+	if err != nil {
+		t.Fatalf("SelectColsWithSchema: %v", err)
+	}
+	if got := projected.Columns; len(got) != 1 || got[0] != "renamed" {
+		t.Fatalf("columns: got %v, want [renamed]", got)
+	}
+	requireSchemaString(t, projected.Col(0).Schema(), "string?")
+	if got := projected.Col(0).ColType(); got != TypeNull {
+		t.Fatalf("storage type: got %s, want null", TypeName(got))
+	}
+}
+
+func TestSelectColsWithSchemaRejectsIncompatibleStorageKind(t *testing.T) {
+	tbl := NewTableWithSchemas(
+		[]string{"age"},
+		[]*TypeDescriptor{{Kind: TypeInt}},
+	)
+	if err := tbl.AddRowTyped([]Value{IntVal(30)}); err != nil {
+		t.Fatalf("AddRowTyped: %v", err)
+	}
+
+	_, err := tbl.SelectColsWithSchema([]int{0}, Schema{Columns: []SchemaColumn{
+		{Name: "age_text", Type: &TypeDescriptor{Kind: TypeString}},
+	}})
+	if err == nil {
+		t.Fatal("expected incompatible storage kind error")
+	}
+	if got, want := err.Error(), "storage type int incompatible with planned schema string"; !strings.Contains(got, want) {
+		t.Fatalf("error: got %q, want substring %q", got, want)
+	}
+}
+
+func TestSelectColsWithSchemaRejectsCoerciveNestedRecordSchema(t *testing.T) {
+	tbl := NewTableWithSchemas(
+		[]string{"payload"},
+		[]*TypeDescriptor{recordOf(field("x", td(TypeInt)))},
+	)
+	if err := tbl.AddRowTyped([]Value{
+		RecordVal([]RecordField{{Name: "x", Value: IntVal(7)}}),
+	}); err != nil {
+		t.Fatalf("AddRowTyped: %v", err)
+	}
+
+	_, err := tbl.SelectColsWithSchema([]int{0}, Schema{Columns: []SchemaColumn{
+		{Name: "payload", Type: recordOf(field("x", td(TypeFloat)))},
+	}})
+	if err == nil {
+		t.Fatal("expected nested record schema mismatch")
+	}
+	if got, want := err.Error(), "storage schema record<x:int> incompatible with planned schema record<x:float>"; !strings.Contains(got, want) {
+		t.Fatalf("error: got %q, want substring %q", got, want)
+	}
+}
+
+func TestSelectColsWithSchemaRejectsCoerciveNestedListSchema(t *testing.T) {
+	tbl := NewTableWithSchemas(
+		[]string{"xs"},
+		[]*TypeDescriptor{listOf(td(TypeInt))},
+	)
+	if err := tbl.AddRowTyped([]Value{ListVal([]Value{IntVal(1), IntVal(2)})}); err != nil {
+		t.Fatalf("AddRowTyped: %v", err)
+	}
+
+	_, err := tbl.SelectColsWithSchema([]int{0}, Schema{Columns: []SchemaColumn{
+		{Name: "xs", Type: listOf(td(TypeFloat))},
+	}})
+	if err == nil {
+		t.Fatal("expected nested list schema mismatch")
+	}
+	if got, want := err.Error(), "storage schema list<int> incompatible with planned schema list<float>"; !strings.Contains(got, want) {
+		t.Fatalf("error: got %q, want substring %q", got, want)
+	}
+}
+
+func TestSelectColsWithSchemaAllowsExactNestedRenameWithNullableWidening(t *testing.T) {
+	tbl := NewTableWithSchemas(
+		[]string{"payload"},
+		[]*TypeDescriptor{recordOf(field("x", td(TypeInt)))},
+	)
+	if err := tbl.AddRowTyped([]Value{
+		RecordVal([]RecordField{{Name: "x", Value: IntVal(7)}}),
+	}); err != nil {
+		t.Fatalf("AddRowTyped: %v", err)
+	}
+
+	projected, err := tbl.SelectColsWithSchema([]int{0}, Schema{Columns: []SchemaColumn{
+		{Name: "renamed", Type: recordOf(field("x", nullable(TypeInt)))},
+	}})
+	if err != nil {
+		t.Fatalf("SelectColsWithSchema: %v", err)
+	}
+	if len(projected.Columns) != 1 || projected.Columns[0] != "renamed" {
+		t.Fatalf("columns: got %v, want [renamed]", projected.Columns)
+	}
+	requireSchemaString(t, projected.Col(0).Schema(), "record<x:int?>")
+	requireRecordValue(t, projected.GetAt(0, 0), []RecordField{{Name: "x", Value: IntVal(7)}})
+}
+
 func TestNewTableWithSchemasDuplicateRecordFieldSchemaIsNotStored(t *testing.T) {
 	tbl := NewTableWithSchemas([]string{"payload"}, []*TypeDescriptor{
 		recordOf(

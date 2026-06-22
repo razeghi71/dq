@@ -3,7 +3,6 @@ package engine
 import (
 	"errors"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -15,44 +14,42 @@ import (
 // load is required when the pipeline contains join; pass nil otherwise.
 func Execute(query *ast.Query, input *table.Table, load LoadFunc) (*table.Table, error) {
 	current := input
-	for _, op := range query.Ops {
+	for i := 0; i < len(query.Ops); {
+		if isSimpleOp(query.Ops[i]) {
+			end := i + 1
+			for end < len(query.Ops) && isSimpleOp(query.Ops[end]) {
+				end++
+			}
+			plan, err := planSimplePipelineFromTable(current, query.Ops[i:end])
+			if err != nil {
+				return nil, err
+			}
+			current, err = executePlannedPipeline(plan, current)
+			if err != nil {
+				return nil, err
+			}
+			i = end
+			continue
+		}
+
 		var err error
-		current, err = execOp(op, current, load)
+		current, err = execOp(query.Ops[i], current, load)
 		if err != nil {
 			return nil, err
 		}
+		i++
 	}
 	return current, nil
 }
 
 func execOp(op ast.Op, t *table.Table, load LoadFunc) (*table.Table, error) {
 	switch o := op.(type) {
-	case *ast.HeadOp:
-		return execHead(o, t), nil
-	case *ast.TailOp:
-		return execTail(o, t), nil
-	case *ast.SortOp:
-		return execSort(o, t)
-	case *ast.SelectOp:
-		return execSelect(o, t)
-	case *ast.FilterOp:
-		return execFilter(o, t)
 	case *ast.GroupOp:
 		return execGroup(o, t)
 	case *ast.TransformOp:
 		return execTransform(o, t)
 	case *ast.ReduceOp:
 		return execReduce(o, t)
-	case *ast.CountOp:
-		return execCount(t), nil
-	case *ast.DescribeOp:
-		return execDescribe(t), nil
-	case *ast.DistinctOp:
-		return execDistinct(o, t)
-	case *ast.RenameOp:
-		return execRename(o, t)
-	case *ast.RemoveOp:
-		return execRemove(o, t)
 	case *ast.JoinOp:
 		return execJoin(o, t, load)
 	default:
@@ -68,6 +65,14 @@ func resolveColumnPath(path []string, t *table.Table, rowIdx int) (table.Value, 
 	}
 	val := t.Col(idx).Get(rowIdx)
 	return resolveNestedValuePath(val, path[1:])
+}
+
+func resolveBoundColumn(col boundColumn, t *table.Table, rowIdx int) (table.Value, error) {
+	if col.topIndex < 0 || col.topIndex >= len(t.Columns) {
+		return table.Null(), fmt.Errorf("bound column index %d out of range", col.topIndex)
+	}
+	val := t.Col(col.topIndex).Get(rowIdx)
+	return resolveNestedValuePath(val, col.nestedPath)
 }
 
 func resolveNestedValuePath(val table.Value, path []string) (table.Value, error) {
@@ -156,7 +161,7 @@ func canonicalTupleKey(parts []string) string {
 }
 
 type plannedProjection struct {
-	path []string
+	column boundColumn
 }
 
 type projectionPlan struct {
@@ -166,7 +171,7 @@ type projectionPlan struct {
 	topLevelIdx []int
 }
 
-func planProjections(opName string, paths [][]string, t *table.Table) (*projectionPlan, error) {
+func planProjectionsInEnv(opName string, paths [][]string, env schemaEnv) (*projectionPlan, error) {
 	plan := &projectionPlan{
 		cols:        make([]string, 0, len(paths)),
 		schemas:     make([]*table.TypeDescriptor, len(paths)),
@@ -175,18 +180,18 @@ func planProjections(opName string, paths [][]string, t *table.Table) (*projecti
 	}
 	topLevelOnly := true
 	for i, path := range paths {
-		bound, err := bindColumnPath(t, path, &ast.ColumnExpr{Path: path})
+		bound, err := bindColumnPathInEnv(env, path, &ast.ColumnExpr{Path: path})
 		if err != nil {
 			return nil, fmt.Errorf("%s %q: %w", opName, strings.Join(path, "."), err)
 		}
-		if err := validatePathDoesNotTraverseUnion(opName, t, path); err != nil {
+		if err := validatePathDoesNotTraverseUnionInEnv(opName, env, path); err != nil {
 			return nil, err
 		}
 		base := pathToColumnName(path)
 		name := uniqueColumnName(base, plan.cols)
 		plan.cols = append(plan.cols, name)
 		plan.schemas[i] = bound.typ
-		plan.projections[i] = plannedProjection{path: path}
+		plan.projections[i] = plannedProjection{column: *bound}
 		if len(path) == 1 {
 			plan.topLevelIdx[i] = bound.topIndex
 		} else {
@@ -199,34 +204,19 @@ func planProjections(opName string, paths [][]string, t *table.Table) (*projecti
 	return plan, nil
 }
 
-func planTopLevelProjections(paths [][]string, t *table.Table) ([]int, []string, bool, error) {
-	for _, path := range paths {
-		if len(path) != 1 {
-			return nil, nil, false, nil
-		}
-	}
-	indices := make([]int, len(paths))
-	cols := make([]string, 0, len(paths))
-	for i, path := range paths {
-		idx := t.ColIndex(path[0])
-		if idx < 0 {
-			return nil, nil, false, fmt.Errorf("select %q: %w", strings.Join(path, "."), columnNotFoundError(path[0], t))
-		}
-		indices[i] = idx
-		cols = append(cols, uniqueColumnName(path[0], cols))
-	}
-	return indices, cols, true, nil
+func unionBeforePathEnd(t *table.Table, path []string) *table.TypeDescriptor {
+	return unionBeforePathEndInEnv(schemaEnvFromTable(t), path)
 }
 
-func unionBeforePathEnd(t *table.Table, path []string) *table.TypeDescriptor {
-	if t == nil || len(path) < 2 {
+func unionBeforePathEndInEnv(env schemaEnv, path []string) *table.TypeDescriptor {
+	if len(path) < 2 {
 		return nil
 	}
-	idx := t.ColIndex(path[0])
+	idx := env.colIndex(path[0])
 	if idx < 0 {
 		return nil
 	}
-	return unionBeforePathEndInSchema(t.Col(idx).Schema(), path[1:])
+	return unionBeforePathEndInSchema(env.finalSchema(idx), path[1:])
 }
 
 func unionBeforePathEndInSchema(schema *table.TypeDescriptor, path []string) *table.TypeDescriptor {
@@ -265,86 +255,14 @@ func unionPathTraversalError(path []string, schema *table.TypeDescriptor) error 
 }
 
 func validatePathDoesNotTraverseUnion(op string, t *table.Table, path []string) error {
-	if schema := unionBeforePathEnd(t, path); schema != nil {
+	return validatePathDoesNotTraverseUnionInEnv(op, schemaEnvFromTable(t), path)
+}
+
+func validatePathDoesNotTraverseUnionInEnv(op string, env schemaEnv, path []string) error {
+	if schema := unionBeforePathEndInEnv(env, path); schema != nil {
 		return fmt.Errorf("%s %q: cannot access fields through union schema %s", op, strings.Join(path, "."), schema.String())
 	}
 	return nil
-}
-
-func execHead(o *ast.HeadOp, t *table.Table) *table.Table {
-	n := o.N
-	if n > t.NumRows {
-		n = t.NumRows
-	}
-	return t.SliceRows(0, n)
-}
-
-func execTail(o *ast.TailOp, t *table.Table) *table.Table {
-	n := o.N
-	if n > t.NumRows {
-		n = t.NumRows
-	}
-	return t.SliceRows(t.NumRows-n, t.NumRows)
-}
-
-func execSort(o *ast.SortOp, t *table.Table) (*table.Table, error) {
-	type key struct {
-		path []string
-		desc bool
-	}
-	keys := make([]key, len(o.Keys))
-	for i, k := range o.Keys {
-		bound, err := bindColumnPath(t, k.Path, &ast.ColumnExpr{Path: k.Path})
-		if err != nil {
-			return nil, fmt.Errorf("sort %q: %w", strings.Join(k.Path, "."), err)
-		}
-		if err := validatePathDoesNotTraverseUnion("sort", t, k.Path); err != nil {
-			return nil, err
-		}
-		schema := table.FinalizeSchema(bound.typ)
-		if table.SchemaContainsUnion(schema) {
-			return nil, fmt.Errorf("sort %q: union values are not orderable", strings.Join(k.Path, "."))
-		}
-		if !table.IsOrderable(schema) {
-			return nil, fmt.Errorf("sort %q: %s values are not orderable", strings.Join(k.Path, "."), table.TypeName(schema.Kind))
-		}
-		keys[i] = key{k.Path, k.Desc}
-	}
-
-	sortVals := make([][]table.Value, t.NumRows)
-	for row := 0; row < t.NumRows; row++ {
-		sortVals[row] = make([]table.Value, len(keys))
-		for j, k := range keys {
-			v, err := resolveColumnPath(k.path, t, row)
-			if err != nil {
-				return nil, fmt.Errorf("sort %q: %w", strings.Join(k.path, "."), err)
-			}
-			sortVals[row][j] = v
-		}
-	}
-
-	perm := make([]int, t.NumRows)
-	for i := range perm {
-		perm[i] = i
-	}
-	sort.SliceStable(perm, func(a, b int) bool {
-		for j, k := range keys {
-			left := sortVals[perm[a]][j]
-			right := sortVals[perm[b]][j]
-			cmp := compareValues(left, right)
-			if cmp != 0 {
-				if left.IsNull() || right.IsNull() {
-					return cmp < 0
-				}
-				if k.desc {
-					return cmp > 0
-				}
-				return cmp < 0
-			}
-		}
-		return false
-	})
-	return t.ApplyPermutation(perm), nil
 }
 
 func compareValues(a, b table.Value) int {
@@ -367,53 +285,6 @@ func compareValues(a, b table.Value) int {
 		return strings.Compare(table.TypeName(a.Type), table.TypeName(b.Type))
 	}
 	return strings.Compare(table.CanonicalKey(a), table.CanonicalKey(b))
-}
-
-func execSelect(o *ast.SelectOp, t *table.Table) (*table.Table, error) {
-	if indices, cols, ok, err := planTopLevelProjections(o.Columns, t); ok || err != nil {
-		if err != nil {
-			return nil, err
-		}
-		return t.SelectCols(indices, cols), nil
-	}
-	plan, err := planProjections("select", o.Columns, t)
-	if err != nil {
-		return nil, err
-	}
-	result := table.NewTableWithSchemas(plan.cols, plan.schemas)
-	for i := 0; i < t.NumRows; i++ {
-		vals := make([]table.Value, len(plan.projections))
-		for j, projection := range plan.projections {
-			v, err := resolveColumnPath(projection.path, t, i)
-			if err != nil {
-				return nil, fmt.Errorf("select: %w", err)
-			}
-			vals[j] = v
-		}
-		if err := result.AddRowTyped(vals); err != nil {
-			return nil, fmt.Errorf("select: %w", err)
-		}
-	}
-	return result, nil
-}
-
-func execFilter(o *ast.FilterOp, t *table.Table) (*table.Table, error) {
-	planned, err := planFilterExpr(o.Expr, t)
-	if err != nil {
-		return nil, fmt.Errorf("filter: %w", err)
-	}
-	predicate := compileFilterPredicate(planned, t)
-	kept := make([]int, 0, t.NumRows)
-	for i := 0; i < t.NumRows; i++ {
-		keep, err := predicate(i)
-		if err != nil {
-			return nil, fmt.Errorf("filter: %w", err)
-		}
-		if keep {
-			kept = append(kept, i)
-		}
-	}
-	return t.ApplyPermutation(kept), nil
 }
 
 func execGroup(o *ast.GroupOp, t *table.Table) (*table.Table, error) {
@@ -712,165 +583,4 @@ func execReduce(o *ast.ReduceOp, t *table.Table) (*table.Table, error) {
 		}
 	}
 	return result, nil
-}
-
-func execCount(t *table.Table) *table.Table {
-	result := table.NewTableWithSchemas([]string{"count"}, []*table.TypeDescriptor{{Kind: table.TypeInt}})
-	_ = result.AddRowTyped([]table.Value{table.IntVal(int64(t.NumRows))})
-	return result
-}
-
-func execDescribe(t *table.Table) *table.Table {
-	result := table.NewTableWithSchemas(
-		[]string{"column", "type", "row_count", "schema"},
-		[]*table.TypeDescriptor{
-			{Kind: table.TypeString},
-			{Kind: table.TypeString},
-			{Kind: table.TypeInt},
-			{Kind: table.TypeString},
-		},
-	)
-	for i, name := range t.Columns {
-		_ = result.AddRowTyped([]table.Value{
-			table.StrVal(name),
-			table.StrVal(table.TypeName(t.Col(i).ColType())),
-			table.IntVal(int64(t.NumRows)),
-			table.StrVal(t.Col(i).Schema().String()),
-		})
-	}
-	return result
-}
-
-func execDistinct(o *ast.DistinctOp, t *table.Table) (*table.Table, error) {
-	seen := make(map[string]bool)
-	if len(o.Columns) > 0 {
-		plan, err := planProjections("distinct", o.Columns, t)
-		if err != nil {
-			return nil, err
-		}
-		result := table.NewTableWithSchemas(plan.cols, plan.schemas)
-		if plan.topLevelIdx != nil {
-			for i := 0; i < t.NumRows; i++ {
-				var key string
-				if len(plan.topLevelIdx) == 1 {
-					key = table.CanonicalKey(t.Col(plan.topLevelIdx[0]).Get(i))
-				} else {
-					keyParts := make([]string, len(plan.topLevelIdx))
-					for j, idx := range plan.topLevelIdx {
-						keyParts[j] = table.CanonicalKey(t.Col(idx).Get(i))
-					}
-					key = canonicalTupleKey(keyParts)
-				}
-				if !seen[key] {
-					seen[key] = true
-					vals := make([]table.Value, len(plan.topLevelIdx))
-					for j, idx := range plan.topLevelIdx {
-						vals[j] = t.Col(idx).Get(i)
-					}
-					if err := result.AddRowTyped(vals); err != nil {
-						return nil, fmt.Errorf("distinct: %w", err)
-					}
-				}
-			}
-			return result, nil
-		}
-		for i := 0; i < t.NumRows; i++ {
-			vals := make([]table.Value, len(plan.projections))
-			var key string
-			var keyParts []string
-			if len(plan.projections) > 1 {
-				keyParts = make([]string, len(plan.projections))
-			}
-			for j, projection := range plan.projections {
-				v, err := resolveColumnPath(projection.path, t, i)
-				if err != nil {
-					return nil, fmt.Errorf("distinct %q: %w", strings.Join(projection.path, "."), err)
-				}
-				vals[j] = v
-				if len(plan.projections) == 1 {
-					key = table.CanonicalKey(v)
-				} else {
-					keyParts[j] = table.CanonicalKey(v)
-				}
-			}
-			if len(plan.projections) > 1 {
-				key = canonicalTupleKey(keyParts)
-			}
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			if err := result.AddRowTyped(vals); err != nil {
-				return nil, fmt.Errorf("distinct: %w", err)
-			}
-		}
-		return result, nil
-	}
-
-	result := table.NewTableWithSchemas(t.Columns, columnSchemas(t))
-	for i := 0; i < t.NumRows; i++ {
-		parts := make([]string, len(t.Columns))
-		for j := range t.Columns {
-			parts[j] = table.CanonicalKey(t.Col(j).Get(i))
-		}
-		key := canonicalTupleKey(parts)
-
-		if !seen[key] {
-			seen[key] = true
-			if err := result.AddRowTyped(rowVals(t, i)); err != nil {
-				return nil, fmt.Errorf("distinct: %w", err)
-			}
-		}
-	}
-	return result, nil
-}
-
-func execRename(o *ast.RenameOp, t *table.Table) (*table.Table, error) {
-	newCols := make([]string, len(t.Columns))
-	copy(newCols, t.Columns)
-
-	renamed := make(map[int]bool)
-	for _, pair := range o.Pairs {
-		idx := t.ColIndex(pair.Old)
-		if idx < 0 {
-			return nil, fmt.Errorf("rename: column %q not found", pair.Old)
-		}
-		if renamed[idx] {
-			return nil, fmt.Errorf("rename: column %q renamed more than once", pair.Old)
-		}
-		renamed[idx] = true
-		newCols[idx] = pair.New
-	}
-
-	seen := make(map[string]bool)
-	for _, c := range newCols {
-		if seen[c] {
-			return nil, fmt.Errorf("rename: duplicate column name %q in result; pick a unique name", c)
-		}
-		seen[c] = true
-	}
-
-	return t.ShallowClone(newCols), nil
-}
-
-func execRemove(o *ast.RemoveOp, t *table.Table) (*table.Table, error) {
-	removeSet := make(map[string]bool)
-	for _, path := range o.Columns {
-		c := path[0]
-		if t.ColIndex(c) < 0 {
-			return nil, fmt.Errorf("remove: column %q not found", c)
-		}
-		removeSet[c] = true
-	}
-
-	var keepCols []string
-	var keepIndices []int
-	for i, c := range t.Columns {
-		if !removeSet[c] {
-			keepCols = append(keepCols, c)
-			keepIndices = append(keepIndices, i)
-		}
-	}
-
-	return t.SelectCols(keepIndices, keepCols), nil
 }

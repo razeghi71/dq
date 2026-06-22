@@ -1349,7 +1349,7 @@ func (t *Table) SliceRows(from, to int) *Table {
 
 func sliceColumn(c *Column, from, to int) *Column {
 	n := to - from
-	schema := FinalizeSchema(c.schema)
+	schema := cloneTypeDescriptor(c.schema)
 	nc := &Column{name: c.name, typ: c.typ, schema: schema, hasUnion: SchemaContainsUnion(schema), nulls: make([]bool, n)}
 	copy(nc.nulls, c.nulls[from:to])
 	switch c.typ {
@@ -1395,7 +1395,7 @@ func (t *Table) ApplyPermutation(perm []int) *Table {
 
 func permuteColumn(c *Column, perm []int) *Column {
 	n := len(perm)
-	schema := FinalizeSchema(c.schema)
+	schema := cloneTypeDescriptor(c.schema)
 	nc := &Column{name: c.name, typ: c.typ, schema: schema, hasUnion: SchemaContainsUnion(schema), nulls: make([]bool, n)}
 	for i, p := range perm {
 		nc.nulls[i] = c.nulls[p]
@@ -1441,7 +1441,6 @@ func permuteColumn(c *Column, perm []int) *Column {
 }
 
 // SelectCols returns a new Table with only the specified column indices (data shared).
-// Used by execRemove and similar operations that don't need a data copy.
 func (t *Table) SelectCols(indices []int, names []string) *Table {
 	result := &Table{
 		Columns: make([]string, len(indices)),
@@ -1453,6 +1452,48 @@ func (t *Table) SelectCols(indices []int, names []string) *Table {
 		result.cols[i] = t.cols[idx]
 	}
 	return result
+}
+
+// SelectColsWithSchema returns a shallow column projection whose public column
+// names and schemas are taken from the planned output schema. The planned
+// schema must exactly match the selected backing columns apart from accepted
+// nullability because column value slices are shared.
+func (t *Table) SelectColsWithSchema(indices []int, schema Schema) (*Table, error) {
+	if len(indices) != len(schema.Columns) {
+		return nil, fmt.Errorf("select columns with schema: %d indices for %d schema columns", len(indices), len(schema.Columns))
+	}
+	result := &Table{
+		Columns: make([]string, len(indices)),
+		cols:    make([]*Column, len(indices)),
+		NumRows: t.NumRows,
+	}
+	for i, idx := range indices {
+		if idx < 0 || idx >= len(t.cols) {
+			return nil, fmt.Errorf("select columns with schema: column index %d out of range", idx)
+		}
+		col := *t.cols[idx]
+		plannedSchema := schemaForStorage(schema.Columns[i].Type)
+		actualSchema := col.RawSchema()
+		if actualSchema == nil {
+			actualSchema = col.Schema()
+		}
+		plannedType := TypeNull
+		if plannedSchema != nil {
+			plannedType = FinalizeSchema(plannedSchema).Kind
+		}
+		if col.typ != TypeNull && plannedType != col.typ {
+			return nil, fmt.Errorf("select columns with schema: column %q storage type %s incompatible with planned schema %s", col.name, TypeName(col.typ), Render(plannedSchema))
+		}
+		if plannedSchema != nil && !SchemaAssignable(plannedSchema, actualSchema, AssignExactMode) {
+			return nil, fmt.Errorf("select columns with schema: column %q storage schema %s incompatible with planned schema %s", col.name, Render(actualSchema), Render(plannedSchema))
+		}
+		col.name = schema.Columns[i].Name
+		col.schema = plannedSchema
+		col.hasUnion = SchemaContainsUnion(col.schema)
+		result.Columns[i] = schema.Columns[i].Name
+		result.cols[i] = &col
+	}
+	return result, nil
 }
 
 // ShallowClone returns a new Table with the same column data but new column names.
@@ -1574,7 +1615,7 @@ func (t *Table) Clone() *Table {
 
 func cloneColumn(c *Column) *Column {
 	n := c.Len()
-	schema := FinalizeSchema(c.schema)
+	schema := cloneTypeDescriptor(c.schema)
 	nc := &Column{name: c.name, typ: c.typ, schema: schema, hasUnion: SchemaContainsUnion(schema), nulls: make([]bool, n)}
 	copy(nc.nulls, c.nulls)
 	switch c.typ {

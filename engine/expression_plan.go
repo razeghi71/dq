@@ -92,24 +92,120 @@ type typedStructField struct {
 	expr typedExpr
 }
 
+type schemaEnv struct {
+	columns []string
+	raw     []*table.TypeDescriptor
+	final   []*table.TypeDescriptor
+}
+
+func schemaEnvFromTable(t *table.Table) schemaEnv {
+	if t == nil {
+		return schemaEnv{}
+	}
+	env := schemaEnv{
+		columns: append([]string(nil), t.Columns...),
+		raw:     make([]*table.TypeDescriptor, len(t.Columns)),
+		final:   make([]*table.TypeDescriptor, len(t.Columns)),
+	}
+	for i := range t.Columns {
+		col := t.Col(i)
+		if col == nil {
+			continue
+		}
+		env.raw[i] = col.RawSchema()
+		env.final[i] = col.Schema()
+		if env.raw[i] == nil {
+			env.raw[i] = env.final[i]
+		}
+	}
+	return env
+}
+
+func schemaEnvFromSchema(schema table.Schema) schemaEnv {
+	env := schemaEnv{
+		columns: make([]string, len(schema.Columns)),
+		raw:     make([]*table.TypeDescriptor, len(schema.Columns)),
+		final:   make([]*table.TypeDescriptor, len(schema.Columns)),
+	}
+	for i, col := range schema.Columns {
+		env.columns[i] = col.Name
+		env.raw[i] = table.NormalizeSchema(col.Type)
+		env.final[i] = table.FinalizeSchema(col.Type)
+		if env.raw[i] == nil {
+			env.raw[i] = env.final[i]
+		}
+	}
+	return env
+}
+
+func (e schemaEnv) colIndex(name string) int {
+	for i, col := range e.columns {
+		if col == name {
+			return i
+		}
+	}
+	return -1
+}
+
+func (e schemaEnv) rawSchema(i int) *table.TypeDescriptor {
+	if i < 0 || i >= len(e.raw) {
+		return nil
+	}
+	return e.raw[i]
+}
+
+func (e schemaEnv) finalSchema(i int) *table.TypeDescriptor {
+	if i < 0 || i >= len(e.final) {
+		return nil
+	}
+	return e.final[i]
+}
+
+func (e schemaEnv) schema() table.Schema {
+	columns := make([]table.SchemaColumn, len(e.columns))
+	for i, name := range e.columns {
+		typ := e.rawSchema(i)
+		if typ == nil {
+			typ = e.finalSchema(i)
+		}
+		columns[i] = table.SchemaColumn{Name: name, Type: typ}
+	}
+	return table.Schema{Columns: columns}
+}
+
+func (e schemaEnv) rawSchemas() []*table.TypeDescriptor {
+	schemas := make([]*table.TypeDescriptor, len(e.columns))
+	for i := range e.columns {
+		schemas[i] = e.rawSchema(i)
+		if schemas[i] == nil {
+			schemas[i] = e.finalSchema(i)
+		}
+	}
+	return schemas
+}
+
 func bindExpression(expr ast.Expr, t *table.Table) (boundExpr, error) {
+	return bindExpressionInEnv(expr, schemaEnvFromTable(t))
+}
+
+func bindExpressionInEnv(expr ast.Expr, env schemaEnv) (boundExpr, error) {
 	switch e := expr.(type) {
 	case *ast.LiteralExpr:
 		return &boundLiteral{raw: e}, nil
 	case *ast.ColumnExpr:
-		return bindColumnExpr(e, t)
+		return bindColumnExprInEnv(e, env)
 	case *ast.BinaryExpr:
-		left, err := bindExpression(e.Left, t)
+		left, err := bindExpressionInEnv(e.Left, env)
 		if err != nil {
 			return nil, err
 		}
-		right, err := bindExpression(e.Right, t)
+		right, err := bindExpressionInEnv(e.Right, env)
 		if err != nil {
 			return nil, err
 		}
 		return &boundBinary{raw: e, left: left, right: right}, nil
 	case *ast.UnaryExpr:
-		operand, err := bindExpression(e.Operand, t)
+		operand, err := bindExpressionInEnv(e.Operand, env)
 		if err != nil {
 			return nil, err
 		}
@@ -117,7 +213,7 @@ func bindExpression(expr ast.Expr, t *table.Table) (boundExpr, error) {
 	case *ast.FuncCallExpr:
 		args := make([]boundExpr, len(e.Args))
 		for i, arg := range e.Args {
-			bound, err := bindExpression(arg, t)
+			bound, err := bindExpressionInEnv(arg, env)
 			if err != nil {
 				return nil, err
 			}
@@ -127,7 +223,7 @@ func bindExpression(expr ast.Expr, t *table.Table) (boundExpr, error) {
 	case *ast.StructExpr:
 		fields := make([]boundStructField, len(e.Fields))
 		for i, field := range e.Fields {
-			bound, err := bindExpression(field.Expr, t)
+			bound, err := bindExpressionInEnv(field.Expr, env)
 			if err != nil {
 				return nil, err
 			}
@@ -137,7 +233,7 @@ func bindExpression(expr ast.Expr, t *table.Table) (boundExpr, error) {
 	case *ast.ListExpr:
 		elements := make([]boundExpr, len(e.Elements))
 		for i, elem := range e.Elements {
-			bound, err := bindExpression(elem, t)
+			bound, err := bindExpressionInEnv(elem, env)
 			if err != nil {
 				return nil, err
 			}
@@ -145,7 +241,7 @@ func bindExpression(expr ast.Expr, t *table.Table) (boundExpr, error) {
 		}
 		return &boundList{raw: e, elements: elements}, nil
 	case *ast.IsNullExpr:
-		operand, err := bindExpression(e.Operand, t)
+		operand, err := bindExpressionInEnv(e.Operand, env)
 		if err != nil {
 			return nil, err
 		}
@@ -155,22 +251,25 @@ func bindExpression(expr ast.Expr, t *table.Table) (boundExpr, error) {
 	}
 }
 
-func bindColumnExpr(e *ast.ColumnExpr, t *table.Table) (*boundColumn, error) {
-	return bindColumnPath(t, e.Path, e)
+func bindColumnExprInEnv(e *ast.ColumnExpr, env schemaEnv) (*boundColumn, error) {
+	return bindColumnPathInEnv(env, e.Path, e)
 }
 
 func bindColumnPath(t *table.Table, path []string, raw *ast.ColumnExpr) (*boundColumn, error) {
-	if t == nil || len(path) == 0 {
+	return bindColumnPathInEnv(schemaEnvFromTable(t), path, raw)
+}
+
+func bindColumnPathInEnv(env schemaEnv, path []string, raw *ast.ColumnExpr) (*boundColumn, error) {
+	if len(path) == 0 {
 		return nil, fmt.Errorf("empty column path")
 	}
-	idx := t.ColIndex(path[0])
+	idx := env.colIndex(path[0])
 	if idx < 0 {
-		return nil, columnNotFoundError(path[0], t)
+		return nil, columnNotFoundError(path[0], env.columns)
 	}
-	col := t.Col(idx)
-	typ := col.Schema()
-	if len(path) == 1 && col.ColType() == table.TypeNull {
-		typ = &table.TypeDescriptor{Kind: table.TypeNull, Nullable: true}
+	typ := env.rawSchema(idx)
+	if typ == nil {
+		typ = env.finalSchema(idx)
 	}
 	parentNullable := false
 	for _, seg := range path[1:] {
@@ -287,20 +386,20 @@ func bindAggregateArgs(e *ast.FuncCallExpr, nestedSchema *table.TypeDescriptor) 
 }
 
 func bindAggregateColumnPath(nestedSchema *table.TypeDescriptor, path []string, raw *ast.ColumnExpr) (*boundColumn, error) {
-	t, err := tableForRecordSchema(nestedSchema)
+	env, err := envForRecordSchema(nestedSchema)
 	if err != nil {
 		return nil, err
 	}
-	return bindColumnPath(t, path, raw)
+	return bindColumnPathInEnv(env, path, raw)
 }
 
-func tableForRecordSchema(schema *table.TypeDescriptor) (*table.Table, error) {
+func envForRecordSchema(schema *table.TypeDescriptor) (schemaEnv, error) {
 	if schema == nil {
-		return nil, fmt.Errorf("nested row schema is unknown")
+		return schemaEnv{}, fmt.Errorf("nested row schema is unknown")
 	}
 	rec := table.FinalizeSchema(schema)
 	if rec.Kind != table.TypeRecord {
-		return nil, fmt.Errorf("nested row schema must be a record, got %s", rec.String())
+		return schemaEnv{}, fmt.Errorf("nested row schema must be a record, got %s", rec.String())
 	}
 	cols := make([]string, len(rec.Fields))
 	schemas := make([]*table.TypeDescriptor, len(rec.Fields))
@@ -308,14 +407,14 @@ func tableForRecordSchema(schema *table.TypeDescriptor) (*table.Table, error) {
 		cols[i] = field.Name
 		schemas[i] = field.Type
 	}
-	return table.NewTableWithSchemas(cols, schemas), nil
+	return schemaEnvFromSchema(table.NewSchema(cols, schemas)), nil
 }
 
-func columnNotFoundError(name string, t *table.Table) error {
+func columnNotFoundError(name string, columns []string) error {
 	msg := fmt.Sprintf("column %q not found", name)
-	if t != nil && len(t.Columns) > 0 {
-		msg += "; available columns: " + strings.Join(t.Columns, ", ")
-		if hint := closestColumnName(name, t.Columns); hint != "" {
+	if len(columns) > 0 {
+		msg += "; available columns: " + strings.Join(columns, ", ")
+		if hint := closestColumnName(name, columns); hint != "" {
 			msg += fmt.Sprintf("; hint: did you mean %q?", hint)
 		}
 	}

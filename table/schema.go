@@ -32,6 +32,22 @@ type SchemaColumn struct {
 	Type *TypeDescriptor
 }
 
+// NewSchema creates a logical schema from column names and recursive type
+// descriptors. Descriptors are normalized and cloned, but not finalized; callers
+// that model planning-time unknown/null-only columns can preserve TypeNull until
+// a real table storage schema is needed.
+func NewSchema(columns []string, types []*TypeDescriptor) Schema {
+	out := Schema{Columns: make([]SchemaColumn, len(columns))}
+	for i, name := range columns {
+		var typ *TypeDescriptor
+		if i < len(types) && types[i] != nil {
+			typ = NormalizeSchema(types[i])
+		}
+		out.Columns[i] = SchemaColumn{Name: name, Type: typ}
+	}
+	return out
+}
+
 // SchemaError reports a mismatch while merging or coercing nested schemas.
 type SchemaError struct {
 	Path     string

@@ -74,7 +74,11 @@ func allSchemasKnown(schemas []*table.TypeDescriptor, indexes []int) bool {
 }
 
 func planFilterExpr(expr ast.Expr, t *table.Table) (typedExpr, error) {
-	bound, err := bindExpression(expr, t)
+	return planFilterExprInEnv(expr, schemaEnvFromTable(t))
+}
+
+func planFilterExprInEnv(expr ast.Expr, env schemaEnv) (typedExpr, error) {
+	bound, err := bindExpressionInEnv(expr, env)
 	if err != nil {
 		return typedExpr{}, err
 	}
