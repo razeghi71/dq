@@ -113,13 +113,14 @@ dq 'users.csv | filter { false } | describe'
 # age  -> int,    row_count 0
 ```
 
-Simple operations such as `filter`, `select`, `sort`, `rename`, `remove`, `distinct`, `count`, and `describe` are planned against the current schema before rows run. Expressions are checked there too. Misspelled columns, missing fields in known records, wrong function argument types, and unavailable columns from earlier projections fail even if the table currently has zero rows:
+Operations such as `filter`, `transform`, `select`, `sort`, `rename`, `remove`, `distinct`, `count`, and `describe` are planned against the current schema before rows run. Expressions are checked there too. Misspelled columns, missing fields in known records, wrong function argument types, and unavailable columns from earlier projections fail even if the table currently has zero rows:
 
 ```bash
 dq 'users.csv | filter { agge > 20 }'                         # error: column "agge" not found
 dq 'users.csv | filter { false } | transform x = upper(age)'  # error: upper() needs string
 dq 'nested.json | select address.missing'                     # error: field not found
 dq 'users.csv | distinct city | select age'                   # error: age was projected away
+dq 'users.csv | transform age2 = age + 1 | select age2'       # age2 is available downstream
 ```
 
 Each pipeline stage sees the columns produced by previous stages. Within one `transform` or `reduce`, assignment target names must be unique and all right-hand sides see the input schema only:
@@ -238,7 +239,17 @@ dq 'users.csv | transform name = upper(name), age_months = age * 12'
 dq 'sales.csv | transform total = coalesce(quantity, 0) * coalesce(price, 0)'
 ```
 
-Assignment target names must be unique within one `transform`.
+Later stages in the same pipeline see transformed columns:
+
+```bash
+dq 'users.csv | transform age2 = age + 1 | filter { age2 > 30 } | select name, age2'
+```
+
+Assignment target names must be unique within one `transform`. Right-hand sides see the input table for that `transform`, not sibling assignments:
+
+```bash
+dq 'users.csv | transform age2 = age + 1, age3 = age2 + 1'  # error unless age2 already existed
+```
 
 ### `group` - Group rows by column values
 

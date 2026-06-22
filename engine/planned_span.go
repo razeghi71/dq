@@ -9,14 +9,14 @@ import (
 	"github.com/razeghi71/dq/table"
 )
 
-// pipelinePlan is the planned form of a simple-operator pipeline span.
+// pipelinePlan is the planned form of a schema-planned pipeline span.
 type pipelinePlan struct {
 	Ops          []plannedOp
 	InputSchema  table.Schema
 	OutputSchema table.Schema
 }
 
-// plannedOp is a schema-planned simple operation.
+// plannedOp is a schema-planned operation.
 type plannedOp interface {
 	OutputSchema() table.Schema
 }
@@ -42,6 +42,17 @@ type plannedTail struct {
 type plannedFilter struct {
 	plannedBase
 	expr typedExpr
+}
+
+type plannedTransform struct {
+	plannedBase
+	assignments []plannedTransformAssignment
+}
+
+type plannedTransformAssignment struct {
+	name   string
+	target int
+	expr   typedExpr
 }
 
 type plannedSort struct {
@@ -81,37 +92,39 @@ type plannedDescribe struct {
 	plannedBase
 }
 
-func isSimpleOp(op ast.Op) bool {
+func isPlannedSpanOp(op ast.Op) bool {
 	switch op.(type) {
 	case *ast.HeadOp, *ast.TailOp, *ast.FilterOp, *ast.SelectOp, *ast.SortOp,
-		*ast.RenameOp, *ast.RemoveOp, *ast.DistinctOp, *ast.CountOp, *ast.DescribeOp:
+		*ast.TransformOp, *ast.RenameOp, *ast.RemoveOp, *ast.DistinctOp,
+		*ast.CountOp, *ast.DescribeOp:
 		return true
 	default:
 		return false
 	}
 }
 
-// planSimplePipeline plans a span containing only simple operations. It binds
-// column references, validates operator-specific schema rules, and computes the
-// output schema for each operation without inspecting rows.
-func planSimplePipeline(input table.Schema, ops []ast.Op) (*pipelinePlan, error) {
-	return planSimplePipelineInEnv(schemaEnvFromSchema(input), ops)
+// planSchemaPipeline plans a span containing operations with schema-only
+// planners. It binds column references, validates operator-specific schema
+// rules, and computes the output schema for each operation without inspecting
+// rows.
+func planSchemaPipeline(input table.Schema, ops []ast.Op) (*pipelinePlan, error) {
+	return planSchemaPipelineInEnv(schemaEnvFromSchema(input), ops)
 }
 
-func planSimplePipelineFromTable(input *table.Table, ops []ast.Op) (*pipelinePlan, error) {
-	return planSimplePipelineInEnv(schemaEnvFromTable(input), ops)
+func planSchemaPipelineFromTable(input *table.Table, ops []ast.Op) (*pipelinePlan, error) {
+	return planSchemaPipelineInEnv(schemaEnvFromTable(input), ops)
 }
 
-func planSimplePipelineInEnv(input schemaEnv, ops []ast.Op) (*pipelinePlan, error) {
+func planSchemaPipelineInEnv(input schemaEnv, ops []ast.Op) (*pipelinePlan, error) {
 	current := input
 	planned := make([]plannedOp, 0, len(ops))
 	output := input.schema()
 
 	for i, op := range ops {
-		if !isSimpleOp(op) {
-			return nil, fmt.Errorf("cannot plan non-simple operation %T in simple pipeline", op)
+		if !isPlannedSpanOp(op) {
+			return nil, fmt.Errorf("cannot plan operation %T in schema-planned pipeline", op)
 		}
-		next, err := planSimpleOp(current, op)
+		next, err := planSchemaOp(current, op)
 		if err != nil {
 			return nil, err
 		}
@@ -125,7 +138,7 @@ func planSimplePipelineInEnv(input schemaEnv, ops []ast.Op) (*pipelinePlan, erro
 	return &pipelinePlan{Ops: planned, InputSchema: input.schema(), OutputSchema: output}, nil
 }
 
-func planSimpleOp(input schemaEnv, op ast.Op) (plannedOp, error) {
+func planSchemaOp(input schemaEnv, op ast.Op) (plannedOp, error) {
 	switch o := op.(type) {
 	case *ast.HeadOp:
 		return plannedHead{plannedBase: plannedBase{output: input.schema()}, n: o.N}, nil
@@ -137,6 +150,8 @@ func planSimpleOp(input schemaEnv, op ast.Op) (plannedOp, error) {
 			return nil, fmt.Errorf("filter: %w", err)
 		}
 		return plannedFilter{plannedBase: plannedBase{output: input.schema()}, expr: expr}, nil
+	case *ast.TransformOp:
+		return planTransform(o, input)
 	case *ast.SortOp:
 		keys, err := planSortKeys(o, input)
 		if err != nil {
@@ -180,8 +195,59 @@ func planSimpleOp(input schemaEnv, op ast.Op) (plannedOp, error) {
 	case *ast.DescribeOp:
 		return plannedDescribe{plannedBase: plannedBase{output: describeOutputSchema()}}, nil
 	default:
-		return nil, fmt.Errorf("unknown simple operation type %T", op)
+		return nil, fmt.Errorf("unknown schema-planned operation type %T", op)
 	}
+}
+
+func planTransform(o *ast.TransformOp, input schemaEnv) (plannedTransform, error) {
+	cols := append([]string(nil), input.columns...)
+	assignments := make([]plannedTransformAssignment, len(o.Assignments))
+	seenTargets := make(map[string]bool, len(o.Assignments))
+
+	for i, a := range o.Assignments {
+		if seenTargets[a.Column] {
+			return plannedTransform{}, fmt.Errorf("transform target %q assigned more than once", a.Column)
+		}
+		seenTargets[a.Column] = true
+
+		idx := -1
+		for j, col := range cols {
+			if col == a.Column {
+				idx = j
+				break
+			}
+		}
+		if idx < 0 {
+			idx = len(cols)
+			cols = append(cols, a.Column)
+		}
+		assignments[i].name = a.Column
+		assignments[i].target = idx
+	}
+
+	for i, a := range o.Assignments {
+		planned, err := planTransformExprInEnv(a.Expr, input)
+		if err != nil {
+			return plannedTransform{}, fmt.Errorf("transform %q: %w", a.Column, err)
+		}
+		assignments[i].expr = planned
+	}
+
+	schemas := input.rawSchemas()
+	for len(schemas) < len(cols) {
+		schemas = append(schemas, nil)
+	}
+	for _, assignment := range assignments {
+		schemas[assignment.target] = nil
+	}
+	for _, assignment := range assignments {
+		schemas[assignment.target] = table.FinalizeSchema(assignment.expr.typ)
+	}
+
+	return plannedTransform{
+		plannedBase: plannedBase{output: rawSchemaFromColumns(cols, schemas)},
+		assignments: assignments,
+	}, nil
 }
 
 func planSortKeys(o *ast.SortOp, input schemaEnv) ([]plannedSortKey, error) {
@@ -294,7 +360,7 @@ func describeOutputSchema() table.Schema {
 	)
 }
 
-// executePlan executes a planned simple pipeline span against rows.
+// executePlan executes a planned pipeline span against rows.
 func executePlan(plan *pipelinePlan, input *table.Table) (*table.Table, error) {
 	if err := validatePlanInputTableSchema(plan.InputSchema, input); err != nil {
 		return nil, err
@@ -346,6 +412,8 @@ func execPlannedOp(op plannedOp, input *table.Table) (*table.Table, error) {
 		return execPlannedTail(p, input), nil
 	case plannedFilter:
 		return execPlannedFilter(p, input)
+	case plannedTransform:
+		return execPlannedTransform(p, input)
 	case plannedSort:
 		return execPlannedSort(p, input)
 	case plannedSelect:
@@ -394,6 +462,62 @@ func execPlannedFilter(p plannedFilter, input *table.Table) (*table.Table, error
 		}
 	}
 	return input.ApplyPermutation(kept), nil
+}
+
+func execPlannedTransform(p plannedTransform, input *table.Table) (*table.Table, error) {
+	compiled := make([]rowValueEvaluator, len(p.assignments))
+	for i, assignment := range p.assignments {
+		compiled[i] = compileTypedRowValue(assignment.expr, input)
+	}
+
+	cols, schemas := outputSchemaColumns(p.OutputSchema())
+	targets := transformAssignmentTargets(p.assignments)
+	if allSchemasKnown(schemas, targets) {
+		if result, ok, err := execAppendOnlyTypedTransform(input, cols, schemas, p.assignments, compiled); ok || err != nil {
+			return result, err
+		}
+	}
+
+	result := table.NewTableWithSchemas(cols, schemas)
+	for row := 0; row < input.NumRows; row++ {
+		vals := make([]table.Value, len(cols))
+		for col := 0; col < len(input.Columns); col++ {
+			vals[col] = input.Col(col).Get(row)
+		}
+		for col := len(input.Columns); col < len(cols); col++ {
+			vals[col] = table.Null()
+		}
+
+		for i, assignment := range p.assignments {
+			v, err := compiled[i](row)
+			if err != nil {
+				return nil, fmt.Errorf("transform %q: %w", assignment.name, err)
+			}
+			vals[assignment.target] = v
+		}
+		if err := result.AddRowTypedColumns(vals, targets); err != nil {
+			return nil, fmt.Errorf("transform: %w", err)
+		}
+	}
+	return result, nil
+}
+
+func transformAssignmentTargets(assignments []plannedTransformAssignment) []int {
+	targets := make([]int, len(assignments))
+	for i, assignment := range assignments {
+		targets[i] = assignment.target
+	}
+	return targets
+}
+
+func outputSchemaColumns(schema table.Schema) ([]string, []*table.TypeDescriptor) {
+	cols := make([]string, len(schema.Columns))
+	schemas := make([]*table.TypeDescriptor, len(schema.Columns))
+	for i, col := range schema.Columns {
+		cols[i] = col.Name
+		schemas[i] = col.Type
+	}
+	return cols, schemas
 }
 
 func execPlannedSort(p plannedSort, input *table.Table) (*table.Table, error) {

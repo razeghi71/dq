@@ -15,12 +15,12 @@ import (
 func Execute(query *ast.Query, input *table.Table, load LoadFunc) (*table.Table, error) {
 	current := input
 	for i := 0; i < len(query.Ops); {
-		if isSimpleOp(query.Ops[i]) {
+		if isPlannedSpanOp(query.Ops[i]) {
 			end := i + 1
-			for end < len(query.Ops) && isSimpleOp(query.Ops[end]) {
+			for end < len(query.Ops) && isPlannedSpanOp(query.Ops[end]) {
 				end++
 			}
-			plan, err := planSimplePipelineFromTable(current, query.Ops[i:end])
+			plan, err := planSchemaPipelineFromTable(current, query.Ops[i:end])
 			if err != nil {
 				return nil, err
 			}
@@ -46,8 +46,6 @@ func execOp(op ast.Op, t *table.Table, load LoadFunc) (*table.Table, error) {
 	switch o := op.(type) {
 	case *ast.GroupOp:
 		return execGroup(o, t)
-	case *ast.TransformOp:
-		return execTransform(o, t)
 	case *ast.ReduceOp:
 		return execReduce(o, t)
 	case *ast.JoinOp:
@@ -360,104 +358,21 @@ func execGroup(o *ast.GroupOp, t *table.Table) (*table.Table, error) {
 	return result, nil
 }
 
-func execTransform(o *ast.TransformOp, t *table.Table) (*table.Table, error) {
-	newCols := make([]string, len(t.Columns))
-	copy(newCols, t.Columns)
-	assignTargets := make([]int, len(o.Assignments))
-	seenTargets := make(map[string]bool, len(o.Assignments))
-
-	for i, a := range o.Assignments {
-		if seenTargets[a.Column] {
-			return nil, fmt.Errorf("transform target %q assigned more than once", a.Column)
-		}
-		seenTargets[a.Column] = true
-		idx := -1
-		for j, c := range newCols {
-			if c == a.Column {
-				idx = j
-				break
-			}
-		}
-		if idx < 0 {
-			idx = len(newCols)
-			newCols = append(newCols, a.Column)
-		}
-		assignTargets[i] = idx
-	}
-
-	plannedAssignments := make([]typedExpr, len(o.Assignments))
-	for i, a := range o.Assignments {
-		planned, err := planTransformExpr(a.Expr, t)
-		if err != nil {
-			return nil, fmt.Errorf("transform %q: %w", a.Column, err)
-		}
-		plannedAssignments[i] = planned
-	}
-
-	schemas := columnSchemas(t)
-	for len(schemas) < len(newCols) {
-		schemas = append(schemas, nil)
-	}
-	for _, target := range assignTargets {
-		schemas[target] = nil
-	}
-	for i, planned := range plannedAssignments {
-		schemas[assignTargets[i]] = table.FinalizeSchema(planned.typ)
-	}
-	compiledAssignments := make([]rowValueEvaluator, len(plannedAssignments))
-	for i, planned := range plannedAssignments {
-		compiledAssignments[i] = compileTypedRowValue(planned, t)
-	}
-	useTypedAppend := allSchemasKnown(schemas, assignTargets)
-	if useTypedAppend {
-		if result, ok, err := execAppendOnlyTypedTransform(o, t, newCols, schemas, assignTargets, compiledAssignments); ok || err != nil {
-			return result, err
-		}
-	}
-	result := table.NewTableWithSchemas(newCols, schemas)
-	for i := 0; i < t.NumRows; i++ {
-		vals := make([]table.Value, len(newCols))
-		// Copy existing column values
-		for j := 0; j < len(t.Columns); j++ {
-			vals[j] = t.Col(j).Get(i)
-		}
-		// Fill new columns with null
-		for j := len(t.Columns); j < len(newCols); j++ {
-			vals[j] = table.Null()
-		}
-
-		for j, a := range o.Assignments {
-			v, err := compiledAssignments[j](i)
-			if err != nil {
-				return nil, fmt.Errorf("transform %q: %w", a.Column, err)
-			}
-			vals[assignTargets[j]] = v
-		}
-		if useTypedAppend {
-			if err := result.AddRowTypedColumns(vals, assignTargets); err != nil {
-				return nil, fmt.Errorf("transform: %w", err)
-			}
-		} else {
-			result.AddRow(vals)
-		}
-	}
-	return result, nil
-}
-
-func execAppendOnlyTypedTransform(o *ast.TransformOp, t *table.Table, newCols []string, schemas []*table.TypeDescriptor, assignTargets []int, assignments []rowValueEvaluator) (*table.Table, bool, error) {
-	if !appendOnlyTransformTargets(assignTargets, len(t.Columns)) {
+func execAppendOnlyTypedTransform(t *table.Table, newCols []string, schemas []*table.TypeDescriptor, assignments []plannedTransformAssignment, evaluators []rowValueEvaluator) (*table.Table, bool, error) {
+	targets := transformAssignmentTargets(assignments)
+	if !appendOnlyTransformTargets(targets, len(t.Columns)) {
 		return nil, false, nil
 	}
 
 	addedNames := newCols[len(t.Columns):]
 	addedSchemas := schemas[len(t.Columns):]
 	result, err := t.AppendTypedComputedColumnsFunc(addedNames, addedSchemas, func(row int, values []table.Value) error {
-		for i, a := range o.Assignments {
-			v, err := assignments[i](row)
+		for i, assignment := range assignments {
+			v, err := evaluators[i](row)
 			if err != nil {
-				return transformAssignmentError{err: fmt.Errorf("transform %q: %w", a.Column, err)}
+				return transformAssignmentError{err: fmt.Errorf("transform %q: %w", assignment.name, err)}
 			}
-			values[assignTargets[i]-len(t.Columns)] = v
+			values[assignment.target-len(t.Columns)] = v
 		}
 		return nil
 	})

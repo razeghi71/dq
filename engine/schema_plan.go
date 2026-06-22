@@ -93,7 +93,11 @@ func planFilterExprInEnv(expr ast.Expr, env schemaEnv) (typedExpr, error) {
 }
 
 func planTransformExpr(expr ast.Expr, t *table.Table) (typedExpr, error) {
-	bound, err := bindExpression(expr, t)
+	return planTransformExprInEnv(expr, schemaEnvFromTable(t))
+}
+
+func planTransformExprInEnv(expr ast.Expr, env schemaEnv) (typedExpr, error) {
+	bound, err := bindExpressionInEnv(expr, env)
 	if err != nil {
 		return typedExpr{}, err
 	}
