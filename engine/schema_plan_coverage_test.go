@@ -384,7 +384,7 @@ func TestTypedPlannerRejectsUnionMisuseWithoutLegacySchemaInference(t *testing.T
 		unionSchema,
 		{Kind: table.TypeList, Elem: unionSchema},
 	})
-	nested := recordSchemaForTable(tbl)
+	nested := recordSchemaForEnv(schemaEnvFromTable(tbl))
 
 	cases := []struct {
 		name    string

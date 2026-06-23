@@ -44,10 +44,6 @@ func Execute(query *ast.Query, input *table.Table, load LoadFunc) (*table.Table,
 
 func execOp(op ast.Op, t *table.Table, load LoadFunc) (*table.Table, error) {
 	switch o := op.(type) {
-	case *ast.GroupOp:
-		return execGroup(o, t)
-	case *ast.ReduceOp:
-		return execReduce(o, t)
 	case *ast.JoinOp:
 		return execJoin(o, t, load)
 	default:
@@ -130,14 +126,6 @@ func rowVals(t *table.Table, i int) []table.Value {
 	return vals
 }
 
-func columnSchemas(t *table.Table) []*table.TypeDescriptor {
-	schemas := make([]*table.TypeDescriptor, len(t.Columns))
-	for i := range t.Columns {
-		schemas[i] = t.Col(i).Schema()
-	}
-	return schemas
-}
-
 func canonicalTupleKey(parts []string) string {
 	if len(parts) == 1 {
 		return parts[0]
@@ -202,10 +190,6 @@ func planProjectionsInEnv(opName string, paths [][]string, env schemaEnv) (*proj
 	return plan, nil
 }
 
-func unionBeforePathEnd(t *table.Table, path []string) *table.TypeDescriptor {
-	return unionBeforePathEndInEnv(schemaEnvFromTable(t), path)
-}
-
 func unionBeforePathEndInEnv(env schemaEnv, path []string) *table.TypeDescriptor {
 	if len(path) < 2 {
 		return nil
@@ -252,10 +236,6 @@ func unionPathTraversalError(path []string, schema *table.TypeDescriptor) error 
 	return fmt.Errorf("%q: cannot access fields through union schema %s", strings.Join(path, "."), schema.String())
 }
 
-func validatePathDoesNotTraverseUnion(op string, t *table.Table, path []string) error {
-	return validatePathDoesNotTraverseUnionInEnv(op, schemaEnvFromTable(t), path)
-}
-
 func validatePathDoesNotTraverseUnionInEnv(op string, env schemaEnv, path []string) error {
 	if schema := unionBeforePathEndInEnv(env, path); schema != nil {
 		return fmt.Errorf("%s %q: cannot access fields through union schema %s", op, strings.Join(path, "."), schema.String())
@@ -283,79 +263,6 @@ func compareValues(a, b table.Value) int {
 		return strings.Compare(table.TypeName(a.Type), table.TypeName(b.Type))
 	}
 	return strings.Compare(table.CanonicalKey(a), table.CanonicalKey(b))
-}
-
-func execGroup(o *ast.GroupOp, t *table.Table) (*table.Table, error) {
-	// Build output key column names with dedup
-	var keyColNames []string
-	boundKeys := make([]*boundColumn, len(o.Columns))
-	for _, path := range o.Columns {
-		bound, err := bindColumnPath(t, path, &ast.ColumnExpr{Path: path})
-		if err != nil {
-			return nil, fmt.Errorf("group %q: %w", strings.Join(path, "."), err)
-		}
-		if err := validatePathDoesNotTraverseUnion("group", t, path); err != nil {
-			return nil, err
-		}
-		boundKeys[len(keyColNames)] = bound
-		base := pathToColumnName(path)
-		name := uniqueColumnName(base, keyColNames)
-		keyColNames = append(keyColNames, name)
-	}
-
-	// Build groups preserving order
-	type groupEntry struct {
-		key     []table.Value
-		records []table.Value // each a TypeRecord
-	}
-	var groups []groupEntry
-	keyMap := make(map[string]int) // key string -> index in groups
-
-	for i := 0; i < t.NumRows; i++ {
-		keyParts := make([]string, len(o.Columns))
-		keyVals := make([]table.Value, len(o.Columns))
-		for j, path := range o.Columns {
-			v, err := resolveColumnPath(path, t, i)
-			if err != nil {
-				return nil, fmt.Errorf("group: %w", err)
-			}
-			keyVals[j] = v
-			keyParts[j] = table.CanonicalKey(v)
-		}
-		keyStr := strings.Join(keyParts, "\x00")
-
-		gi, exists := keyMap[keyStr]
-		if !exists {
-			gi = len(groups)
-			groups = append(groups, groupEntry{key: keyVals})
-			keyMap[keyStr] = gi
-		}
-
-		// Build a TypeRecord for this row (all columns including key)
-		fields := make([]table.RecordField, len(t.Columns))
-		for j, colName := range t.Columns {
-			fields[j] = table.RecordField{Name: colName, Value: t.Col(j).Get(i)}
-		}
-		groups[gi].records = append(groups[gi].records, table.RecordVal(fields))
-	}
-
-	// Build result table: key columns + list column
-	resultCols := append(append([]string{}, keyColNames...), o.NestedName)
-	schemas := make([]*table.TypeDescriptor, len(resultCols))
-	for i, bound := range boundKeys {
-		schemas[i] = bound.typ
-	}
-	schemas[len(schemas)-1] = &table.TypeDescriptor{Kind: table.TypeList, Elem: recordSchemaForTable(t)}
-	result := table.NewTableWithSchemas(resultCols, schemas)
-	for _, g := range groups {
-		vals := make([]table.Value, len(g.key)+1)
-		copy(vals, g.key)
-		vals[len(g.key)] = table.ListVal(g.records)
-		if err := result.AddRowTyped(vals); err != nil {
-			return nil, fmt.Errorf("group: %w", err)
-		}
-	}
-	return result, nil
 }
 
 func execAppendOnlyTypedTransform(t *table.Table, newCols []string, schemas []*table.TypeDescriptor, assignments []plannedTransformAssignment, evaluators []rowValueEvaluator) (*table.Table, bool, error) {
@@ -407,95 +314,4 @@ func appendOnlyTransformTargets(assignTargets []int, baseCols int) bool {
 		seen[target] = true
 	}
 	return true
-}
-
-func execReduce(o *ast.ReduceOp, t *table.Table) (*table.Table, error) {
-	nestedIdx := t.ColIndex(o.NestedName)
-	if nestedIdx < 0 {
-		return nil, fmt.Errorf("reduce: nested column %q not found (did you forget to group first?)", o.NestedName)
-	}
-
-	newCols := make([]string, len(t.Columns))
-	copy(newCols, t.Columns)
-	assignTargets := make([]int, len(o.Assignments))
-	seenTargets := make(map[string]bool, len(o.Assignments))
-
-	for i, a := range o.Assignments {
-		if seenTargets[a.Column] {
-			return nil, fmt.Errorf("reduce target %q assigned more than once", a.Column)
-		}
-		seenTargets[a.Column] = true
-		idx := -1
-		for j, c := range newCols {
-			if c == a.Column {
-				idx = j
-				break
-			}
-		}
-		if idx < 0 {
-			idx = len(newCols)
-			newCols = append(newCols, a.Column)
-		}
-		assignTargets[i] = idx
-	}
-
-	schemas := columnSchemas(t)
-	for len(schemas) < len(newCols) {
-		schemas = append(schemas, nil)
-	}
-	nestedSchema, err := nestedRecordSchemaForReduce(o.NestedName, t.Col(nestedIdx).Schema())
-	if err != nil {
-		return nil, err
-	}
-	plannedAssignments := make([]typedExpr, len(o.Assignments))
-	for i, a := range o.Assignments {
-		planned, err := planReduceExpr(a.Expr, nestedSchema)
-		if err != nil {
-			return nil, fmt.Errorf("reduce %q: %w", a.Column, err)
-		}
-		plannedAssignments[i] = planned
-	}
-	for _, target := range assignTargets {
-		schemas[target] = nil
-	}
-	for i, planned := range plannedAssignments {
-		schemas[assignTargets[i]] = table.FinalizeSchema(planned.typ)
-	}
-	result := table.NewTableWithSchemas(newCols, schemas)
-	useTypedAppend := allSchemasKnown(schemas, assignTargets)
-	for i := 0; i < t.NumRows; i++ {
-		nested := t.Col(nestedIdx).Get(i)
-		if nested.Type != table.TypeList {
-			return nil, fmt.Errorf("reduce: column %q is not a list (did you forget to group first?)", o.NestedName)
-		}
-
-		nestedTable, err := table.ListToTableWithSchema(nested, nestedSchema)
-		if err != nil {
-			return nil, fmt.Errorf("reduce: %w", err)
-		}
-
-		vals := make([]table.Value, len(newCols))
-		for j := 0; j < len(t.Columns); j++ {
-			vals[j] = t.Col(j).Get(i)
-		}
-		for j := len(t.Columns); j < len(newCols); j++ {
-			vals[j] = table.Null()
-		}
-
-		for j, a := range o.Assignments {
-			v, err := evalTypedAggregateExpression(plannedAssignments[j], nestedTable)
-			if err != nil {
-				return nil, fmt.Errorf("reduce %q: %w", a.Column, err)
-			}
-			vals[assignTargets[j]] = v
-		}
-		if useTypedAppend {
-			if err := result.AddRowTypedColumns(vals, assignTargets); err != nil {
-				return nil, fmt.Errorf("reduce: %w", err)
-			}
-		} else {
-			result.AddRow(vals)
-		}
-	}
-	return result, nil
 }

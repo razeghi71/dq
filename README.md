@@ -113,7 +113,7 @@ dq 'users.csv | filter { false } | describe'
 # age  -> int,    row_count 0
 ```
 
-Operations such as `filter`, `transform`, `select`, `sort`, `rename`, `remove`, `distinct`, `count`, and `describe` are planned against the current schema before rows run. Expressions are checked there too. Misspelled columns, missing fields in known records, wrong function argument types, and unavailable columns from earlier projections fail even if the table currently has zero rows:
+Operations such as `filter`, `transform`, `group`, `reduce`, `select`, `sort`, `rename`, `remove`, `distinct`, `count`, and `describe` are planned against the current schema before rows run. Expressions are checked there too. Misspelled columns, missing fields in known records, wrong function argument types, and unavailable columns from earlier projections fail even if the table currently has zero rows:
 
 ```bash
 dq 'users.csv | filter { agge > 20 }'                         # error: column "agge" not found
@@ -121,6 +121,7 @@ dq 'users.csv | filter { false } | transform x = upper(age)'  # error: upper() n
 dq 'nested.json | select address.missing'                     # error: field not found
 dq 'users.csv | distinct city | select age'                   # error: age was projected away
 dq 'users.csv | transform age2 = age + 1 | select age2'       # age2 is available downstream
+dq 'users.csv | group city | reduce n = count() | select n'   # reduce output is available downstream
 ```
 
 Each pipeline stage sees the columns produced by previous stages. Within one `transform` or `reduce`, assignment target names must be unique and all right-hand sides see the input schema only:
@@ -267,9 +268,11 @@ LA   | [ {name:carol,age:28,city:LA} ]
 ```
 
 All original columns (including group keys) are preserved in the nested records.
+The nested column name must be distinct from the output group-key columns. If your key is named `grouped`, choose a nested name explicitly.
 
 ```bash
 dq 'users.csv | group city as people'       # custom nested column name
+dq 'events.csv | group grouped as rows'      # avoid colliding with the key output
 dq 'users.csv | group city, department'       # group by multiple columns
 dq 'data.json | group address.city'          # group by nested field -> key column "address_city"
 ```
@@ -296,11 +299,12 @@ dq 'users.csv | group city as people | reduce people avg_age = avg(age)'
 dq 'orders.parquet | reduce orders total = sum(amount), n = count()'
 ```
 
-Reduce expressions are checked against the nested row schema before groups run. Aggregate arguments must be column paths from the nested rows, so mistakes fail even when there are no groups:
+Reduce expressions are checked against the nested row schema before groups run, and later pipeline stages are checked against the reduced schema before aggregate rows execute. Aggregate arguments must be column paths from the nested rows, so mistakes fail even when there are no groups:
 
 ```bash
 dq 'users.csv | filter { false } | group city | reduce bad = upper(name)' # error
 dq 'users.csv | group city | reduce x = count(), x = sum(age)'            # error
+dq 'users.csv | group city | reduce n = count() | select missing'         # error before reduce runs
 dq 'users.csv | filter { false } | group city | reduce total = sum(age)'  # valid
 ```
 

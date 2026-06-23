@@ -50,6 +50,19 @@ func benchmarkDistinctFlatRows(rows int) *table.Table {
 	return tbl
 }
 
+func benchmarkGroupRows(rows int) *table.Table {
+	tbl := table.NewTable([]string{"name", "age", "city", "amount"})
+	for i := 0; i < rows; i++ {
+		tbl.AddRow([]table.Value{
+			table.StrVal(fmt.Sprintf("user-%06d", i)),
+			table.IntVal(int64(i % 100)),
+			table.StrVal(fmt.Sprintf("city-%02d", i%50)),
+			table.FloatVal(float64(i%1000) / 10),
+		})
+	}
+	return tbl
+}
+
 func benchmarkNestedRows(rows int) *table.Table {
 	tbl := table.NewTable([]string{"name", "profile"})
 	for i := 0; i < rows; i++ {
@@ -106,4 +119,16 @@ func BenchmarkDistinctNestedSingleKey(b *testing.B) {
 
 func BenchmarkDistinctFullRow(b *testing.B) {
 	benchmarkPipeline(b, benchmarkDistinctFlatRows(10000), "distinct | count")
+}
+
+func BenchmarkGroupOnly(b *testing.B) {
+	benchmarkPipeline(b, benchmarkGroupRows(10000), "group city | count")
+}
+
+func BenchmarkGroupReduce(b *testing.B) {
+	benchmarkPipeline(b, benchmarkGroupRows(10000), "group city | reduce total = sum(age), avg_amount = avg(amount), n = count() | remove grouped | count")
+}
+
+func BenchmarkTransformGroupReduceSpan(b *testing.B) {
+	benchmarkPipeline(b, benchmarkGroupRows(10000), `transform bucket = if(age > 50, "high", "low") | group bucket | reduce total = sum(age), n = count() | remove grouped | filter { total > 0 } | count`)
 }

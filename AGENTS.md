@@ -327,11 +327,11 @@ Strict and permissive APIs must remain distinct:
 * `TypeUnion` storage preserves each active branch value instead of stringifying it. JSON/JSONL/table/CSV outputs render the active value; `group`, `distinct`, and `join` keys use the active value's exact dq type and structural key, so `int(7)` and `string("7")` do not collide. They do not include Avro branch names/tags, so two named Avro record branches with the same dq schema and value are indistinguishable.
 * Direct comparison and ordering over union-typed expressions are rejected unless an explicit future branch-normalization operation is added. Dot paths may project a union-typed field, but they must not step through a union branch such as `select u.x` when `u` is `union<record<x:int>,string>`.
 * Engine operators that preserve or can plan their output schema use fixed-schema result tables and strict append for those planned columns. This includes `filter`, `select`, `group`, `count`, `describe`, `distinct`, `rename`, `remove`, typed `transform` assignments, typed `reduce` assignments, and schema-compatible joins.
-* Planned row-wise/schema operations (`head`, `tail`, `filter`, `transform`, `select`, `sort`, `rename`, `remove`, `distinct`, `count`, and `describe`) have an explicit planner boundary. A planned span is `input schema + raw ops -> planned ops + output schema` before row execution. Planning binds paths, validates operation-specific schema rules, type-checks expressions, and computes each next schema without inspecting rows.
-* Planned span execution must consume planned metadata instead of rediscovering schemas or rebinding paths. This includes projection output names and schemas, bound sort/filter metadata, typed transform expressions and target indexes, fixed `count`/`describe` schemas, and rename/remove result shapes.
-* `transform` participates in planned spans. Downstream operations in the same span bind against transform output schemas before any transform rows are evaluated, so a query like `transform y = year("bad") | select missing` reports the missing-column planning error before the data-dependent `year()` runtime error. `group` / `reduce` and `join` remain span boundaries until their dedicated planner paths own full-span integration.
+* Planned row-wise/schema operations (`head`, `tail`, `filter`, `transform`, `group`, `reduce`, `select`, `sort`, `rename`, `remove`, `distinct`, `count`, and `describe`) have an explicit planner boundary. A planned span is `input schema + raw ops -> planned ops + output schema` before row execution. Planning binds paths, validates operation-specific schema rules, type-checks expressions, and computes each next schema without inspecting rows.
+* Planned span execution must consume planned metadata instead of rediscovering schemas or rebinding paths. This includes projection output names and schemas, bound sort/filter/group metadata, typed transform expressions and target indexes, typed reduce aggregate expressions and target indexes, fixed `count`/`describe` schemas, and rename/remove result shapes.
+* `transform`, `group`, and `reduce` participate in planned spans. Downstream operations in the same span bind against their output schemas before any rows are evaluated, so a query like `transform y = year("bad") | select missing` reports the missing-column planning error before the data-dependent `year()` runtime error, and `group g | reduce total = sum(id) | select missing` reports the missing-column planning error before an overflowing `sum(id)` can execute. `join` remains a span boundary until its dedicated planner path owns full-span integration.
 * Planned expression operators must not use permissive append to hide type mistakes. Incompatible `if` branches, incompatible `coalesce` arguments, bad function argument types, and incompatible comparisons fail during planning even when the current table has zero rows.
-* `reduce` and joins may still use permissive append only for unplanned or schema-incompatible result shapes outside typed expression planning. Do not expand or remove that fallback without updating the operator-level schema contract and tests.
+* Joins may still use permissive append only for unplanned or schema-incompatible result shapes outside typed expression planning. Do not expand or remove that fallback without updating the operator-level schema contract and tests.
 * Schema-preserving operations must keep column schemas even when they produce zero rows. For example, `users.csv | filter { false } | describe` reports the loaded `name:string` and `age:int` schemas with `row_count = 0`, not `null` types.
 * Dot-path projections, expression column references, sort keys, distinct keys, group keys, and join keys bind against the current logical schema before row execution. A missing top-level column or a missing field inside a known record schema is an error. A nullable existing parent field makes the projected child nullable and produces runtime nulls when the parent is null. Dot paths must not step through lists or union branches.
 
@@ -389,7 +389,7 @@ Rules:
 * Dot paths are one item for operations that accept paths: `address.city` is a single item, not two. `remove` is the exception here: it removes top-level columns only and rejects dot paths such as `remove address.city`.
 * Backticks for names with spaces: `` select `first name`, age ``
 * `sort`: prefix `-` on a key for descending (`sort city, -age`).
-* `group`: optional `as nested_name` comes after the column list.
+* `group`: optional `as nested_name` comes after the column list. The nested name must not collide with any output group-key column name; use `as rows` or another distinct name when grouping by a key such as `grouped`.
 * `distinct` with no columns deduplicates the full row.
 * A trailing comma is invalid: `select name,` and `sort age,` are parse errors.
 
@@ -587,7 +587,7 @@ dq 'users.csv | filter { null or true }'        // true → keeps row
 
 ### 7. `group col1, col2, ... [as nested_name]`
 
-Group rows by columns; nested rows stored under a nested column. The `as nested_name` part is optional -- if omitted, defaults to `grouped`.
+Group rows by columns; nested rows stored under a nested column. The `as nested_name` part is optional -- if omitted, defaults to `grouped`. The nested column name must be distinct from every output group-key column name. For example, `group grouped` is invalid because both the key and nested list would be named `grouped`; use `group grouped as rows`.
 
 ```
 dq 'users.csv | group name'
@@ -670,7 +670,7 @@ b    | [ {age:25,city:z} ]                | 25      | 1
 dq 'users.csv | group name as entries | reduce entries max_age = max(age), count = count()'
 ```
 
-All assignment right-hand sides bind and type-check against the nested row schema before group rows are executed. Aggregate arguments must be column references or dot paths in that nested schema (`sum(amount)`, `first(address.city)`), not arbitrary expressions (`sum(amount + 1)`) or scalar row functions (`upper(name)`). Newly created reduce columns are visible to later pipeline stages, but not to sibling assignments in the same `reduce`. Assignment target names must be unique within one `reduce`.
+All assignment right-hand sides bind and type-check against the nested row schema before group rows are executed. Aggregate arguments must be column references or dot paths in that nested schema (`sum(amount)`, `first(address.city)`), not arbitrary expressions (`sum(amount + 1)`) or scalar row functions (`upper(name)`). Newly created reduce columns are visible to later pipeline stages, but not to sibling assignments in the same `reduce`. Assignment target names must be unique within one `reduce`. `group` and `reduce` are planned in the same schema span as surrounding simple operations, so downstream schema errors are reported before aggregate row execution.
 
 To drop the nested field, use `remove`:
 

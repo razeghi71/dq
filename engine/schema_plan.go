@@ -56,10 +56,14 @@ func nestedRecordSchemaForReduce(column string, schema *table.TypeDescriptor) (*
 	return elem, nil
 }
 
-func recordSchemaForTable(t *table.Table) *table.TypeDescriptor {
-	fields := make([]table.FieldDescriptor, len(t.Columns))
-	for i, name := range t.Columns {
-		fields[i] = table.FieldDescriptor{Name: name, Type: t.Col(i).Schema()}
+func recordSchemaForEnv(env schemaEnv) *table.TypeDescriptor {
+	fields := make([]table.FieldDescriptor, len(env.columns))
+	for i, name := range env.columns {
+		typ := env.rawSchema(i)
+		if typ == nil {
+			typ = env.finalSchema(i)
+		}
+		fields[i] = table.FieldDescriptor{Name: name, Type: typ}
 	}
 	return &table.TypeDescriptor{Kind: table.TypeRecord, Fields: fields}
 }

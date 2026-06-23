@@ -55,6 +55,29 @@ type plannedTransformAssignment struct {
 	expr   typedExpr
 }
 
+type plannedGroup struct {
+	plannedBase
+	keys []plannedGroupKey
+}
+
+type plannedGroupKey struct {
+	column boundColumn
+}
+
+type plannedReduce struct {
+	plannedBase
+	nestedName   string
+	nestedIndex  int
+	nestedSchema *table.TypeDescriptor
+	assignments  []plannedReduceAssignment
+}
+
+type plannedReduceAssignment struct {
+	name   string
+	target int
+	expr   typedExpr
+}
+
 type plannedSort struct {
 	plannedBase
 	keys []plannedSortKey
@@ -95,8 +118,8 @@ type plannedDescribe struct {
 func isPlannedSpanOp(op ast.Op) bool {
 	switch op.(type) {
 	case *ast.HeadOp, *ast.TailOp, *ast.FilterOp, *ast.SelectOp, *ast.SortOp,
-		*ast.TransformOp, *ast.RenameOp, *ast.RemoveOp, *ast.DistinctOp,
-		*ast.CountOp, *ast.DescribeOp:
+		*ast.TransformOp, *ast.GroupOp, *ast.ReduceOp, *ast.RenameOp,
+		*ast.RemoveOp, *ast.DistinctOp, *ast.CountOp, *ast.DescribeOp:
 		return true
 	default:
 		return false
@@ -152,6 +175,10 @@ func planSchemaOp(input schemaEnv, op ast.Op) (plannedOp, error) {
 		return plannedFilter{plannedBase: plannedBase{output: input.schema()}, expr: expr}, nil
 	case *ast.TransformOp:
 		return planTransform(o, input)
+	case *ast.GroupOp:
+		return planGroup(o, input)
+	case *ast.ReduceOp:
+		return planReduce(o, input)
 	case *ast.SortOp:
 		keys, err := planSortKeys(o, input)
 		if err != nil {
@@ -247,6 +274,114 @@ func planTransform(o *ast.TransformOp, input schemaEnv) (plannedTransform, error
 	return plannedTransform{
 		plannedBase: plannedBase{output: rawSchemaFromColumns(cols, schemas)},
 		assignments: assignments,
+	}, nil
+}
+
+func planGroup(o *ast.GroupOp, input schemaEnv) (plannedGroup, error) {
+	keyNames := make([]string, 0, len(o.Columns))
+	keys := make([]plannedGroupKey, len(o.Columns))
+	schemas := make([]*table.TypeDescriptor, 0, len(o.Columns)+1)
+
+	for i, path := range o.Columns {
+		bound, err := bindColumnPathInEnv(input, path, &ast.ColumnExpr{Path: path})
+		if err != nil {
+			return plannedGroup{}, fmt.Errorf("group %q: %w", strings.Join(path, "."), err)
+		}
+		if err := validatePathDoesNotTraverseUnionInEnv("group", input, path); err != nil {
+			return plannedGroup{}, err
+		}
+		name := uniqueColumnName(pathToColumnName(path), keyNames)
+		keyNames = append(keyNames, name)
+		keys[i] = plannedGroupKey{column: *bound}
+		schemas = append(schemas, bound.typ)
+	}
+
+	cols := append([]string(nil), keyNames...)
+	if containsColumnName(cols, o.NestedName) {
+		return plannedGroup{}, fmt.Errorf("group: nested column name %q collides with a group key output column; use as rows or another distinct nested column name", o.NestedName)
+	}
+	cols = append(cols, o.NestedName)
+	schemas = append(schemas, &table.TypeDescriptor{Kind: table.TypeList, Elem: recordSchemaForEnv(input)})
+
+	return plannedGroup{
+		plannedBase: plannedBase{output: rawSchemaFromColumns(cols, schemas)},
+		keys:        keys,
+	}, nil
+}
+
+func containsColumnName(cols []string, name string) bool {
+	for _, col := range cols {
+		if col == name {
+			return true
+		}
+	}
+	return false
+}
+
+func planReduce(o *ast.ReduceOp, input schemaEnv) (plannedReduce, error) {
+	nestedIdx := input.colIndex(o.NestedName)
+	if nestedIdx < 0 {
+		return plannedReduce{}, fmt.Errorf("reduce: nested column %q not found (did you forget to group first?)", o.NestedName)
+	}
+
+	cols := append([]string(nil), input.columns...)
+	assignments := make([]plannedReduceAssignment, len(o.Assignments))
+	seenTargets := make(map[string]bool, len(o.Assignments))
+	for i, a := range o.Assignments {
+		if seenTargets[a.Column] {
+			return plannedReduce{}, fmt.Errorf("reduce target %q assigned more than once", a.Column)
+		}
+		seenTargets[a.Column] = true
+
+		idx := -1
+		for j, col := range cols {
+			if col == a.Column {
+				idx = j
+				break
+			}
+		}
+		if idx < 0 {
+			idx = len(cols)
+			cols = append(cols, a.Column)
+		}
+		assignments[i].name = a.Column
+		assignments[i].target = idx
+	}
+
+	nestedColumnSchema := input.rawSchema(nestedIdx)
+	if nestedColumnSchema == nil {
+		nestedColumnSchema = input.finalSchema(nestedIdx)
+	}
+	nestedSchema, err := nestedRecordSchemaForReduce(o.NestedName, nestedColumnSchema)
+	if err != nil {
+		return plannedReduce{}, err
+	}
+
+	for i, a := range o.Assignments {
+		planned, err := planReduceExpr(a.Expr, nestedSchema)
+		if err != nil {
+			return plannedReduce{}, fmt.Errorf("reduce %q: %w", a.Column, err)
+		}
+		assignments[i].expr = planned
+	}
+
+	schemas := input.rawSchemas()
+	for len(schemas) < len(cols) {
+		schemas = append(schemas, nil)
+	}
+	for _, assignment := range assignments {
+		schemas[assignment.target] = nil
+	}
+	for _, assignment := range assignments {
+		schemas[assignment.target] = table.FinalizeSchema(assignment.expr.typ)
+	}
+
+	return plannedReduce{
+		plannedBase:  plannedBase{output: rawSchemaFromColumns(cols, schemas)},
+		nestedName:   o.NestedName,
+		nestedIndex:  nestedIdx,
+		nestedSchema: nestedSchema,
+		assignments:  assignments,
 	}, nil
 }
 
@@ -414,6 +549,10 @@ func execPlannedOp(op plannedOp, input *table.Table) (*table.Table, error) {
 		return execPlannedFilter(p, input)
 	case plannedTransform:
 		return execPlannedTransform(p, input)
+	case plannedGroup:
+		return execPlannedGroup(p, input)
+	case plannedReduce:
+		return execPlannedReduce(p, input)
 	case plannedSort:
 		return execPlannedSort(p, input)
 	case plannedSelect:
@@ -510,6 +649,14 @@ func transformAssignmentTargets(assignments []plannedTransformAssignment) []int 
 	return targets
 }
 
+func reduceAssignmentTargets(assignments []plannedReduceAssignment) []int {
+	targets := make([]int, len(assignments))
+	for i, assignment := range assignments {
+		targets[i] = assignment.target
+	}
+	return targets
+}
+
 func outputSchemaColumns(schema table.Schema) ([]string, []*table.TypeDescriptor) {
 	cols := make([]string, len(schema.Columns))
 	schemas := make([]*table.TypeDescriptor, len(schema.Columns))
@@ -518,6 +665,95 @@ func outputSchemaColumns(schema table.Schema) ([]string, []*table.TypeDescriptor
 		schemas[i] = col.Type
 	}
 	return cols, schemas
+}
+
+type plannedGroupEntry struct {
+	key     []table.Value
+	records []table.Value
+}
+
+func execPlannedGroup(p plannedGroup, input *table.Table) (*table.Table, error) {
+	groups := make([]plannedGroupEntry, 0)
+	keyMap := make(map[string]int)
+
+	for row := 0; row < input.NumRows; row++ {
+		keyVals := make([]table.Value, len(p.keys))
+		keyParts := make([]string, len(p.keys))
+		for i, key := range p.keys {
+			v, err := resolveBoundColumn(key.column, input, row)
+			if err != nil {
+				return nil, fmt.Errorf("group %q: %w", strings.Join(key.column.rawPath, "."), err)
+			}
+			keyVals[i] = v
+			keyParts[i] = table.CanonicalKey(v)
+		}
+		key := canonicalTupleKey(keyParts)
+		groupIdx, exists := keyMap[key]
+		if !exists {
+			groupIdx = len(groups)
+			keyMap[key] = groupIdx
+			groups = append(groups, plannedGroupEntry{key: keyVals})
+		}
+
+		fields := make([]table.RecordField, len(input.Columns))
+		for col, name := range input.Columns {
+			fields[col] = table.RecordField{Name: name, Value: input.Col(col).Get(row)}
+		}
+		groups[groupIdx].records = append(groups[groupIdx].records, table.RecordVal(fields))
+	}
+
+	result := tableFromOutputSchema(p.OutputSchema())
+	for _, group := range groups {
+		vals := make([]table.Value, len(group.key)+1)
+		copy(vals, group.key)
+		vals[len(group.key)] = table.ListVal(group.records)
+		if err := result.AddRowTyped(vals); err != nil {
+			return nil, fmt.Errorf("group: %w", err)
+		}
+	}
+	return result, nil
+}
+
+func execPlannedReduce(p plannedReduce, input *table.Table) (*table.Table, error) {
+	if p.nestedIndex < 0 || p.nestedIndex >= len(input.Columns) {
+		return nil, fmt.Errorf("reduce: nested column %q not found (did you forget to group first?)", p.nestedName)
+	}
+
+	cols, schemas := outputSchemaColumns(p.OutputSchema())
+	targets := reduceAssignmentTargets(p.assignments)
+	result := table.NewTableWithSchemas(cols, schemas)
+
+	for row := 0; row < input.NumRows; row++ {
+		nested := input.Col(p.nestedIndex).Get(row)
+		if nested.Type != table.TypeList {
+			return nil, fmt.Errorf("reduce: column %q is not a list (did you forget to group first?)", p.nestedName)
+		}
+
+		nestedTable, err := table.ListToTableWithSchema(nested, p.nestedSchema)
+		if err != nil {
+			return nil, fmt.Errorf("reduce: %w", err)
+		}
+
+		vals := make([]table.Value, len(cols))
+		for col := 0; col < len(input.Columns); col++ {
+			vals[col] = input.Col(col).Get(row)
+		}
+		for col := len(input.Columns); col < len(cols); col++ {
+			vals[col] = table.Null()
+		}
+
+		for _, assignment := range p.assignments {
+			v, err := evalTypedAggregateExpression(assignment.expr, nestedTable)
+			if err != nil {
+				return nil, fmt.Errorf("reduce %q: %w", assignment.name, err)
+			}
+			vals[assignment.target] = v
+		}
+		if err := result.AddRowTypedColumns(vals, targets); err != nil {
+			return nil, fmt.Errorf("reduce: %w", err)
+		}
+	}
+	return result, nil
 }
 
 func execPlannedSort(p plannedSort, input *table.Table) (*table.Table, error) {
