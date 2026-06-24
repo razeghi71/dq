@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/razeghi71/dq/ast"
@@ -383,193 +384,83 @@ func TestFixedSchemaContractJoinSchemas(t *testing.T) {
 		})
 	})
 
-	t.Run("right_join_incompatible_key_fallback_infers_right_only_key_schema", func(t *testing.T) {
-		left := table.NewTableWithSchemas([]string{"id", "name"}, []*table.TypeDescriptor{
-			{Kind: table.TypeString},
-			{Kind: table.TypeString},
-		})
-		right := table.NewTable([]string{"id", "amount"})
-		right.AddRow([]table.Value{table.IntVal(1), table.IntVal(99)})
+	t.Run("incompatible_join_key_schemas_fail_during_planning", func(t *testing.T) {
+		stringIDLeft := func() *table.Table {
+			return table.NewTableWithSchemas([]string{"id", "name"}, []*table.TypeDescriptor{
+				{Kind: table.TypeString},
+				{Kind: table.TypeString},
+			})
+		}
+		intIDRight := func() *table.Table {
+			return table.NewTableWithSchemas([]string{"id", "amount"}, []*table.TypeDescriptor{
+				{Kind: table.TypeInt},
+				{Kind: table.TypeFloat},
+			})
+		}
 
-		result := runJoinContractQuery(t, left, right, "join right right.csv on id")
-		if result.NumRows != 1 {
-			t.Fatalf("rows: got %d, want 1\n%s", result.NumRows, result.String())
-		}
-		requireIntValue(t, result.Get(0, "id"), 1)
-		if got := result.Get(0, "name"); !got.IsNull() {
-			t.Fatalf("name: got %v, want null", got)
-		}
-		requireIntValue(t, result.Get(0, "amount"), 99)
-		if got := result.Col(result.ColIndex("id")).Schema().String(); got != "int" {
-			t.Fatalf("id schema: got %q, want int", got)
-		}
-	})
-
-	t.Run("right_join_incompatible_key_fallback_ignores_unmatched_left_values", func(t *testing.T) {
-		left := table.NewTable([]string{"id", "name"})
-		left.AddRow([]table.Value{table.StrVal("left-only"), table.StrVal("Alice")})
-		right := table.NewTable([]string{"id", "amount"})
-		right.AddRow([]table.Value{table.IntVal(1), table.IntVal(99)})
-
-		result := runJoinContractQuery(t, left, right, "join right right.csv on id")
-		if result.NumRows != 1 {
-			t.Fatalf("rows: got %d, want 1\n%s", result.NumRows, result.String())
-		}
-		requireIntValue(t, result.Get(0, "id"), 1)
-		if got := result.Get(0, "name"); !got.IsNull() {
-			t.Fatalf("name: got %v, want null", got)
-		}
-		if got := result.Col(result.ColIndex("id")).Schema().String(); got != "int" {
-			t.Fatalf("id schema: got %q, want int", got)
-		}
-	})
-
-	t.Run("full_join_incompatible_key_fallback_infers_right_key_after_left_null_key", func(t *testing.T) {
-		left := table.NewTableWithSchemas([]string{"id", "name"}, []*table.TypeDescriptor{
-			{Kind: table.TypeString},
-			{Kind: table.TypeString},
-		})
-		left.AddRow([]table.Value{table.Null(), table.StrVal("no-key")})
-		right := table.NewTable([]string{"id", "amount"})
-		right.AddRow([]table.Value{table.IntVal(1), table.IntVal(99)})
-
-		result := runJoinContractQuery(t, left, right, "join full right.csv on id")
-		if result.NumRows != 2 {
-			t.Fatalf("rows: got %d, want 2\n%s", result.NumRows, result.String())
-		}
-		if got := result.Get(0, "id"); !got.IsNull() {
-			t.Fatalf("left null-key row id: got %v, want null", got)
-		}
-		requireIntValue(t, result.Get(1, "id"), 1)
-		requireIntValue(t, result.Get(1, "amount"), 99)
-		if got := result.Col(result.ColIndex("id")).Schema().String(); got != "int?" {
-			t.Fatalf("id schema: got %q, want int?", got)
-		}
-	})
-
-	t.Run("full_join_incompatible_key_fallback_infers_right_key_when_left_empty", func(t *testing.T) {
-		left := table.NewTableWithSchemas([]string{"id", "name"}, []*table.TypeDescriptor{
-			{Kind: table.TypeString},
-			{Kind: table.TypeString},
-		})
-		right := table.NewTable([]string{"id", "amount"})
-		right.AddRow([]table.Value{table.IntVal(1), table.IntVal(99)})
-
-		result := runJoinContractQuery(t, left, right, "join full right.csv on id")
-		if result.NumRows != 1 {
-			t.Fatalf("rows: got %d, want 1\n%s", result.NumRows, result.String())
-		}
-		requireIntValue(t, result.Get(0, "id"), 1)
-		if got := result.Col(result.ColIndex("id")).Schema().String(); got != "int" {
-			t.Fatalf("id schema: got %q, want int", got)
-		}
-	})
-
-	t.Run("right_join_incompatible_dot_path_key_fallback_infers_right_only_key_schema", func(t *testing.T) {
-		left := table.NewTableWithSchemas([]string{"profile", "name"}, []*table.TypeDescriptor{
+		cases := []struct {
+			name  string
+			left  *table.Table
+			right *table.Table
+			query string
+			want  []string
+		}{
 			{
-				Kind: table.TypeRecord,
-				Fields: []table.FieldDescriptor{
-					{Name: "id", Type: &table.TypeDescriptor{Kind: table.TypeString}},
-				},
+				name:  "right_join_flat_key",
+				left:  stringIDLeft(),
+				right: intIDRight(),
+				query: "join right right.csv on id",
+				want:  []string{"join", "key", "type", "id", "string", "int"},
 			},
-			{Kind: table.TypeString},
-		})
-		right := table.NewTable([]string{"id", "amount"})
-		right.AddRow([]table.Value{table.IntVal(7), table.IntVal(99)})
-
-		result := runJoinContractQuery(t, left, right, "join right right.csv on profile.id == id")
-		if result.NumRows != 1 {
-			t.Fatalf("rows: got %d, want 1\n%s", result.NumRows, result.String())
-		}
-		if result.ColIndex("id") >= 0 {
-			t.Fatalf("right join-key column should be dropped, got columns %v", result.Columns)
-		}
-		requireIntValue(t, result.Get(0, "profile_id"), 7)
-		if got := result.Col(result.ColIndex("profile_id")).Schema().String(); got != "int" {
-			t.Fatalf("profile_id schema: got %q, want int", got)
-		}
-	})
-
-	t.Run("zero_row_right_join_incompatible_key_fallback_uses_right_key_schema", func(t *testing.T) {
-		left := table.NewTableWithSchemas([]string{"id", "name"}, []*table.TypeDescriptor{
-			{Kind: table.TypeString},
-			{Kind: table.TypeString},
-		})
-		right := table.NewTableWithSchemas([]string{"id", "amount"}, []*table.TypeDescriptor{
-			{Kind: table.TypeInt},
-			{Kind: table.TypeFloat},
-		})
-
-		result := runJoinContractQuery(t, left, right, "join right right.csv on id | describe")
-		assertDescribeSchemaRows(t, result, map[string]describeSchemaMeta{
-			"id":     {typ: "int", rows: 0, schema: "int"},
-			"name":   {typ: "string", rows: 0, schema: "string?"},
-			"amount": {typ: "float", rows: 0, schema: "float"},
-		})
-	})
-
-	t.Run("zero_row_full_join_incompatible_key_fallback_uses_right_key_schema", func(t *testing.T) {
-		left := table.NewTableWithSchemas([]string{"id", "name"}, []*table.TypeDescriptor{
-			{Kind: table.TypeString},
-			{Kind: table.TypeString},
-		})
-		right := table.NewTableWithSchemas([]string{"id", "amount"}, []*table.TypeDescriptor{
-			{Kind: table.TypeInt},
-			{Kind: table.TypeFloat},
-		})
-
-		result := runJoinContractQuery(t, left, right, "join full right.csv on id | describe")
-		assertDescribeSchemaRows(t, result, map[string]describeSchemaMeta{
-			"id":     {typ: "int", rows: 0, schema: "int"},
-			"name":   {typ: "string", rows: 0, schema: "string?"},
-			"amount": {typ: "float", rows: 0, schema: "float?"},
-		})
-	})
-
-	t.Run("zero_row_right_join_incompatible_dot_path_key_fallback_uses_right_key_schema", func(t *testing.T) {
-		left := table.NewTableWithSchemas([]string{"profile", "name"}, []*table.TypeDescriptor{
 			{
-				Kind: table.TypeRecord,
-				Fields: []table.FieldDescriptor{
-					{Name: "id", Type: &table.TypeDescriptor{Kind: table.TypeString}},
-				},
+				name:  "full_join_flat_key",
+				left:  stringIDLeft(),
+				right: intIDRight(),
+				query: "join full right.csv on id",
+				want:  []string{"join", "key", "type", "id", "string", "int"},
 			},
-			{Kind: table.TypeString},
-		})
-		right := table.NewTableWithSchemas([]string{"id", "amount"}, []*table.TypeDescriptor{
-			{Kind: table.TypeInt},
-			{Kind: table.TypeFloat},
-		})
+			{
+				name: "right_join_dot_path_key",
+				left: table.NewTableWithSchemas([]string{"profile", "name"}, []*table.TypeDescriptor{
+					{
+						Kind: table.TypeRecord,
+						Fields: []table.FieldDescriptor{
+							{Name: "id", Type: &table.TypeDescriptor{Kind: table.TypeString}},
+						},
+					},
+					{Kind: table.TypeString},
+				}),
+				right: intIDRight(),
+				query: "join right right.csv on profile.id == id",
+				want:  []string{"join", "key", "type", "profile.id", "id", "string", "int"},
+			},
+			{
+				name: "multi_key_reports_first_mismatch",
+				left: table.NewTableWithSchemas([]string{"id", "region", "name"}, []*table.TypeDescriptor{
+					{Kind: table.TypeString},
+					{Kind: table.TypeString},
+					{Kind: table.TypeString},
+				}),
+				right: table.NewTableWithSchemas([]string{"id", "region", "amount"}, []*table.TypeDescriptor{
+					{Kind: table.TypeInt},
+					{Kind: table.TypeString},
+					{Kind: table.TypeFloat},
+				}),
+				query: "join right right.csv on id and region",
+				want:  []string{"join", "key", "type", "id", "string", "int"},
+			},
+		}
 
-		result := runJoinContractQuery(t, left, right, "join right right.csv on profile.id == id | describe")
-		assertDescribeSchemaRows(t, result, map[string]describeSchemaMeta{
-			"profile":    {typ: "record", rows: 0, schema: "record<id:string>?"},
-			"name":       {typ: "string", rows: 0, schema: "string?"},
-			"profile_id": {typ: "int", rows: 0, schema: "int"},
-			"amount":     {typ: "float", rows: 0, schema: "float"},
-		})
-	})
-
-	t.Run("zero_row_right_join_multi_key_fallback_uses_right_schemas_per_incompatible_key", func(t *testing.T) {
-		left := table.NewTableWithSchemas([]string{"id", "region", "name"}, []*table.TypeDescriptor{
-			{Kind: table.TypeString},
-			{Kind: table.TypeString},
-			{Kind: table.TypeString},
-		})
-		right := table.NewTableWithSchemas([]string{"id", "region", "amount"}, []*table.TypeDescriptor{
-			{Kind: table.TypeInt},
-			{Kind: table.TypeString},
-			{Kind: table.TypeFloat},
-		})
-
-		result := runJoinContractQuery(t, left, right, "join right right.csv on id and region | describe")
-		assertDescribeSchemaRows(t, result, map[string]describeSchemaMeta{
-			"id":     {typ: "int", rows: 0, schema: "int"},
-			"region": {typ: "string", rows: 0, schema: "string"},
-			"name":   {typ: "string", rows: 0, schema: "string?"},
-			"amount": {typ: "float", rows: 0, schema: "float"},
-		})
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				err := runJoinContractQueryExpectErr(t, tc.left, tc.right, tc.query)
+				for _, part := range tc.want {
+					if !strings.Contains(err.Error(), part) {
+						t.Fatalf("join key error missing %q: %v", part, err)
+					}
+				}
+			})
+		}
 	})
 }
 
@@ -682,4 +573,23 @@ func runJoinContractQuery(t *testing.T, left, right *table.Table, query string) 
 		t.Fatalf("exec error: %v", err)
 	}
 	return result
+}
+
+func runJoinContractQueryExpectErr(t *testing.T, left, right *table.Table, query string) error {
+	t.Helper()
+	q, err := parser.Parse("left.csv | " + query)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	_, err = Execute(q, left, func(filename string, _ ast.LoadOptions) (*table.Table, error) {
+		if filename == "right.csv" {
+			return right, nil
+		}
+		t.Fatalf("unexpected join filename %q", filename)
+		return nil, nil
+	})
+	if err == nil {
+		t.Fatal("expected query error")
+	}
+	return err
 }

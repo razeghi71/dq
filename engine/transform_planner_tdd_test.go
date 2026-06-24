@@ -129,7 +129,7 @@ func TestTransformPlannerTDDRejectsInvalidTransformAndDownstreamSchemasBeforeRow
 	}
 }
 
-func TestTransformPlannerTDDExecutesPlannedTransformSpan(t *testing.T) {
+func TestTransformPlannerTDDExecutesPlannedTransformPipeline(t *testing.T) {
 	plan, err := planSchemaPipeline(usersTable().Schema(), parseSimplePlannerOps(t, `transform age2 = age + 1, bucket = if(age > 30, "senior", "standard") | filter { age2 > 31 } | select name, bucket | sort name`))
 	if err != nil {
 		t.Fatalf("planSchemaPipeline with executable transform: %v", err)

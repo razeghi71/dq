@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestCLITransformPlannerTDDTransformParticipatesInPlannedFlatSpans(t *testing.T) {
+func TestCLITransformPlannerTDDTransformParticipatesInSchemaPlannedFlatPipeline(t *testing.T) {
 	bin := buildCLI(t)
 
 	for _, input := range cliFlatUserInputFiles() {
@@ -26,7 +26,7 @@ func TestCLITransformPlannerTDDTransformParticipatesInPlannedFlatSpans(t *testin
 	}
 }
 
-func TestCLITransformPlannerTDDTransformParticipatesInPlannedNestedSpans(t *testing.T) {
+func TestCLITransformPlannerTDDTransformParticipatesInSchemaPlannedNestedPipeline(t *testing.T) {
 	bin := buildCLI(t)
 
 	for _, input := range cliNestedUserInputFiles() {

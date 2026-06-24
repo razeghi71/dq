@@ -9,7 +9,7 @@ import (
 	"github.com/razeghi71/dq/table"
 )
 
-// pipelinePlan is the planned form of a schema-planned pipeline span.
+// pipelinePlan is the planned form of a full schema-planned pipeline.
 type pipelinePlan struct {
 	Ops          []plannedOp
 	InputSchema  table.Schema
@@ -115,39 +115,54 @@ type plannedDescribe struct {
 	plannedBase
 }
 
-func isPlannedSpanOp(op ast.Op) bool {
+type plannedJoin struct {
+	plannedBase
+	kind          string
+	right         *table.Table
+	leftKeys      []resolvedJoinKey
+	rightKeys     []resolvedJoinKey
+	leftKeyOutIdx []int
+	rightColMap   map[int]int
+}
+
+func isSchemaPlannedOp(op ast.Op) bool {
 	switch op.(type) {
 	case *ast.HeadOp, *ast.TailOp, *ast.FilterOp, *ast.SelectOp, *ast.SortOp,
 		*ast.TransformOp, *ast.GroupOp, *ast.ReduceOp, *ast.RenameOp,
-		*ast.RemoveOp, *ast.DistinctOp, *ast.CountOp, *ast.DescribeOp:
+		*ast.RemoveOp, *ast.DistinctOp, *ast.CountOp, *ast.DescribeOp,
+		*ast.JoinOp:
 		return true
 	default:
 		return false
 	}
 }
 
-// planSchemaPipeline plans a span containing operations with schema-only
-// planners. It binds column references, validates operator-specific schema
-// rules, and computes the output schema for each operation without inspecting
-// rows.
+// planSchemaPipeline plans operations with schema-only planners. It binds column
+// references, validates operator-specific schema rules, loads join right-hand
+// sources when needed, and computes the output schema for each operation before
+// row execution.
 func planSchemaPipeline(input table.Schema, ops []ast.Op) (*pipelinePlan, error) {
-	return planSchemaPipelineInEnv(schemaEnvFromSchema(input), ops)
+	return planSchemaPipelineInEnv(schemaEnvFromSchema(input), ops, nil)
 }
 
 func planSchemaPipelineFromTable(input *table.Table, ops []ast.Op) (*pipelinePlan, error) {
-	return planSchemaPipelineInEnv(schemaEnvFromTable(input), ops)
+	return planSchemaPipelineFromTableWithLoad(input, ops, nil)
 }
 
-func planSchemaPipelineInEnv(input schemaEnv, ops []ast.Op) (*pipelinePlan, error) {
+func planSchemaPipelineFromTableWithLoad(input *table.Table, ops []ast.Op, load LoadFunc) (*pipelinePlan, error) {
+	return planSchemaPipelineInEnv(schemaEnvFromTable(input), ops, load)
+}
+
+func planSchemaPipelineInEnv(input schemaEnv, ops []ast.Op, load LoadFunc) (*pipelinePlan, error) {
 	current := input
 	planned := make([]plannedOp, 0, len(ops))
 	output := input.schema()
 
 	for i, op := range ops {
-		if !isPlannedSpanOp(op) {
+		if !isSchemaPlannedOp(op) {
 			return nil, fmt.Errorf("cannot plan operation %T in schema-planned pipeline", op)
 		}
-		next, err := planSchemaOp(current, op)
+		next, err := planSchemaOp(current, op, load)
 		if err != nil {
 			return nil, err
 		}
@@ -161,7 +176,7 @@ func planSchemaPipelineInEnv(input schemaEnv, ops []ast.Op) (*pipelinePlan, erro
 	return &pipelinePlan{Ops: planned, InputSchema: input.schema(), OutputSchema: output}, nil
 }
 
-func planSchemaOp(input schemaEnv, op ast.Op) (plannedOp, error) {
+func planSchemaOp(input schemaEnv, op ast.Op, load LoadFunc) (plannedOp, error) {
 	switch o := op.(type) {
 	case *ast.HeadOp:
 		return plannedHead{plannedBase: plannedBase{output: input.schema()}, n: o.N}, nil
@@ -221,6 +236,8 @@ func planSchemaOp(input schemaEnv, op ast.Op) (plannedOp, error) {
 		return plannedCount{plannedBase: plannedBase{output: countOutputSchema()}}, nil
 	case *ast.DescribeOp:
 		return plannedDescribe{plannedBase: plannedBase{output: describeOutputSchema()}}, nil
+	case *ast.JoinOp:
+		return planJoin(o, input, load)
 	default:
 		return nil, fmt.Errorf("unknown schema-planned operation type %T", op)
 	}
@@ -495,7 +512,7 @@ func describeOutputSchema() table.Schema {
 	)
 }
 
-// executePlan executes a planned pipeline span against rows.
+// executePlan executes a pipeline plan against rows.
 func executePlan(plan *pipelinePlan, input *table.Table) (*table.Table, error) {
 	if err := validatePlanInputTableSchema(plan.InputSchema, input); err != nil {
 		return nil, err
@@ -567,6 +584,8 @@ func execPlannedOp(op plannedOp, input *table.Table) (*table.Table, error) {
 		return execPlannedCount(p, input)
 	case plannedDescribe:
 		return execPlannedDescribe(p, input)
+	case plannedJoin:
+		return execPlannedJoin(p, input)
 	default:
 		return nil, fmt.Errorf("unknown planned operation type %T", op)
 	}

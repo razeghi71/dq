@@ -335,7 +335,9 @@ Notes:
 
 - Null keys never match (rows with null keys still appear in left/right/full joins, with the other side null).
 - Outer-join schemas reflect possible null padding even when no rows survive: left/full joins make right-side output columns nullable, and right/full joins make non-key left-side output columns nullable. Merged join keys keep their key schema.
-- Keys match by exact dq type and structural value, consistent with `group` and `distinct` -- e.g. integer `1` does not match string `"1"` across files of different formats or union branch value types. Avro branch names/tags are not part of the key.
+- Key schemas are checked before rows run. The two sides must have the same dq type shape except for nullability: `string` and `string?` are compatible, but `int` vs `string`, `int` vs `float`, and `mixed` key schemas are errors. Matching record, list, and ordered union schemas are allowed.
+- Matching rows use exact structural values, consistent with `group` and `distinct`: integer `1` is different from string `"1"` and from float `1.0`. Avro branch names/tags are not part of the key.
+- `join` participates in upfront planning with later commands, so downstream mistakes such as `select missing` are reported before earlier row-time expression errors execute.
 
 ## Functions
 

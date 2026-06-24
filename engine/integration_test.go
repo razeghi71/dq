@@ -1248,12 +1248,14 @@ func TestIntegrationJoinExactTypeMismatchOnWidenedCSV(t *testing.T) {
 	load := func(filename string, opts ast.LoadOptions) (*table.Table, error) {
 		return loader.Load(filename, loader.FromAST(opts))
 	}
-	result, err := Execute(q, leftTbl, load)
-	if err != nil {
-		t.Fatalf("exec: %v", err)
+	_, err = Execute(q, leftTbl, load)
+	if err == nil {
+		t.Fatal("expected join key schema mismatch error")
 	}
-	if result.NumRows != 0 {
-		t.Fatalf("expected no join matches for int vs widened string keys, got %d rows: %s", result.NumRows, result.String())
+	for _, part := range []string{"join", "key", "type", "id", "int", "string"} {
+		if !strings.Contains(err.Error(), part) {
+			t.Fatalf("join key error missing %q: %v", part, err)
+		}
 	}
 }
 

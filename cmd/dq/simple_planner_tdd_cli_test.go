@@ -152,11 +152,11 @@ func TestCLISimplePlannerTDDRejectsInvalidSimpleOpsAfterZeroRows(t *testing.T) {
 	})
 }
 
-func TestCLISimplePlannerTDDHandoffWithNonSimpleOpsStillWorks(t *testing.T) {
+func TestCLISimplePlannerTDDWholePipelinePlanningCoversFormerHandoffCases(t *testing.T) {
 	bin := buildCLI(t)
 
 	for _, input := range cliFlatUserInputFiles() {
-		t.Run(input.name+"_transform_group_reduce_between_simple_spans", func(t *testing.T) {
+		t.Run(input.name+"_transform_group_reduce_in_schema_pipeline", func(t *testing.T) {
 			out := runCLIQuery(t, bin,
 				input.path+` | select name, age, city | transform bucket = if(age > 30, "senior", "standard") | group bucket | reduce n = count() | remove grouped | sort bucket | json`,
 			)
@@ -173,7 +173,7 @@ func TestCLISimplePlannerTDDHandoffWithNonSimpleOpsStillWorks(t *testing.T) {
 		})
 	}
 
-	t.Run("join_between_simple_spans", func(t *testing.T) {
+	t.Run("join_in_schema_pipeline", func(t *testing.T) {
 		out := runCLIQuery(t, bin,
 			`../../testdata/users.csv | select name, city | join ../../testdata/orders.csv on name == user_name | select name, order_id | sort order_id | count | json`,
 		)

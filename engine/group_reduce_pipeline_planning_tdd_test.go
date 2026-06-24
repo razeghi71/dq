@@ -7,12 +7,12 @@ import (
 	"github.com/razeghi71/dq/table"
 )
 
-func TestGroupReduceSpanPlannerTDDPlansGroupReduceInsideOneSchemaPipeline(t *testing.T) {
+func TestGroupReducePipelinePlanningTDDPlansGroupReduceInsideOneSchemaPipeline(t *testing.T) {
 	input := simplePlannerInputTable()
 
 	plan, err := planSchemaPipeline(input.Schema(), parseSimplePlannerOps(t, `filter { age > 20 } | transform bucket = if(active, "active", "inactive") | group bucket | reduce total = sum(age), avg_age = avg(age), n = count(), first_name = first(name) | remove grouped | sort bucket | select bucket, total, avg_age, n, first_name`))
 	if err != nil {
-		t.Fatalf("planSchemaPipeline with group/reduce span: %v", err)
+		t.Fatalf("planSchemaPipeline with group/reduce pipeline: %v", err)
 	}
 	if got, want := len(plan.Ops), len(parseSimplePlannerOps(t, `filter { age > 20 } | transform bucket = if(active, "active", "inactive") | group bucket | reduce total = sum(age), avg_age = avg(age), n = count(), first_name = first(name) | remove grouped | sort bucket | select bucket, total, avg_age, n, first_name`)); got != want {
 		t.Fatalf("planned op count: got %d, want %d", got, want)
@@ -26,7 +26,7 @@ func TestGroupReduceSpanPlannerTDDPlansGroupReduceInsideOneSchemaPipeline(t *tes
 	)
 }
 
-func TestGroupReduceSpanPlannerTDDPlansGroupOutputSchemaWithoutRows(t *testing.T) {
+func TestGroupReducePipelinePlanningTDDPlansGroupOutputSchemaWithoutRows(t *testing.T) {
 	input := simplePlannerInputTable()
 
 	plan, err := planSchemaPipeline(input.Schema(), parseSimplePlannerOps(t, `filter { false } | group city | describe`))
@@ -45,7 +45,7 @@ func TestGroupReduceSpanPlannerTDDPlansGroupOutputSchemaWithoutRows(t *testing.T
 	)
 }
 
-func TestGroupReduceSpanPlannerTDDPlansCustomNestedNameAndNestedPaths(t *testing.T) {
+func TestGroupReducePipelinePlanningTDDPlansCustomNestedNameAndNestedPaths(t *testing.T) {
 	input := simplePlannerInputTable()
 
 	plan, err := planSchemaPipeline(input.Schema(), parseSimplePlannerOps(t, `group address.city, city as entries | reduce entries avg_age = avg(age), max_score = max(profile.stats.score), first_city = first(address.city) | remove entries | select address_city, city, avg_age, max_score, first_city`))
@@ -61,7 +61,7 @@ func TestGroupReduceSpanPlannerTDDPlansCustomNestedNameAndNestedPaths(t *testing
 	)
 }
 
-func TestGroupReduceSpanPlannerTDDRejectsNestedNameCollision(t *testing.T) {
+func TestGroupReducePipelinePlanningTDDRejectsNestedNameCollision(t *testing.T) {
 	input := table.NewTableWithSchemas(
 		[]string{"grouped", "city"},
 		[]*table.TypeDescriptor{{Kind: table.TypeString}, {Kind: table.TypeString}},
@@ -100,7 +100,7 @@ func TestGroupReduceSpanPlannerTDDRejectsNestedNameCollision(t *testing.T) {
 	}
 }
 
-func TestGroupReduceSpanPlannerTDDAllowsDistinctNestedNameForGroupedKey(t *testing.T) {
+func TestGroupReducePipelinePlanningTDDAllowsDistinctNestedNameForGroupedKey(t *testing.T) {
 	input := table.NewTableWithSchemas(
 		[]string{"grouped", "value"},
 		[]*table.TypeDescriptor{{Kind: table.TypeString}, {Kind: table.TypeInt}},
@@ -128,7 +128,7 @@ func TestGroupReduceSpanPlannerTDDAllowsDistinctNestedNameForGroupedKey(t *testi
 	}
 }
 
-func TestGroupReduceSpanPlannerTDDPlansExplicitReduceOverExistingListColumn(t *testing.T) {
+func TestGroupReducePipelinePlanningTDDPlansExplicitReduceOverExistingListColumn(t *testing.T) {
 	input := simplePlannerInputTable()
 
 	plan, err := planSchemaPipeline(input.Schema(), parseSimplePlannerOps(t, `reduce orders total = sum(amount), n = count(), first_amount = first(amount) | remove orders | select name, total, n, first_amount`))
@@ -143,7 +143,7 @@ func TestGroupReduceSpanPlannerTDDPlansExplicitReduceOverExistingListColumn(t *t
 	)
 }
 
-func TestGroupReduceSpanPlannerTDDDownstreamOpsBindReduceOutputInSamePlan(t *testing.T) {
+func TestGroupReducePipelinePlanningTDDDownstreamOpsBindReduceOutputInSamePlan(t *testing.T) {
 	input := simplePlannerInputTable().Schema()
 
 	cases := []struct {
@@ -189,7 +189,7 @@ func TestGroupReduceSpanPlannerTDDDownstreamOpsBindReduceOutputInSamePlan(t *tes
 	}
 }
 
-func TestGroupReduceSpanPlannerTDDReduceOverwritesExistingColumn(t *testing.T) {
+func TestGroupReducePipelinePlanningTDDReduceOverwritesExistingColumn(t *testing.T) {
 	input := table.NewTableWithSchemas(
 		[]string{"city", "age"},
 		[]*table.TypeDescriptor{{Kind: table.TypeString}, {Kind: table.TypeInt}},
@@ -217,7 +217,7 @@ func TestGroupReduceSpanPlannerTDDReduceOverwritesExistingColumn(t *testing.T) {
 	}
 }
 
-func TestGroupReduceSpanPlannerTDDRejectsInvalidSchemasBeforeRows(t *testing.T) {
+func TestGroupReducePipelinePlanningTDDRejectsInvalidSchemasBeforeRows(t *testing.T) {
 	input := simplePlannerInputTable().Schema()
 
 	cases := []struct {
@@ -255,7 +255,7 @@ func TestGroupReduceSpanPlannerTDDRejectsInvalidSchemasBeforeRows(t *testing.T) 
 	}
 }
 
-func TestGroupReduceSpanPlannerTDDDownstreamPlanningErrorWinsBeforeAggregateRuntime(t *testing.T) {
+func TestGroupReducePipelinePlanningTDDDownstreamPlanningErrorWinsBeforeAggregateRuntime(t *testing.T) {
 	input := table.NewTableWithSchemas(
 		[]string{"g", "id"},
 		[]*table.TypeDescriptor{{Kind: table.TypeString}, {Kind: table.TypeInt}},

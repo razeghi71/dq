@@ -2831,7 +2831,7 @@ func TestJoinMultiKey(t *testing.T) {
 	}
 }
 
-func TestJoinUsesExactStructuralKeys(t *testing.T) {
+func TestJoinRejectsMismatchedKeySchemas(t *testing.T) {
 	left := table.NewTable([]string{"id", "name"})
 	left.AddRow([]table.Value{table.IntVal(1), table.StrVal("Alice")})
 
@@ -2843,12 +2843,14 @@ func TestJoinUsesExactStructuralKeys(t *testing.T) {
 		t.Fatalf("parse error: %v", err)
 	}
 	load := func(string, ast.LoadOptions) (*table.Table, error) { return right, nil }
-	result, err := Execute(q, left, load)
-	if err != nil {
-		t.Fatalf("exec error: %v", err)
+	_, err = Execute(q, left, load)
+	if err == nil {
+		t.Fatal("expected join key schema mismatch error")
 	}
-	if result.NumRows != 0 {
-		t.Fatalf("expected no join match for int vs string key, got %d rows: %s", result.NumRows, result.String())
+	for _, part := range []string{"join", "key", "type", "id", "user_id", "int", "string"} {
+		if !strings.Contains(err.Error(), part) {
+			t.Fatalf("join key error missing %q: %v", part, err)
+		}
 	}
 }
 
@@ -2869,13 +2871,24 @@ func TestJoinConfigurationAndTopLevelKeyErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("stdin_join_source_rejected", func(t *testing.T) {
-		_, err := execJoin(&ast.JoinOp{
-			Filename: "-",
-			Keys:     []ast.JoinKey{{Left: []string{"id"}, Right: []string{"id"}}},
-		}, left, func(string, ast.LoadOptions) (*table.Table, error) { return right, nil })
-		if err == nil || !strings.Contains(err.Error(), "stdin is not supported") {
+	t.Run("hand_built_stdin_join_source_rejected_before_load", func(t *testing.T) {
+		q := &ast.Query{
+			Source: &ast.SourceOp{Filename: "left.csv"},
+			Ops: []ast.Op{&ast.JoinOp{
+				Filename: "-",
+				Keys:     []ast.JoinKey{{Left: []string{"id"}, Right: []string{"id"}}},
+			}},
+		}
+		loadCalled := false
+		_, err := Execute(q, left, func(string, ast.LoadOptions) (*table.Table, error) {
+			loadCalled = true
+			return right, nil
+		})
+		if err == nil || !strings.Contains(err.Error(), "stdin is not supported as join source") {
 			t.Fatalf("expected stdin join source error, got %v", err)
+		}
+		if loadCalled {
+			t.Fatal("stdin join source should be rejected before loading")
 		}
 	})
 

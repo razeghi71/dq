@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/razeghi71/dq/ast"
 	"github.com/razeghi71/dq/parser"
 	"github.com/razeghi71/dq/table"
 )
@@ -11,6 +12,10 @@ import (
 var benchmarkResult *table.Table
 
 func benchmarkPipeline(b *testing.B, input *table.Table, pipeline string) {
+	benchmarkPipelineWithLoad(b, input, pipeline, nil)
+}
+
+func benchmarkPipelineWithLoad(b *testing.B, input *table.Table, pipeline string, load LoadFunc) {
 	b.Helper()
 	q, err := parser.Parse("bench.csv | " + pipeline)
 	if err != nil {
@@ -19,12 +24,32 @@ func benchmarkPipeline(b *testing.B, input *table.Table, pipeline string) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		result, err := Execute(q, input, nil)
+		result, err := Execute(q, input, load)
 		if err != nil {
 			b.Fatalf("execute benchmark query: %v", err)
 		}
 		benchmarkResult = result
 	}
+}
+
+func benchmarkJoinRows(rows int) (*table.Table, *table.Table) {
+	left := table.NewTable([]string{"id", "name", "city"})
+	right := table.NewTable([]string{"id", "amount"})
+	for i := 0; i < rows; i++ {
+		id := int64(i)
+		left.AddRow([]table.Value{
+			table.IntVal(id),
+			table.StrVal(fmt.Sprintf("user-%06d", i)),
+			table.StrVal(fmt.Sprintf("city-%02d", i%50)),
+		})
+		if i%2 == 0 {
+			right.AddRow([]table.Value{
+				table.IntVal(id),
+				table.FloatVal(float64(i%1000) / 10),
+			})
+		}
+	}
+	return left, right
 }
 
 func benchmarkFlatRows(rows int) *table.Table {
@@ -129,6 +154,26 @@ func BenchmarkGroupReduce(b *testing.B) {
 	benchmarkPipeline(b, benchmarkGroupRows(10000), "group city | reduce total = sum(age), avg_amount = avg(amount), n = count() | remove grouped | count")
 }
 
-func BenchmarkTransformGroupReduceSpan(b *testing.B) {
+func BenchmarkTransformGroupReducePipeline(b *testing.B) {
 	benchmarkPipeline(b, benchmarkGroupRows(10000), `transform bucket = if(age > 50, "high", "low") | group bucket | reduce total = sum(age), n = count() | remove grouped | filter { total > 0 } | count`)
+}
+
+func BenchmarkJoinInner(b *testing.B) {
+	left, right := benchmarkJoinRows(10000)
+	benchmarkPipelineWithLoad(b, left, "join right.csv on id | count", func(filename string, _ ast.LoadOptions) (*table.Table, error) {
+		if filename != "right.csv" {
+			b.Fatalf("unexpected benchmark join source %q", filename)
+		}
+		return right, nil
+	})
+}
+
+func BenchmarkJoinTransformSelectPipeline(b *testing.B) {
+	left, right := benchmarkJoinRows(10000)
+	benchmarkPipelineWithLoad(b, left, `transform bucket = if(id > 5000, "high", "low") | join right.csv on id | select bucket, amount | filter { amount > 10 } | count`, func(filename string, _ ast.LoadOptions) (*table.Table, error) {
+		if filename != "right.csv" {
+			b.Fatalf("unexpected benchmark join source %q", filename)
+		}
+		return right, nil
+	})
 }

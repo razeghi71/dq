@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestCLIGroupReduceSpanTDDHappyPathAcrossFlatFormats(t *testing.T) {
+func TestCLIGroupReducePipelinePlanningTDDHappyPathAcrossFlatFormats(t *testing.T) {
 	bin := buildCLI(t)
 
 	for _, input := range cliFlatUserInputFiles() {
@@ -27,7 +27,7 @@ func TestCLIGroupReduceSpanTDDHappyPathAcrossFlatFormats(t *testing.T) {
 	}
 }
 
-func TestCLIGroupReduceSpanTDDHappyPathAcrossNestedFormats(t *testing.T) {
+func TestCLIGroupReducePipelinePlanningTDDHappyPathAcrossNestedFormats(t *testing.T) {
 	bin := buildCLI(t)
 
 	for _, input := range cliNestedUserInputFiles() {
@@ -48,21 +48,21 @@ func TestCLIGroupReduceSpanTDDHappyPathAcrossNestedFormats(t *testing.T) {
 	}
 }
 
-func TestCLIGroupReduceSpanTDDDownstreamSchemaErrorWinsBeforeAggregateRuntimeAcrossFlatFormats(t *testing.T) {
+func TestCLIGroupReducePipelinePlanningTDDDownstreamSchemaErrorWinsBeforeAggregateRuntimeAcrossFlatFormats(t *testing.T) {
 	bin := buildCLI(t)
 
-	for _, input := range writeCLIGroupReduceSpanOverflowInputs(t, bin) {
+	for _, input := range writeCLIGroupReducePipelineOverflowInputs(t, bin) {
 		t.Run(input.name, func(t *testing.T) {
 			out := runCLIQueryExpectError(t, bin, input.path+` | group g | reduce total = sum(id) | select missing | json`)
 			assertCLIExpressionErrorContains(t, out, "missing", "not found")
 			if strings.Contains(strings.ToLower(string(out)), "integer overflow") {
-				t.Fatalf("full-span planning should catch missing column before executing overflowing aggregate, got:\n%s", out)
+				t.Fatalf("pipeline planning should catch missing column before executing overflowing aggregate, got:\n%s", out)
 			}
 		})
 	}
 }
 
-func TestCLIGroupReduceSpanTDDInvalidSchemasBeforeRowsAcrossFormats(t *testing.T) {
+func TestCLIGroupReducePipelinePlanningTDDInvalidSchemasBeforeRowsAcrossFormats(t *testing.T) {
 	bin := buildCLI(t)
 
 	for _, input := range cliFlatUserInputFiles() {
@@ -90,7 +90,7 @@ func TestCLIGroupReduceSpanTDDInvalidSchemasBeforeRowsAcrossFormats(t *testing.T
 	}
 }
 
-func TestCLIGroupReduceSpanTDDRejectsGroupNestedNameCollision(t *testing.T) {
+func TestCLIGroupReducePipelinePlanningTDDRejectsGroupNestedNameCollision(t *testing.T) {
 	bin := buildCLI(t)
 
 	dir := t.TempDir()
@@ -110,7 +110,7 @@ func TestCLIGroupReduceSpanTDDRejectsGroupNestedNameCollision(t *testing.T) {
 	})
 }
 
-func TestCLIGroupReduceSpanTDDAllowsDistinctNestedNameForGroupedKey(t *testing.T) {
+func TestCLIGroupReducePipelinePlanningTDDAllowsDistinctNestedNameForGroupedKey(t *testing.T) {
 	bin := buildCLI(t)
 
 	dir := t.TempDir()
@@ -137,7 +137,7 @@ func TestCLIGroupReduceSpanTDDAllowsDistinctNestedNameForGroupedKey(t *testing.T
 	}
 }
 
-func writeCLIGroupReduceSpanOverflowInputs(t *testing.T, bin string) []struct {
+func writeCLIGroupReducePipelineOverflowInputs(t *testing.T, bin string) []struct {
 	name string
 	path string
 } {

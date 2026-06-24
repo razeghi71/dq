@@ -159,7 +159,7 @@ func TestCLIFixedSchemaContractZeroRowOuterJoinNullability(t *testing.T) {
 	})
 }
 
-func TestCLIFixedSchemaContractIncompatibleJoinFallbackPreservesRightOnlyKeyTypes(t *testing.T) {
+func TestCLIFixedSchemaContractIncompatibleJoinKeysFailDuringPlanning(t *testing.T) {
 	bin := buildCLI(t)
 	dir := t.TempDir()
 
@@ -177,69 +177,27 @@ func TestCLIFixedSchemaContractIncompatibleJoinFallbackPreservesRightOnlyKeyType
 		}
 	}
 
-	t.Run("right_join_empty_left_keeps_right_key_numeric", func(t *testing.T) {
-		out := runCLIQuery(t, bin, emptyLeft+" | join right "+right+" on id | json")
-		var rows []map[string]any
-		if err := json.Unmarshal(out, &rows); err != nil {
-			t.Fatalf("invalid JSON: %v\n%s", err, out)
-		}
-		if len(rows) != 1 {
-			t.Fatalf("rows: got %#v, want one row", rows)
-		}
-		if got, ok := rows[0]["id"].(float64); !ok || got != 1 {
-			t.Fatalf("id: got %#v, want numeric 1", rows[0]["id"])
-		}
-		if rows[0]["name"] != nil {
-			t.Fatalf("name: got %#v, want null", rows[0]["name"])
-		}
-		if got, ok := rows[0]["amount"].(float64); !ok || got != 99 {
-			t.Fatalf("amount: got %#v, want numeric 99", rows[0]["amount"])
-		}
-
-		describe := readCLIDescribeRows(t, runCLIQuery(t, bin, emptyLeft+" | join right "+right+" on id | describe | json"))
-		requireCLIDescribeSchema(t, describe, "id", "int", "int", 1)
+	t.Run("right_join_empty_left_rejects_csv_key_mismatch", func(t *testing.T) {
+		out := runCLIQueryExpectError(t, bin, emptyLeft+" | join right "+right+" on id | json")
+		assertCLIExpressionErrorContains(t, out, "join", "key", "type", "id", "string", "int")
 	})
 
-	t.Run("full_join_left_null_key_does_not_stringify_right_key", func(t *testing.T) {
-		out := runCLIQuery(t, bin, nullKeyLeft+" | join full "+right+" on id | json")
-		var rows []map[string]any
-		if err := json.Unmarshal(out, &rows); err != nil {
-			t.Fatalf("invalid JSON: %v\n%s", err, out)
-		}
-		if len(rows) != 2 {
-			t.Fatalf("rows: got %#v, want two rows", rows)
-		}
-		var rightOnly map[string]any
-		for _, row := range rows {
-			if row["amount"] != nil {
-				rightOnly = row
-				break
-			}
-		}
-		if rightOnly == nil {
-			t.Fatalf("right-only row not found in %#v", rows)
-		}
-		if got, ok := rightOnly["id"].(float64); !ok || got != 1 {
-			t.Fatalf("right-only id: got %#v, want numeric 1", rightOnly["id"])
-		}
-
-		describe := readCLIDescribeRows(t, runCLIQuery(t, bin, nullKeyLeft+" | join full "+right+" on id | describe | json"))
-		requireCLIDescribeSchema(t, describe, "id", "int", "int?", 2)
+	t.Run("full_join_left_null_key_rejects_csv_key_mismatch", func(t *testing.T) {
+		out := runCLIQueryExpectError(t, bin, nullKeyLeft+" | join full "+right+" on id | json")
+		assertCLIExpressionErrorContains(t, out, "join", "key", "type", "id", "string?", "int")
 	})
 
 	stdout := runCLIQuery(t, bin, "../../testdata/users.csv | filter { false } | select age | rename age=id | parquet to "+emptyRightParquet)
 	assertNoCLIStdout(t, stdout)
 
-	t.Run("zero_row_right_join_uses_right_parquet_key_schema", func(t *testing.T) {
-		rows := readCLIDescribeRows(t, runCLIQuery(t, bin, emptyLeft+" | join right "+emptyRightParquet+" on id | describe | json"))
-		requireCLIDescribeSchema(t, rows, "id", "int", "int", 0)
-		requireCLIDescribeSchema(t, rows, "name", "string", "string?", 0)
+	t.Run("zero_row_right_join_rejects_parquet_key_mismatch", func(t *testing.T) {
+		out := runCLIQueryExpectError(t, bin, emptyLeft+" | join right "+emptyRightParquet+" on id | describe | json")
+		assertCLIExpressionErrorContains(t, out, "join", "key", "type", "id", "string", "int")
 	})
 
-	t.Run("zero_row_full_join_uses_right_parquet_key_schema", func(t *testing.T) {
-		rows := readCLIDescribeRows(t, runCLIQuery(t, bin, emptyLeft+" | join full "+emptyRightParquet+" on id | describe | json"))
-		requireCLIDescribeSchema(t, rows, "id", "int", "int", 0)
-		requireCLIDescribeSchema(t, rows, "name", "string", "string?", 0)
+	t.Run("zero_row_full_join_rejects_parquet_key_mismatch", func(t *testing.T) {
+		out := runCLIQueryExpectError(t, bin, emptyLeft+" | join full "+emptyRightParquet+" on id | describe | json")
+		assertCLIExpressionErrorContains(t, out, "join", "key", "type", "id", "string", "int")
 	})
 }
 

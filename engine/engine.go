@@ -13,42 +13,14 @@ import (
 // Execute runs a full query pipeline on the given input table.
 // load is required when the pipeline contains join; pass nil otherwise.
 func Execute(query *ast.Query, input *table.Table, load LoadFunc) (*table.Table, error) {
-	current := input
-	for i := 0; i < len(query.Ops); {
-		if isPlannedSpanOp(query.Ops[i]) {
-			end := i + 1
-			for end < len(query.Ops) && isPlannedSpanOp(query.Ops[end]) {
-				end++
-			}
-			plan, err := planSchemaPipelineFromTable(current, query.Ops[i:end])
-			if err != nil {
-				return nil, err
-			}
-			current, err = executePlannedPipeline(plan, current)
-			if err != nil {
-				return nil, err
-			}
-			i = end
-			continue
-		}
-
-		var err error
-		current, err = execOp(query.Ops[i], current, load)
-		if err != nil {
-			return nil, err
-		}
-		i++
+	if len(query.Ops) == 0 {
+		return input, nil
 	}
-	return current, nil
-}
-
-func execOp(op ast.Op, t *table.Table, load LoadFunc) (*table.Table, error) {
-	switch o := op.(type) {
-	case *ast.JoinOp:
-		return execJoin(o, t, load)
-	default:
-		return nil, fmt.Errorf("unknown operation type %T", op)
+	plan, err := planSchemaPipelineFromTableWithLoad(input, query.Ops, load)
+	if err != nil {
+		return nil, err
 	}
+	return executePlannedPipeline(plan, input)
 }
 
 // resolveColumnPath walks a dot-path (e.g. ["address", "city"]) to extract a value from a row.

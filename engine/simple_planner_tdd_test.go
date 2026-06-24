@@ -470,7 +470,7 @@ func TestSimplePlannerTDDFixedOutputOpsUseCanonicalSchemas(t *testing.T) {
 	requireSimplePlannerSchema(t, described.Schema(), "column:string", "type:string", "row_count:int", "schema:string")
 }
 
-func TestSimplePlannerTDDExecuteReplansCachedSimpleSpanForChangedInputSchema(t *testing.T) {
+func TestSimplePlannerTDDExecutePlansFreshForChangedInputSchema(t *testing.T) {
 	q, err := parser.Parse("test.csv | filter { score > 1 } | count")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -503,7 +503,7 @@ func TestSimplePlannerTDDExecuteReplansCachedSimpleSpanForChangedInputSchema(t *
 	}
 }
 
-func TestSimplePlannerTDDExecuteReplansCachedSimpleSpanForRawNullVsNullableString(t *testing.T) {
+func TestSimplePlannerTDDExecutePlansFreshForRawNullVsNullableString(t *testing.T) {
 	q, err := parser.Parse("test.csv | filter { x } | count")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
