@@ -198,7 +198,7 @@ func assertMCPInitializeResult(t *testing.T, resp map[string]any) {
 	if !ok {
 		t.Fatalf("initialize serverInfo: got %T", result["serverInfo"])
 	}
-	if serverInfo["name"] != "dq" || serverInfo["version"] != "0.0.0" {
+	if serverInfo["name"] != "dq" || serverInfo["version"] != version {
 		t.Fatalf("initialize serverInfo: %#v", serverInfo)
 	}
 	capabilities, ok := result["capabilities"].(map[string]any)

@@ -134,7 +134,7 @@ func handleMCPMessage(msg jsonrpcMessage) (jsonrpcMessage, bool) {
 			},
 			"serverInfo": map[string]any{
 				"name":    "dq",
-				"version": "0.0.0",
+				"version": version,
 			},
 		}
 	case "tools/list":

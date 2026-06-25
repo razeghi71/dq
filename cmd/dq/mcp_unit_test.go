@@ -228,7 +228,7 @@ func TestHandleMCPMessageMethods(t *testing.T) {
 				if !ok {
 					t.Fatalf("serverInfo: got %T", result["serverInfo"])
 				}
-				if serverInfo["name"] != "dq" || serverInfo["version"] != "0.0.0" {
+				if serverInfo["name"] != "dq" || serverInfo["version"] != version {
 					t.Fatalf("serverInfo: %#v", serverInfo)
 				}
 				capabilities, ok := result["capabilities"].(map[string]any)

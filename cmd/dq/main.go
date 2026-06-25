@@ -12,9 +12,12 @@ import (
 )
 
 var (
-	errHelp  = errors.New("help")
-	errGuide = errors.New("guide")
+	errHelp    = errors.New("help")
+	errGuide   = errors.New("guide")
+	errVersion = errors.New("version")
 )
+
+var version = "dev"
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "mcp" {
@@ -36,6 +39,10 @@ func main() {
 	}
 	if err == errGuide {
 		fmt.Fprint(os.Stdout, dq.AgentGuide)
+		os.Exit(0)
+	}
+	if err == errVersion {
+		fmt.Fprintln(os.Stdout, version)
 		os.Exit(0)
 	}
 	if err != nil {
@@ -68,6 +75,8 @@ func parseArgs(args []string) (query string, err error) {
 			return "", errHelp
 		case "-agent-guide", "--agent-guide":
 			return "", errGuide
+		case "-v", "-version", "--version":
+			return "", errVersion
 		case "--":
 			return strings.Join(args[i+1:], " "), nil
 		default:
@@ -90,6 +99,8 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "flags:")
 	fmt.Fprintln(os.Stderr, "  -agent-guide")
 	fmt.Fprintln(os.Stderr, "        print an AI agent friendly guide")
+	fmt.Fprintln(os.Stderr, "  -v, --version")
+	fmt.Fprintln(os.Stderr, "        print the current program version")
 	fmt.Fprintln(os.Stderr, "output formats (terminal pipeline commands):")
 	fmt.Fprintf(os.Stderr, "        %s — e.g. '| csv' at end of query (table is default when omitted)\n", ast.OutputFormatsList())
 }

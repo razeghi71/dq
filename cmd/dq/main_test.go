@@ -138,6 +138,7 @@ func TestPrintUsageWritesExpectedSections(t *testing.T) {
 		"dq mcp",
 		"subcommands:",
 		"-agent-guide",
+		"--version",
 		"output formats",
 	} {
 		if !strings.Contains(out, want) {
@@ -651,6 +652,19 @@ func TestParseArgsAgentGuide(t *testing.T) {
 	}
 }
 
+func TestParseArgsVersion(t *testing.T) {
+	cases := []string{"-v", "-version", "--version"}
+	for _, tc := range cases {
+		query, err := parseArgs([]string{tc})
+		if err != errVersion {
+			t.Fatalf("got err=%v, want errVersion for %s", err, tc)
+		}
+		if query != "" {
+			t.Fatalf("got query=%q", query)
+		}
+	}
+}
+
 func TestAgentGuideMatchesREADME(t *testing.T) {
 	readme, err := os.ReadFile("../../README.md")
 	if err != nil {
@@ -690,6 +704,18 @@ func TestCLIHelpMentionsMCPSubcommand(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Fatalf("help output missing %q:\n%s", want, s)
 		}
+	}
+}
+
+func TestCLIVersionPrintsValue(t *testing.T) {
+	bin := buildCLI(t)
+	cmd := exec.Command(bin, "--version")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cli: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != version {
+		t.Fatalf("got version=%q, want %q", strings.TrimSpace(string(out)), version)
 	}
 }
 
