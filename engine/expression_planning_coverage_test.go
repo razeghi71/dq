@@ -820,63 +820,70 @@ func TestCheckUnaryAndIfSignaturePlannerEdges(t *testing.T) {
 	}
 }
 
-func TestTypeCheckReduceExpressionFailsClosedForUnsupportedBoundNodes(t *testing.T) {
+func TestTypeCheckLogicalReduceExpressionFailsClosedForUnsupportedBoundNodes(t *testing.T) {
 	cases := []struct {
 		name string
-		expr boundExpr
+		expr logicalBoundExpr
 		want string
 	}{
 		{
 			name: "list_constructor",
-			expr: &boundList{raw: &ast.ListExpr{}, elements: []boundExpr{
-				&boundLiteral{raw: &ast.LiteralExpr{Kind: "int", Int: 1}},
+			expr: &logicalBoundList{raw: &ast.ListExpr{}, elements: []logicalBoundExpr{
+				&logicalBoundLiteral{raw: &ast.LiteralExpr{Kind: "int", Int: 1}},
 			}},
 			want: "list constructor is not supported in reduce",
 		},
 		{
 			name: "struct_constructor",
-			expr: &boundStruct{raw: &ast.StructExpr{}, fields: []boundStructField{
-				{name: "x", expr: &boundLiteral{raw: &ast.LiteralExpr{Kind: "int", Int: 1}}},
+			expr: &logicalBoundStruct{raw: &ast.StructExpr{}, fields: []logicalBoundStructField{
+				{name: "x", expr: &logicalBoundLiteral{raw: &ast.LiteralExpr{Kind: "int", Int: 1}}},
 			}},
 			want: "struct constructor is not supported in reduce",
 		},
 		{
 			name: "non_aggregate_call",
-			expr: &boundCall{raw: &ast.FuncCallExpr{Name: "upper"}},
+			expr: &logicalBoundCall{raw: &ast.FuncCallExpr{Name: "upper"}},
 			want: `non-aggregate function "upper" in reduce context`,
 		},
 		{
 			name: "unknown_call",
-			expr: &boundCall{raw: &ast.FuncCallExpr{Name: "median"}},
+			expr: &logicalBoundCall{raw: &ast.FuncCallExpr{Name: "median"}},
 			want: `unknown function "median"`,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := typeCheckReduceExpression(tc.expr); err == nil || !strings.Contains(err.Error(), tc.want) {
+			if _, err := typeCheckLogicalReduceExpression(tc.expr); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("expected error containing %q, got %v", tc.want, err)
 			}
 		})
 	}
 }
 
-func TestTypeCheckExpressionFailsClosedForUnsupportedBoundNodes(t *testing.T) {
-	duplicateStruct := &boundStruct{raw: &ast.StructExpr{}, fields: []boundStructField{
-		{name: "x", expr: &boundLiteral{raw: &ast.LiteralExpr{Kind: "int", Int: 1}}},
-		{name: "x", expr: &boundLiteral{raw: &ast.LiteralExpr{Kind: "int", Int: 2}}},
+func TestTypeCheckLogicalExpressionFailsClosedForUnsupportedBoundNodes(t *testing.T) {
+	duplicateStruct := &logicalBoundStruct{raw: &ast.StructExpr{}, fields: []logicalBoundStructField{
+		{name: "x", expr: &logicalBoundLiteral{raw: &ast.LiteralExpr{Kind: "int", Int: 1}}},
+		{name: "x", expr: &logicalBoundLiteral{raw: &ast.LiteralExpr{Kind: "int", Int: 2}}},
 	}}
-	if _, err := typeCheckExpression(duplicateStruct); err == nil || !strings.Contains(err.Error(), `struct() duplicate field "x"`) {
-		t.Fatalf("duplicate bound struct field should fail closed, got %v", err)
+	if _, err := typeCheckLogicalExpression(duplicateStruct); err == nil || !strings.Contains(err.Error(), `struct() duplicate field "x"`) {
+		t.Fatalf("duplicate logical struct field should fail closed, got %v", err)
 	}
 
-	badList := &boundList{raw: &ast.ListExpr{}, elements: []boundExpr{
-		&boundCall{raw: &ast.FuncCallExpr{Name: "upper"}, args: []boundExpr{
-			&boundLiteral{raw: &ast.LiteralExpr{Kind: "int", Int: 1}},
+	badList := &logicalBoundList{raw: &ast.ListExpr{}, elements: []logicalBoundExpr{
+		&logicalBoundCall{raw: &ast.FuncCallExpr{Name: "upper"}, args: []logicalBoundExpr{
+			&logicalBoundLiteral{raw: &ast.LiteralExpr{Kind: "int", Int: 1}},
 		}},
 	}}
-	if _, err := typeCheckExpression(badList); err == nil || !strings.Contains(err.Error(), "upper() requires a string") {
+	if _, err := typeCheckLogicalExpression(badList); err == nil || !strings.Contains(err.Error(), "upper() requires a string") {
 		t.Fatalf("list element type error should fail closed, got %v", err)
+	}
+
+	if _, err := typeCheckLogicalExpression(&unknownLogicalBoundExprForBoundaryTDD{}); err == nil || !strings.Contains(err.Error(), "unknown logical bound expression type") {
+		t.Fatalf("unknown logical bound expression should fail closed, got %v", err)
+	}
+	if _, err := typeCheckLogicalReduceExpression(&unknownLogicalBoundExprForBoundaryTDD{}); err == nil || !strings.Contains(err.Error(), "unknown logical bound expression type") {
+		t.Fatalf("unknown logical reduce expression should fail closed, got %v", err)
 	}
 }
 

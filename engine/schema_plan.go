@@ -42,14 +42,14 @@ func numericExprKnownNonZero(expr ast.Expr) bool {
 }
 
 func nestedRecordSchemaForReduce(column string, schema *table.TypeDescriptor) (*table.TypeDescriptor, error) {
-	schema = table.NormalizeSchema(schema)
+	schema = normalizePlanningSchema(schema)
 	if schema == nil || schema.Kind == table.TypeNull {
 		return nil, fmt.Errorf("reduce: nested column %q has unknown schema; expected list<record<...>>", column)
 	}
 	if schema.Kind != table.TypeList || schema.Elem == nil {
 		return nil, fmt.Errorf("reduce: nested column %q must be list<record<...>>, got %s", column, table.Render(schema))
 	}
-	elem := table.FinalizeSchema(schema.Elem)
+	elem := finalizePlanningSchema(schema.Elem)
 	if elem.Kind != table.TypeRecord {
 		return nil, fmt.Errorf("reduce: nested column %q must contain record elements, got %s", column, table.Render(schema))
 	}
@@ -77,43 +77,35 @@ func allSchemasKnown(schemas []*table.TypeDescriptor, indexes []int) bool {
 	return true
 }
 
-func planFilterExpr(expr ast.Expr, t *table.Table) (typedExpr, error) {
-	return planFilterExprInEnv(expr, schemaEnvFromTable(t))
-}
-
-func planFilterExprInEnv(expr ast.Expr, env schemaEnv) (typedExpr, error) {
-	bound, err := bindExpressionInEnv(expr, env)
+func planLogicalFilterExprInEnv(expr ast.Expr, env schemaEnv) (logicalTypedExpr, error) {
+	bound, err := bindLogicalExpressionInEnv(expr, env)
 	if err != nil {
-		return typedExpr{}, err
+		return logicalTypedExpr{}, err
 	}
-	typed, err := typeCheckExpression(bound)
+	typed, err := typeCheckLogicalExpression(bound)
 	if err != nil {
-		return typedExpr{}, err
+		return logicalTypedExpr{}, err
 	}
 	if !schemaBoolOrNull(typed.typ) {
-		return typedExpr{}, fmt.Errorf("filter expression must return bool, got %s from %s", schemaString(typed.typ), expressionLabel(typed.bound))
+		return logicalTypedExpr{}, fmt.Errorf("filter expression must return bool, got %s from %s", schemaString(typed.typ), logicalExpressionLabel(typed.bound))
 	}
 	return typed, nil
 }
 
-func planTransformExpr(expr ast.Expr, t *table.Table) (typedExpr, error) {
-	return planTransformExprInEnv(expr, schemaEnvFromTable(t))
+func planLogicalTransformExprInEnv(expr ast.Expr, env schemaEnv) (logicalTypedExpr, error) {
+	bound, err := bindLogicalExpressionInEnv(expr, env)
+	if err != nil {
+		return logicalTypedExpr{}, err
+	}
+	return typeCheckLogicalExpression(bound)
 }
 
-func planTransformExprInEnv(expr ast.Expr, env schemaEnv) (typedExpr, error) {
-	bound, err := bindExpressionInEnv(expr, env)
+func planLogicalReduceExpr(expr ast.Expr, nestedSchema *table.TypeDescriptor) (logicalTypedExpr, error) {
+	bound, err := bindLogicalReduceExpression(expr, nestedSchema)
 	if err != nil {
-		return typedExpr{}, err
+		return logicalTypedExpr{}, err
 	}
-	return typeCheckExpression(bound)
-}
-
-func planReduceExpr(expr ast.Expr, nestedSchema *table.TypeDescriptor) (typedExpr, error) {
-	bound, err := bindReduceExpression(expr, nestedSchema)
-	if err != nil {
-		return typedExpr{}, err
-	}
-	return typeCheckReduceExpression(bound)
+	return typeCheckLogicalReduceExpression(bound)
 }
 
 func nullableSchema(kind table.ValueType, inputs ...*table.TypeDescriptor) *table.TypeDescriptor {

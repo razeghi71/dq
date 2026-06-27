@@ -10,9 +10,9 @@ import (
 func TestGroupReducePipelinePlanningTDDPlansGroupReduceInsideOneSchemaPipeline(t *testing.T) {
 	input := simplePlannerInputTable()
 
-	plan, err := planSchemaPipeline(input.Schema(), parseSimplePlannerOps(t, `filter { age > 20 } | transform bucket = if(active, "active", "inactive") | group bucket | reduce total = sum(age), avg_age = avg(age), n = count(), first_name = first(name) | remove grouped | sort bucket | select bucket, total, avg_age, n, first_name`))
+	plan, err := planPhysicalPipelineForTest(input.Schema(), parseSimplePlannerOps(t, `filter { age > 20 } | transform bucket = if(active, "active", "inactive") | group bucket | reduce total = sum(age), avg_age = avg(age), n = count(), first_name = first(name) | remove grouped | sort bucket | select bucket, total, avg_age, n, first_name`))
 	if err != nil {
-		t.Fatalf("planSchemaPipeline with group/reduce pipeline: %v", err)
+		t.Fatalf("planPhysicalPipelineForTest with group/reduce pipeline: %v", err)
 	}
 	if got, want := len(plan.Ops), len(parseSimplePlannerOps(t, `filter { age > 20 } | transform bucket = if(active, "active", "inactive") | group bucket | reduce total = sum(age), avg_age = avg(age), n = count(), first_name = first(name) | remove grouped | sort bucket | select bucket, total, avg_age, n, first_name`)); got != want {
 		t.Fatalf("planned op count: got %d, want %d", got, want)
@@ -29,9 +29,9 @@ func TestGroupReducePipelinePlanningTDDPlansGroupReduceInsideOneSchemaPipeline(t
 func TestGroupReducePipelinePlanningTDDPlansGroupOutputSchemaWithoutRows(t *testing.T) {
 	input := simplePlannerInputTable()
 
-	plan, err := planSchemaPipeline(input.Schema(), parseSimplePlannerOps(t, `filter { false } | group city | describe`))
+	plan, err := planPhysicalPipelineForTest(input.Schema(), parseSimplePlannerOps(t, `filter { false } | group city | describe`))
 	if err != nil {
-		t.Fatalf("planSchemaPipeline with zero-row group: %v", err)
+		t.Fatalf("planPhysicalPipelineForTest with zero-row group: %v", err)
 	}
 	requireSimplePlannerSchema(t, plan.Ops[1].OutputSchema(),
 		"city:string",
@@ -48,9 +48,9 @@ func TestGroupReducePipelinePlanningTDDPlansGroupOutputSchemaWithoutRows(t *test
 func TestGroupReducePipelinePlanningTDDPlansCustomNestedNameAndNestedPaths(t *testing.T) {
 	input := simplePlannerInputTable()
 
-	plan, err := planSchemaPipeline(input.Schema(), parseSimplePlannerOps(t, `group address.city, city as entries | reduce entries avg_age = avg(age), max_score = max(profile.stats.score), first_city = first(address.city) | remove entries | select address_city, city, avg_age, max_score, first_city`))
+	plan, err := planPhysicalPipelineForTest(input.Schema(), parseSimplePlannerOps(t, `group address.city, city as entries | reduce entries avg_age = avg(age), max_score = max(profile.stats.score), first_city = first(address.city) | remove entries | select address_city, city, avg_age, max_score, first_city`))
 	if err != nil {
-		t.Fatalf("planSchemaPipeline with custom nested group/reduce: %v", err)
+		t.Fatalf("planPhysicalPipelineForTest with custom nested group/reduce: %v", err)
 	}
 	requireSimplePlannerSchema(t, plan.OutputSchema,
 		"address_city:string?",
@@ -86,14 +86,14 @@ func TestGroupReducePipelinePlanningTDDRejectsNestedNameCollision(t *testing.T) 
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := planSchemaPipeline(input, parseSimplePlannerOps(t, tc.pipeline))
+			_, err := planPhysicalPipelineForTest(input, parseSimplePlannerOps(t, tc.pipeline))
 			if err == nil {
-				t.Fatalf("planSchemaPipeline(%q): expected nested-name collision error", tc.pipeline)
+				t.Fatalf("planPhysicalPipelineForTest(%q): expected nested-name collision error", tc.pipeline)
 			}
 			msg := strings.ToLower(err.Error())
 			for _, want := range tc.wants {
 				if !strings.Contains(msg, strings.ToLower(want)) {
-					t.Fatalf("planSchemaPipeline(%q): got error %q, want substring %q", tc.pipeline, err, want)
+					t.Fatalf("planPhysicalPipelineForTest(%q): got error %q, want substring %q", tc.pipeline, err, want)
 				}
 			}
 		})
@@ -131,9 +131,9 @@ func TestGroupReducePipelinePlanningTDDAllowsDistinctNestedNameForGroupedKey(t *
 func TestGroupReducePipelinePlanningTDDPlansExplicitReduceOverExistingListColumn(t *testing.T) {
 	input := simplePlannerInputTable()
 
-	plan, err := planSchemaPipeline(input.Schema(), parseSimplePlannerOps(t, `reduce orders total = sum(amount), n = count(), first_amount = first(amount) | remove orders | select name, total, n, first_amount`))
+	plan, err := planPhysicalPipelineForTest(input.Schema(), parseSimplePlannerOps(t, `reduce orders total = sum(amount), n = count(), first_amount = first(amount) | remove orders | select name, total, n, first_amount`))
 	if err != nil {
-		t.Fatalf("planSchemaPipeline with explicit list reduce: %v", err)
+		t.Fatalf("planPhysicalPipelineForTest with explicit list reduce: %v", err)
 	}
 	requireSimplePlannerSchema(t, plan.OutputSchema,
 		"name:string",
@@ -180,9 +180,9 @@ func TestGroupReducePipelinePlanningTDDDownstreamOpsBindReduceOutputInSamePlan(t
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			plan, err := planSchemaPipeline(input, parseSimplePlannerOps(t, tc.pipeline))
+			plan, err := planPhysicalPipelineForTest(input, parseSimplePlannerOps(t, tc.pipeline))
 			if err != nil {
-				t.Fatalf("planSchemaPipeline(%q): %v", tc.pipeline, err)
+				t.Fatalf("planPhysicalPipelineForTest(%q): %v", tc.pipeline, err)
 			}
 			requireSimplePlannerSchema(t, plan.OutputSchema, tc.want...)
 		})
@@ -241,14 +241,14 @@ func TestGroupReducePipelinePlanningTDDRejectsInvalidSchemasBeforeRows(t *testin
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := planSchemaPipeline(input, parseSimplePlannerOps(t, tc.pipeline))
+			_, err := planPhysicalPipelineForTest(input, parseSimplePlannerOps(t, tc.pipeline))
 			if err == nil {
-				t.Fatalf("planSchemaPipeline(%q): expected error", tc.pipeline)
+				t.Fatalf("planPhysicalPipelineForTest(%q): expected error", tc.pipeline)
 			}
 			msg := strings.ToLower(err.Error())
 			for _, want := range tc.wants {
 				if !strings.Contains(msg, strings.ToLower(want)) {
-					t.Fatalf("planSchemaPipeline(%q): got error %q, want substring %q", tc.pipeline, err, want)
+					t.Fatalf("planPhysicalPipelineForTest(%q): got error %q, want substring %q", tc.pipeline, err, want)
 				}
 			}
 		})
@@ -268,17 +268,17 @@ func TestGroupReducePipelinePlanningTDDDownstreamPlanningErrorWinsBeforeAggregat
 	}
 
 	q := parseSimplePlannerOps(t, `group g | reduce total = sum(id) | select missing`)
-	plan, err := planSchemaPipeline(input.Schema(), q)
+	plan, err := planPhysicalPipelineForTest(input.Schema(), q)
 	if err == nil {
-		t.Fatalf("planSchemaPipeline: expected downstream missing-column error")
+		t.Fatalf("planPhysicalPipelineForTest: expected downstream missing-column error")
 	}
 	msg := strings.ToLower(err.Error())
 	for _, want := range []string{"missing", "not found"} {
 		if !strings.Contains(msg, want) {
-			t.Fatalf("planSchemaPipeline error: got %q, want %q", err, want)
+			t.Fatalf("planPhysicalPipelineForTest error: got %q, want %q", err, want)
 		}
 	}
 	if plan != nil {
-		t.Fatalf("planSchemaPipeline returned plan on error: %#v", plan)
+		t.Fatalf("planPhysicalPipelineForTest returned plan on error: %#v", plan)
 	}
 }

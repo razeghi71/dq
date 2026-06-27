@@ -9,13 +9,6 @@ import (
 	"github.com/razeghi71/dq/table"
 )
 
-// pipelinePlan is the planned form of a full schema-planned pipeline.
-type pipelinePlan struct {
-	Ops          []plannedOp
-	InputSchema  table.Schema
-	OutputSchema table.Schema
-}
-
 // plannedOp is a schema-planned operation.
 type plannedOp interface {
 	OutputSchema() table.Schema
@@ -137,195 +130,6 @@ func isSchemaPlannedOp(op ast.Op) bool {
 	}
 }
 
-// planSchemaPipeline plans operations with schema-only planners. It binds column
-// references, validates operator-specific schema rules, loads join right-hand
-// sources when needed, and computes the output schema for each operation before
-// row execution.
-func planSchemaPipeline(input table.Schema, ops []ast.Op) (*pipelinePlan, error) {
-	return planSchemaPipelineInEnv(schemaEnvFromSchema(input), ops, nil)
-}
-
-func planSchemaPipelineFromTable(input *table.Table, ops []ast.Op) (*pipelinePlan, error) {
-	return planSchemaPipelineFromTableWithLoad(input, ops, nil)
-}
-
-func planSchemaPipelineFromTableWithLoad(input *table.Table, ops []ast.Op, load LoadFunc) (*pipelinePlan, error) {
-	return planSchemaPipelineInEnv(schemaEnvFromTable(input), ops, load)
-}
-
-func planSchemaPipelineInEnv(input schemaEnv, ops []ast.Op, load LoadFunc) (*pipelinePlan, error) {
-	current := input
-	planned := make([]plannedOp, 0, len(ops))
-	output := input.schema()
-
-	for i, op := range ops {
-		if !isSchemaPlannedOp(op) {
-			return nil, fmt.Errorf("cannot plan operation %T in schema-planned pipeline", op)
-		}
-		next, err := planSchemaOp(current, op, load)
-		if err != nil {
-			return nil, err
-		}
-		planned = append(planned, next)
-		output = next.OutputSchema()
-		if i+1 < len(ops) {
-			current = schemaEnvFromSchema(output)
-		}
-	}
-
-	return &pipelinePlan{Ops: planned, InputSchema: input.schema(), OutputSchema: output}, nil
-}
-
-func planSchemaOp(input schemaEnv, op ast.Op, load LoadFunc) (plannedOp, error) {
-	switch o := op.(type) {
-	case *ast.HeadOp:
-		return plannedHead{plannedBase: plannedBase{output: input.schema()}, n: o.N}, nil
-	case *ast.TailOp:
-		return plannedTail{plannedBase: plannedBase{output: input.schema()}, n: o.N}, nil
-	case *ast.FilterOp:
-		expr, err := planFilterExprInEnv(o.Expr, input)
-		if err != nil {
-			return nil, fmt.Errorf("filter: %w", err)
-		}
-		return plannedFilter{plannedBase: plannedBase{output: input.schema()}, expr: expr}, nil
-	case *ast.TransformOp:
-		return planTransform(o, input)
-	case *ast.GroupOp:
-		return planGroup(o, input)
-	case *ast.ReduceOp:
-		return planReduce(o, input)
-	case *ast.SortOp:
-		keys, err := planSortKeys(o, input)
-		if err != nil {
-			return nil, err
-		}
-		return plannedSort{plannedBase: plannedBase{output: input.schema()}, keys: keys}, nil
-	case *ast.SelectOp:
-		projections, err := planProjectionsInEnv("select", o.Columns, input)
-		if err != nil {
-			return nil, err
-		}
-		output := schemaFromColumns(projections.cols, projections.schemas)
-		if projections.topLevelIdx != nil {
-			output = rawSchemaFromColumns(projections.cols, projections.schemas)
-		}
-		return plannedSelect{plannedBase: plannedBase{output: output}, projections: projections}, nil
-	case *ast.RenameOp:
-		cols, err := planRenameColumns(o, input)
-		if err != nil {
-			return nil, err
-		}
-		return plannedRename{plannedBase: plannedBase{output: rawSchemaFromColumns(cols, input.rawSchemas())}}, nil
-	case *ast.RemoveOp:
-		cols, indices, schemas, err := planRemoveColumns(o, input)
-		if err != nil {
-			return nil, err
-		}
-		return plannedRemove{plannedBase: plannedBase{output: rawSchemaFromColumns(cols, schemas)}, indices: indices}, nil
-	case *ast.DistinctOp:
-		if len(o.Columns) == 0 {
-			return plannedDistinct{plannedBase: plannedBase{output: input.schema()}}, nil
-		}
-		projections, err := planProjectionsInEnv("distinct", o.Columns, input)
-		if err != nil {
-			return nil, err
-		}
-		output := schemaFromColumns(projections.cols, projections.schemas)
-		return plannedDistinct{plannedBase: plannedBase{output: output}, projections: projections}, nil
-	case *ast.CountOp:
-		return plannedCount{plannedBase: plannedBase{output: countOutputSchema()}}, nil
-	case *ast.DescribeOp:
-		return plannedDescribe{plannedBase: plannedBase{output: describeOutputSchema()}}, nil
-	case *ast.JoinOp:
-		return planJoin(o, input, load)
-	default:
-		return nil, fmt.Errorf("unknown schema-planned operation type %T", op)
-	}
-}
-
-func planTransform(o *ast.TransformOp, input schemaEnv) (plannedTransform, error) {
-	cols := append([]string(nil), input.columns...)
-	assignments := make([]plannedTransformAssignment, len(o.Assignments))
-	seenTargets := make(map[string]bool, len(o.Assignments))
-
-	for i, a := range o.Assignments {
-		if seenTargets[a.Column] {
-			return plannedTransform{}, fmt.Errorf("transform target %q assigned more than once", a.Column)
-		}
-		seenTargets[a.Column] = true
-
-		idx := -1
-		for j, col := range cols {
-			if col == a.Column {
-				idx = j
-				break
-			}
-		}
-		if idx < 0 {
-			idx = len(cols)
-			cols = append(cols, a.Column)
-		}
-		assignments[i].name = a.Column
-		assignments[i].target = idx
-	}
-
-	for i, a := range o.Assignments {
-		planned, err := planTransformExprInEnv(a.Expr, input)
-		if err != nil {
-			return plannedTransform{}, fmt.Errorf("transform %q: %w", a.Column, err)
-		}
-		assignments[i].expr = planned
-	}
-
-	schemas := input.rawSchemas()
-	for len(schemas) < len(cols) {
-		schemas = append(schemas, nil)
-	}
-	for _, assignment := range assignments {
-		schemas[assignment.target] = nil
-	}
-	for _, assignment := range assignments {
-		schemas[assignment.target] = table.FinalizeSchema(assignment.expr.typ)
-	}
-
-	return plannedTransform{
-		plannedBase: plannedBase{output: rawSchemaFromColumns(cols, schemas)},
-		assignments: assignments,
-	}, nil
-}
-
-func planGroup(o *ast.GroupOp, input schemaEnv) (plannedGroup, error) {
-	keyNames := make([]string, 0, len(o.Columns))
-	keys := make([]plannedGroupKey, len(o.Columns))
-	schemas := make([]*table.TypeDescriptor, 0, len(o.Columns)+1)
-
-	for i, path := range o.Columns {
-		bound, err := bindColumnPathInEnv(input, path, &ast.ColumnExpr{Path: path})
-		if err != nil {
-			return plannedGroup{}, fmt.Errorf("group %q: %w", strings.Join(path, "."), err)
-		}
-		if err := validatePathDoesNotTraverseUnionInEnv("group", input, path); err != nil {
-			return plannedGroup{}, err
-		}
-		name := uniqueColumnName(pathToColumnName(path), keyNames)
-		keyNames = append(keyNames, name)
-		keys[i] = plannedGroupKey{column: *bound}
-		schemas = append(schemas, bound.typ)
-	}
-
-	cols := append([]string(nil), keyNames...)
-	if containsColumnName(cols, o.NestedName) {
-		return plannedGroup{}, fmt.Errorf("group: nested column name %q collides with a group key output column; use as rows or another distinct nested column name", o.NestedName)
-	}
-	cols = append(cols, o.NestedName)
-	schemas = append(schemas, &table.TypeDescriptor{Kind: table.TypeList, Elem: recordSchemaForEnv(input)})
-
-	return plannedGroup{
-		plannedBase: plannedBase{output: rawSchemaFromColumns(cols, schemas)},
-		keys:        keys,
-	}, nil
-}
-
 func containsColumnName(cols []string, name string) bool {
 	for _, col := range cols {
 		if col == name {
@@ -333,95 +137,6 @@ func containsColumnName(cols []string, name string) bool {
 		}
 	}
 	return false
-}
-
-func planReduce(o *ast.ReduceOp, input schemaEnv) (plannedReduce, error) {
-	nestedIdx := input.colIndex(o.NestedName)
-	if nestedIdx < 0 {
-		return plannedReduce{}, fmt.Errorf("reduce: nested column %q not found (did you forget to group first?)", o.NestedName)
-	}
-
-	cols := append([]string(nil), input.columns...)
-	assignments := make([]plannedReduceAssignment, len(o.Assignments))
-	seenTargets := make(map[string]bool, len(o.Assignments))
-	for i, a := range o.Assignments {
-		if seenTargets[a.Column] {
-			return plannedReduce{}, fmt.Errorf("reduce target %q assigned more than once", a.Column)
-		}
-		seenTargets[a.Column] = true
-
-		idx := -1
-		for j, col := range cols {
-			if col == a.Column {
-				idx = j
-				break
-			}
-		}
-		if idx < 0 {
-			idx = len(cols)
-			cols = append(cols, a.Column)
-		}
-		assignments[i].name = a.Column
-		assignments[i].target = idx
-	}
-
-	nestedColumnSchema := input.rawSchema(nestedIdx)
-	if nestedColumnSchema == nil {
-		nestedColumnSchema = input.finalSchema(nestedIdx)
-	}
-	nestedSchema, err := nestedRecordSchemaForReduce(o.NestedName, nestedColumnSchema)
-	if err != nil {
-		return plannedReduce{}, err
-	}
-
-	for i, a := range o.Assignments {
-		planned, err := planReduceExpr(a.Expr, nestedSchema)
-		if err != nil {
-			return plannedReduce{}, fmt.Errorf("reduce %q: %w", a.Column, err)
-		}
-		assignments[i].expr = planned
-	}
-
-	schemas := input.rawSchemas()
-	for len(schemas) < len(cols) {
-		schemas = append(schemas, nil)
-	}
-	for _, assignment := range assignments {
-		schemas[assignment.target] = nil
-	}
-	for _, assignment := range assignments {
-		schemas[assignment.target] = table.FinalizeSchema(assignment.expr.typ)
-	}
-
-	return plannedReduce{
-		plannedBase:  plannedBase{output: rawSchemaFromColumns(cols, schemas)},
-		nestedName:   o.NestedName,
-		nestedIndex:  nestedIdx,
-		nestedSchema: nestedSchema,
-		assignments:  assignments,
-	}, nil
-}
-
-func planSortKeys(o *ast.SortOp, input schemaEnv) ([]plannedSortKey, error) {
-	keys := make([]plannedSortKey, len(o.Keys))
-	for i, k := range o.Keys {
-		bound, err := bindColumnPathInEnv(input, k.Path, &ast.ColumnExpr{Path: k.Path})
-		if err != nil {
-			return nil, fmt.Errorf("sort %q: %w", strings.Join(k.Path, "."), err)
-		}
-		if err := validatePathDoesNotTraverseUnionInEnv("sort", input, k.Path); err != nil {
-			return nil, err
-		}
-		schema := table.FinalizeSchema(bound.typ)
-		if table.SchemaContainsUnion(schema) {
-			return nil, fmt.Errorf("sort %q: union values are not orderable", strings.Join(k.Path, "."))
-		}
-		if !table.IsOrderable(schema) {
-			return nil, fmt.Errorf("sort %q: %s values are not orderable", strings.Join(k.Path, "."), table.TypeName(schema.Kind))
-		}
-		keys[i] = plannedSortKey{column: *bound, desc: k.Desc}
-	}
-	return keys, nil
 }
 
 func planRenameColumns(o *ast.RenameOp, input schemaEnv) ([]string, error) {
@@ -478,10 +193,6 @@ func planRemoveColumns(o *ast.RemoveOp, input schemaEnv) ([]string, []int, []*ta
 	return cols, indices, schemas, nil
 }
 
-func schemaFromColumns(cols []string, schemas []*table.TypeDescriptor) table.Schema {
-	return table.NewTableWithSchemas(cols, schemas).Schema()
-}
-
 func tableFromOutputSchema(schema table.Schema) *table.Table {
 	cols := make([]string, len(schema.Columns))
 	types := make([]*table.TypeDescriptor, len(schema.Columns))
@@ -492,37 +203,9 @@ func tableFromOutputSchema(schema table.Schema) *table.Table {
 	return table.NewTableWithSchemas(cols, types)
 }
 
-func rawSchemaFromColumns(cols []string, schemas []*table.TypeDescriptor) table.Schema {
-	return table.NewSchema(cols, schemas)
-}
-
-func countOutputSchema() table.Schema {
-	return schemaFromColumns([]string{"count"}, []*table.TypeDescriptor{{Kind: table.TypeInt}})
-}
-
-func describeOutputSchema() table.Schema {
-	return schemaFromColumns(
-		[]string{"column", "type", "row_count", "schema"},
-		[]*table.TypeDescriptor{
-			{Kind: table.TypeString},
-			{Kind: table.TypeString},
-			{Kind: table.TypeInt},
-			{Kind: table.TypeString},
-		},
-	)
-}
-
-// executePlan executes a pipeline plan against rows.
-func executePlan(plan *pipelinePlan, input *table.Table) (*table.Table, error) {
-	if err := validatePlanInputTableSchema(plan.InputSchema, input); err != nil {
-		return nil, err
-	}
-	return executePlannedPipeline(plan, input)
-}
-
-func executePlannedPipeline(plan *pipelinePlan, input *table.Table) (*table.Table, error) {
+func executePlannedOps(ops []plannedOp, input *table.Table) (*table.Table, error) {
 	current := input
-	for _, op := range plan.Ops {
+	for _, op := range ops {
 		var err error
 		current, err = execPlannedOp(op, current)
 		if err != nil {
@@ -530,30 +213,6 @@ func executePlannedPipeline(plan *pipelinePlan, input *table.Table) (*table.Tabl
 		}
 	}
 	return current, nil
-}
-
-func validatePlanInputTableSchema(want table.Schema, got *table.Table) error {
-	if got == nil {
-		if len(want.Columns) == 0 {
-			return nil
-		}
-		return fmt.Errorf("execute plan: input schema column count mismatch: planned %d columns, got 0", len(want.Columns))
-	}
-	env := schemaEnvFromTable(got)
-	if len(want.Columns) != len(env.columns) {
-		return fmt.Errorf("execute plan: input schema column count mismatch: planned %d columns, got %d", len(want.Columns), len(env.columns))
-	}
-	for i := range want.Columns {
-		w := want.Columns[i]
-		if w.Name != env.columns[i] {
-			return fmt.Errorf("execute plan: input schema column %d mismatch: planned %q, got %q", i, w.Name, env.columns[i])
-		}
-		gotSchema := env.rawSchema(i)
-		if !table.Same(w.Type, gotSchema) {
-			return fmt.Errorf("execute plan: input schema for column %q mismatch: planned %s, got %s", w.Name, table.Render(w.Type), table.Render(gotSchema))
-		}
-	}
-	return nil
 }
 
 func execPlannedOp(op plannedOp, input *table.Table) (*table.Table, error) {

@@ -92,7 +92,7 @@ func TestCompiledPredicateMatchesGenericTypedEvaluation(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			typed, err := planFilterExpr(tc.expr, tbl)
+			typed, err := planPhysicalFilterExprForTest(tc.expr, tbl)
 			if err != nil {
 				t.Fatalf("plan filter: %v", err)
 			}
@@ -128,7 +128,7 @@ func TestCompiledRowValueMatchesGenericTypedEvaluation(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			typed, err := planTransformExpr(tc.expr, tbl)
+			typed, err := planPhysicalTransformExprForTest(tc.expr, tbl)
 			if err != nil {
 				t.Fatalf("plan transform: %v", err)
 			}

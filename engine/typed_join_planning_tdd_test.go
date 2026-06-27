@@ -251,9 +251,9 @@ func TestTypedJoinPlanningTDDPlannerWrapperPreservesSchemas(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	plan, err := planSchemaPipelineFromTable(left, q.Ops)
+	plan, err := planPhysicalPipelineFromTableForTest(left, q.Ops)
 	if err != nil {
-		t.Fatalf("planSchemaPipelineFromTable: %v", err)
+		t.Fatalf("planPhysicalPipelineFromTableForTest: %v", err)
 	}
 	if got := plan.OutputSchema.Columns[0].Name; got != "count" {
 		t.Fatalf("planned output column: got %q, want count", got)

@@ -16,11 +16,22 @@ func Execute(query *ast.Query, input *table.Table, load LoadFunc) (*table.Table,
 	if len(query.Ops) == 0 {
 		return input, nil
 	}
-	plan, err := planSchemaPipelineFromTableWithLoad(input, query.Ops, load)
+	logical, err := planLogicalPipelineFromTableWithLoad(input, query.Ops, load)
 	if err != nil {
 		return nil, err
 	}
-	return executePlannedPipeline(plan, input)
+	var optimized optimizedLogicalPipeline
+	if err := optimizeLogicalPipelineInto(logical, &optimized); err != nil {
+		return nil, err
+	}
+	var physical physicalPipeline
+	if err := planPhysicalPipelineInto(&optimized, &physical); err != nil {
+		return nil, err
+	}
+	// The physical plan was derived from this input table above, so validating
+	// the plan input schema here would be redundant. Test-only helpers validate
+	// mismatches when executing prebuilt plans directly.
+	return executePlannedOps(physical.Ops, input)
 }
 
 // resolveColumnPath walks a dot-path (e.g. ["address", "city"]) to extract a value from a row.
@@ -129,39 +140,6 @@ type projectionPlan struct {
 	topLevelIdx []int
 }
 
-func planProjectionsInEnv(opName string, paths [][]string, env schemaEnv) (*projectionPlan, error) {
-	plan := &projectionPlan{
-		cols:        make([]string, 0, len(paths)),
-		schemas:     make([]*table.TypeDescriptor, len(paths)),
-		projections: make([]plannedProjection, len(paths)),
-		topLevelIdx: make([]int, len(paths)),
-	}
-	topLevelOnly := true
-	for i, path := range paths {
-		bound, err := bindColumnPathInEnv(env, path, &ast.ColumnExpr{Path: path})
-		if err != nil {
-			return nil, fmt.Errorf("%s %q: %w", opName, strings.Join(path, "."), err)
-		}
-		if err := validatePathDoesNotTraverseUnionInEnv(opName, env, path); err != nil {
-			return nil, err
-		}
-		base := pathToColumnName(path)
-		name := uniqueColumnName(base, plan.cols)
-		plan.cols = append(plan.cols, name)
-		plan.schemas[i] = bound.typ
-		plan.projections[i] = plannedProjection{column: *bound}
-		if len(path) == 1 {
-			plan.topLevelIdx[i] = bound.topIndex
-		} else {
-			topLevelOnly = false
-		}
-	}
-	if !topLevelOnly {
-		plan.topLevelIdx = nil
-	}
-	return plan, nil
-}
-
 func unionBeforePathEndInEnv(env schemaEnv, path []string) *table.TypeDescriptor {
 	if len(path) < 2 {
 		return nil
@@ -179,7 +157,7 @@ func unionBeforePathEndInSchema(schema *table.TypeDescriptor, path []string) *ta
 	}
 	cur := schema
 	for _, seg := range path {
-		cur = table.FinalizeSchema(cur)
+		cur = finalizePlanningSchema(cur)
 		if cur == nil {
 			return nil
 		}

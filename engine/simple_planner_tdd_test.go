@@ -89,14 +89,14 @@ func requireSimplePlannerSchema(t *testing.T, got table.Schema, want ...string) 
 
 func requireSimplePlannerErrorContains(t *testing.T, input table.Schema, pipeline string, wants ...string) {
 	t.Helper()
-	_, err := planSchemaPipeline(input, parseSimplePlannerOps(t, pipeline))
+	_, err := planPhysicalPipelineForTest(input, parseSimplePlannerOps(t, pipeline))
 	if err == nil {
-		t.Fatalf("planSchemaPipeline(%q): expected error", pipeline)
+		t.Fatalf("planPhysicalPipelineForTest(%q): expected error", pipeline)
 	}
 	msg := strings.ToLower(err.Error())
 	for _, want := range wants {
 		if !strings.Contains(msg, strings.ToLower(want)) {
-			t.Fatalf("planSchemaPipeline(%q): got error %q, want substring %q", pipeline, err, want)
+			t.Fatalf("planPhysicalPipelineForTest(%q): got error %q, want substring %q", pipeline, err, want)
 		}
 	}
 }
@@ -112,9 +112,9 @@ func TestSimplePlannerTDDPlansSchemaPreservingOpsWithoutRows(t *testing.T) {
 		"sort city, -age",
 	} {
 		t.Run(pipeline, func(t *testing.T) {
-			plan, err := planSchemaPipeline(input.Schema(), parseSimplePlannerOps(t, pipeline))
+			plan, err := planPhysicalPipelineForTest(input.Schema(), parseSimplePlannerOps(t, pipeline))
 			if err != nil {
-				t.Fatalf("planSchemaPipeline(%q): %v", pipeline, err)
+				t.Fatalf("planPhysicalPipelineForTest(%q): %v", pipeline, err)
 			}
 			requireSimplePlannerSchema(t, plan.OutputSchema,
 				"name:string",
@@ -210,9 +210,9 @@ func TestSimplePlannerTDDPlansShapeChangingSimpleOpsWithoutRows(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			plan, err := planSchemaPipeline(input.Schema(), parseSimplePlannerOps(t, tc.pipeline))
+			plan, err := planPhysicalPipelineForTest(input.Schema(), parseSimplePlannerOps(t, tc.pipeline))
 			if err != nil {
-				t.Fatalf("planSchemaPipeline(%q): %v", tc.pipeline, err)
+				t.Fatalf("planPhysicalPipelineForTest(%q): %v", tc.pipeline, err)
 			}
 			requireSimplePlannerSchema(t, plan.OutputSchema, tc.want...)
 			if len(plan.Ops) != len(parseSimplePlannerOps(t, tc.pipeline)) {
@@ -248,9 +248,9 @@ func TestSimplePlannerTDDExecutionUsesBoundSortColumnForMatchingSchema(t *testin
 		[]string{"name", "age"},
 		[]*table.TypeDescriptor{{Kind: table.TypeString}, {Kind: table.TypeString}},
 	)
-	plan, err := planSchemaPipeline(plannedInput.Schema(), parseSimplePlannerOps(t, "sort age"))
+	plan, err := planPhysicalPipelineForTest(plannedInput.Schema(), parseSimplePlannerOps(t, "sort age"))
 	if err != nil {
-		t.Fatalf("planSchemaPipeline: %v", err)
+		t.Fatalf("planPhysicalPipelineForTest: %v", err)
 	}
 
 	input := table.NewTableWithSchemas(
@@ -274,9 +274,9 @@ func TestSimplePlannerTDDExecutionRejectsSwappedSchemaBeforeUsingBoundIndexes(t 
 		[]string{"name", "age"},
 		[]*table.TypeDescriptor{{Kind: table.TypeString}, {Kind: table.TypeString}},
 	)
-	plan, err := planSchemaPipeline(plannedInput.Schema(), parseSimplePlannerOps(t, "sort age"))
+	plan, err := planPhysicalPipelineForTest(plannedInput.Schema(), parseSimplePlannerOps(t, "sort age"))
 	if err != nil {
-		t.Fatalf("planSchemaPipeline: %v", err)
+		t.Fatalf("planPhysicalPipelineForTest: %v", err)
 	}
 
 	swapped := table.NewTableWithSchemas(
@@ -303,9 +303,9 @@ func TestSimplePlannerTDDPlannedExecutionRejectsMismatchedInputSchema(t *testing
 		[]string{"name", "age"},
 		[]*table.TypeDescriptor{{Kind: table.TypeString}, {Kind: table.TypeInt}},
 	)
-	plan, err := planSchemaPipeline(input.Schema(), parseSimplePlannerOps(t, "select age"))
+	plan, err := planPhysicalPipelineForTest(input.Schema(), parseSimplePlannerOps(t, "select age"))
 	if err != nil {
-		t.Fatalf("planSchemaPipeline: %v", err)
+		t.Fatalf("planPhysicalPipelineForTest: %v", err)
 	}
 
 	cases := []struct {
@@ -380,7 +380,7 @@ func TestSimplePlannerTDDRejectsInvalidSimpleOpsBeforeRows(t *testing.T) {
 
 func TestSimplePlannerTDDRejectsMalformedRemoveDotPathAST(t *testing.T) {
 	input := simplePlannerInputTable().Schema()
-	_, err := planSchemaPipeline(input, []ast.Op{&ast.RemoveOp{Columns: [][]string{{"address", "city"}}}})
+	_, err := planPhysicalPipelineForTest(input, []ast.Op{&ast.RemoveOp{Columns: [][]string{{"address", "city"}}}})
 	if err == nil {
 		t.Fatal("expected remove dot-path planning error")
 	}
@@ -393,9 +393,9 @@ func TestSimplePlannerTDDRejectsMalformedRemoveDotPathAST(t *testing.T) {
 
 func TestSimplePlannerTDDPlannedExecutionUsesPlannedMetadata(t *testing.T) {
 	input := simplePlannerInputTable()
-	plan, err := planSchemaPipeline(input.Schema(), parseSimplePlannerOps(t, "filter { false } | select address.city, city | distinct address_city, city | describe"))
+	plan, err := planPhysicalPipelineForTest(input.Schema(), parseSimplePlannerOps(t, "filter { false } | select address.city, city | distinct address_city, city | describe"))
 	if err != nil {
-		t.Fatalf("planSchemaPipeline: %v", err)
+		t.Fatalf("planPhysicalPipelineForTest: %v", err)
 	}
 	requireSimplePlannerSchema(t, plan.OutputSchema,
 		"column:string",
@@ -423,9 +423,13 @@ func TestSimplePlannerTDDExecutionUsesPlannedOutputSchemaAsAuthority(t *testing.
 		t.Fatalf("AddRowTyped: %v", err)
 	}
 
-	projections, err := planProjectionsInEnv("select", [][]string{{"age"}}, schemaEnvFromTable(input))
+	projections, err := physicalProjectionPlan(schemaEnvFromTable(input), []logicalPathBinding{{
+		name:   "age",
+		path:   []string{"age"},
+		schema: &table.TypeDescriptor{Kind: table.TypeInt},
+	}}, true)
 	if err != nil {
-		t.Fatalf("planProjectionsInEnv: %v", err)
+		t.Fatalf("physicalProjectionPlan: %v", err)
 	}
 	selected, err := execPlannedSelect(plannedSelect{
 		plannedBase: plannedBase{output: table.Schema{Columns: []table.SchemaColumn{
@@ -443,7 +447,7 @@ func TestSimplePlannerTDDExecutionUsesPlannedOutputSchemaAsAuthority(t *testing.
 func TestSimplePlannerTDDFixedOutputOpsUseCanonicalSchemas(t *testing.T) {
 	input := simplePlannerInputTable()
 
-	countPlan, err := planSchemaPipeline(input.Schema(), parseSimplePlannerOps(t, "count"))
+	countPlan, err := planPhysicalPipelineForTest(input.Schema(), parseSimplePlannerOps(t, "count"))
 	if err != nil {
 		t.Fatalf("plan count: %v", err)
 	}
@@ -456,7 +460,7 @@ func TestSimplePlannerTDDFixedOutputOpsUseCanonicalSchemas(t *testing.T) {
 	assertColumnsExact(t, counted, "count")
 	requireSimplePlannerSchema(t, counted.Schema(), "count:int")
 
-	describePlan, err := planSchemaPipeline(input.Schema(), parseSimplePlannerOps(t, "describe"))
+	describePlan, err := planPhysicalPipelineForTest(input.Schema(), parseSimplePlannerOps(t, "describe"))
 	if err != nil {
 		t.Fatalf("plan describe: %v", err)
 	}

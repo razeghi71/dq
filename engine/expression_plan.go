@@ -17,7 +17,6 @@ type boundLiteral struct {
 }
 
 type boundColumn struct {
-	raw        *ast.ColumnExpr
 	rawPath    []string
 	topIndex   int
 	nestedPath []string
@@ -72,6 +71,67 @@ func (*boundList) boundExprNode()    {}
 func (*boundIsNull) boundExprNode()  {}
 func (*boundCoerce) boundExprNode()  {}
 
+type logicalBoundExpr interface {
+	logicalBoundExprNode()
+}
+
+type logicalBoundLiteral struct {
+	raw *ast.LiteralExpr
+}
+
+type logicalBoundColumn struct {
+	rawPath []string
+	typ     *table.TypeDescriptor
+}
+
+type logicalBoundBinary struct {
+	raw         *ast.BinaryExpr
+	left, right logicalBoundExpr
+}
+
+type logicalBoundUnary struct {
+	raw     *ast.UnaryExpr
+	operand logicalBoundExpr
+}
+
+type logicalBoundCall struct {
+	raw  *ast.FuncCallExpr
+	args []logicalBoundExpr
+}
+
+type logicalBoundStructField struct {
+	name string
+	raw  ast.StructField
+	expr logicalBoundExpr
+}
+
+type logicalBoundStruct struct {
+	raw    *ast.StructExpr
+	fields []logicalBoundStructField
+}
+
+type logicalBoundList struct {
+	raw      *ast.ListExpr
+	elements []logicalBoundExpr
+}
+
+type logicalBoundIsNull struct {
+	raw     *ast.IsNullExpr
+	operand logicalBoundExpr
+}
+
+type logicalBoundCoerce struct{}
+
+func (*logicalBoundLiteral) logicalBoundExprNode() {}
+func (*logicalBoundColumn) logicalBoundExprNode()  {}
+func (*logicalBoundBinary) logicalBoundExprNode()  {}
+func (*logicalBoundUnary) logicalBoundExprNode()   {}
+func (*logicalBoundCall) logicalBoundExprNode()    {}
+func (*logicalBoundStruct) logicalBoundExprNode()  {}
+func (*logicalBoundList) logicalBoundExprNode()    {}
+func (*logicalBoundIsNull) logicalBoundExprNode()  {}
+func (*logicalBoundCoerce) logicalBoundExprNode()  {}
+
 type typedExpr struct {
 	bound    boundExpr
 	raw      ast.Expr
@@ -90,6 +150,25 @@ type typedStructField struct {
 	name string
 	raw  ast.StructField
 	expr typedExpr
+}
+
+type logicalTypedExpr struct {
+	bound    logicalBoundExpr
+	raw      ast.Expr
+	typ      *table.TypeDescriptor
+	left     *logicalTypedExpr
+	right    *logicalTypedExpr
+	operand  *logicalTypedExpr
+	args     []logicalTypedExpr
+	fields   []logicalTypedStructField
+	elements []logicalTypedExpr
+	coerceTo *table.TypeDescriptor
+}
+
+type logicalTypedStructField struct {
+	name string
+	raw  ast.StructField
+	expr logicalTypedExpr
 }
 
 type schemaEnv struct {
@@ -125,17 +204,29 @@ func schemaEnvFromSchema(schema table.Schema) schemaEnv {
 	env := schemaEnv{
 		columns: make([]string, len(schema.Columns)),
 		raw:     make([]*table.TypeDescriptor, len(schema.Columns)),
-		final:   make([]*table.TypeDescriptor, len(schema.Columns)),
 	}
 	for i, col := range schema.Columns {
 		env.columns[i] = col.Name
-		env.raw[i] = table.NormalizeSchema(col.Type)
-		env.final[i] = table.FinalizeSchema(col.Type)
-		if env.raw[i] == nil {
-			env.raw[i] = env.final[i]
-		}
+		env.raw[i] = normalizePlanningSchema(col.Type)
 	}
 	return env
+}
+
+// schemaEnvFromOwnedColumns normalizes schemas in place and keeps the supplied
+// slices. Callers must pass slices they own; use schemaEnvFromSchema when a
+// defensive copy is needed.
+func schemaEnvFromOwnedColumns(columns []string, schemas []*table.TypeDescriptor, final bool) schemaEnv {
+	for i := range columns {
+		var typ *table.TypeDescriptor
+		if i < len(schemas) {
+			typ = normalizePlanningSchema(schemas[i])
+			if final {
+				typ = finalizePlanningSchema(typ)
+			}
+			schemas[i] = typ
+		}
+	}
+	return schemaEnv{columns: columns, raw: schemas}
 }
 
 func (e schemaEnv) colIndex(name string) int {
@@ -155,8 +246,22 @@ func (e schemaEnv) rawSchema(i int) *table.TypeDescriptor {
 }
 
 func (e schemaEnv) finalSchema(i int) *table.TypeDescriptor {
-	if i < 0 || i >= len(e.final) {
+	if i < 0 || i >= len(e.columns) {
 		return nil
+	}
+	if i >= len(e.final) {
+		return finalizePlanningSchema(e.rawSchema(i))
+	}
+	if e.final[i] == nil {
+		raw := e.rawSchema(i)
+		if raw == nil {
+			return nil
+		}
+		// schemaEnv is intentionally passed by value throughout planning, but
+		// the final slice's backing array is shared. This memoizes finalized
+		// schemas without copying the environment on every lookup; planning is
+		// single-threaded.
+		e.final[i] = finalizePlanningSchema(raw)
 	}
 	return e.final[i]
 }
@@ -184,88 +289,165 @@ func (e schemaEnv) rawSchemas() []*table.TypeDescriptor {
 	return schemas
 }
 
-func bindExpression(expr ast.Expr, t *table.Table) (boundExpr, error) {
-	return bindExpressionInEnv(expr, schemaEnvFromTable(t))
+func normalizePlanningSchema(schema *table.TypeDescriptor) *table.TypeDescriptor {
+	if schema == nil {
+		return nil
+	}
+	if schemaIsNormalized(schema) {
+		return schema
+	}
+	return table.NormalizeSchema(schema)
 }
 
-func bindExpressionInEnv(expr ast.Expr, env schemaEnv) (boundExpr, error) {
+func schemaIsNormalized(schema *table.TypeDescriptor) bool {
+	if schema == nil {
+		return true
+	}
+	switch schema.Kind {
+	case table.TypeRecord:
+		for i, field := range schema.Fields {
+			if i > 0 && schema.Fields[i-1].Name >= field.Name {
+				return false
+			}
+			if !schemaIsNormalized(field.Type) {
+				return false
+			}
+		}
+	case table.TypeList:
+		return schemaIsNormalized(schema.Elem)
+	case table.TypeUnion:
+		return false
+	}
+	return true
+}
+
+func finalizePlanningSchema(schema *table.TypeDescriptor) *table.TypeDescriptor {
+	if schema == nil {
+		return nil
+	}
+	if !schemaNeedsFinalization(schema) {
+		return schema
+	}
+	return table.FinalizeSchema(schema)
+}
+
+func schemaNeedsFinalization(schema *table.TypeDescriptor) bool {
+	if schema == nil {
+		return false
+	}
+	switch schema.Kind {
+	case table.TypeNull:
+		return true
+	case table.TypeRecord:
+		for _, field := range schema.Fields {
+			if schemaNeedsFinalization(field.Type) {
+				return true
+			}
+		}
+	case table.TypeList:
+		return schema.Elem == nil || schemaNeedsFinalization(schema.Elem)
+	case table.TypeUnion:
+		for _, branch := range schema.Branches {
+			if schemaNeedsFinalization(branch) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func bindLogicalExpressionInEnv(expr ast.Expr, env schemaEnv) (logicalBoundExpr, error) {
 	switch e := expr.(type) {
 	case *ast.LiteralExpr:
-		return &boundLiteral{raw: e}, nil
+		return &logicalBoundLiteral{raw: e}, nil
 	case *ast.ColumnExpr:
-		return bindColumnExprInEnv(e, env)
+		return bindColumnPathLogicalInEnv(env, e.Path)
 	case *ast.BinaryExpr:
-		left, err := bindExpressionInEnv(e.Left, env)
+		left, err := bindLogicalExpressionInEnv(e.Left, env)
 		if err != nil {
 			return nil, err
 		}
-		right, err := bindExpressionInEnv(e.Right, env)
+		right, err := bindLogicalExpressionInEnv(e.Right, env)
 		if err != nil {
 			return nil, err
 		}
-		return &boundBinary{raw: e, left: left, right: right}, nil
+		return &logicalBoundBinary{raw: e, left: left, right: right}, nil
 	case *ast.UnaryExpr:
-		operand, err := bindExpressionInEnv(e.Operand, env)
+		operand, err := bindLogicalExpressionInEnv(e.Operand, env)
 		if err != nil {
 			return nil, err
 		}
-		return &boundUnary{raw: e, operand: operand}, nil
+		return &logicalBoundUnary{raw: e, operand: operand}, nil
 	case *ast.FuncCallExpr:
-		args := make([]boundExpr, len(e.Args))
+		args := make([]logicalBoundExpr, len(e.Args))
 		for i, arg := range e.Args {
-			bound, err := bindExpressionInEnv(arg, env)
+			bound, err := bindLogicalExpressionInEnv(arg, env)
 			if err != nil {
 				return nil, err
 			}
 			args[i] = bound
 		}
-		return &boundCall{raw: e, args: args}, nil
+		return &logicalBoundCall{raw: e, args: args}, nil
 	case *ast.StructExpr:
-		fields := make([]boundStructField, len(e.Fields))
+		fields := make([]logicalBoundStructField, len(e.Fields))
 		for i, field := range e.Fields {
-			bound, err := bindExpressionInEnv(field.Expr, env)
+			bound, err := bindLogicalExpressionInEnv(field.Expr, env)
 			if err != nil {
 				return nil, err
 			}
-			fields[i] = boundStructField{name: field.Name, raw: field, expr: bound}
+			fields[i] = logicalBoundStructField{name: field.Name, raw: field, expr: bound}
 		}
-		return &boundStruct{raw: e, fields: fields}, nil
+		return &logicalBoundStruct{raw: e, fields: fields}, nil
 	case *ast.ListExpr:
-		elements := make([]boundExpr, len(e.Elements))
+		elements := make([]logicalBoundExpr, len(e.Elements))
 		for i, elem := range e.Elements {
-			bound, err := bindExpressionInEnv(elem, env)
+			bound, err := bindLogicalExpressionInEnv(elem, env)
 			if err != nil {
 				return nil, err
 			}
 			elements[i] = bound
 		}
-		return &boundList{raw: e, elements: elements}, nil
+		return &logicalBoundList{raw: e, elements: elements}, nil
 	case *ast.IsNullExpr:
-		operand, err := bindExpressionInEnv(e.Operand, env)
+		operand, err := bindLogicalExpressionInEnv(e.Operand, env)
 		if err != nil {
 			return nil, err
 		}
-		return &boundIsNull{raw: e, operand: operand}, nil
+		return &logicalBoundIsNull{raw: e, operand: operand}, nil
 	default:
 		return nil, fmt.Errorf("unknown expression type %T", expr)
 	}
 }
 
-func bindColumnExprInEnv(e *ast.ColumnExpr, env schemaEnv) (*boundColumn, error) {
-	return bindColumnPathInEnv(env, e.Path, e)
+func bindColumnPathInEnv(env schemaEnv, path []string) (*boundColumn, error) {
+	idx, typ, err := resolveColumnPathInEnv(env, path)
+	if err != nil {
+		return nil, err
+	}
+	rawPath := clonePath(path)
+	return &boundColumn{
+		rawPath:    rawPath,
+		topIndex:   idx,
+		nestedPath: clonePath(path[1:]),
+		typ:        typ,
+	}, nil
 }
 
-func bindColumnPath(t *table.Table, path []string, raw *ast.ColumnExpr) (*boundColumn, error) {
-	return bindColumnPathInEnv(schemaEnvFromTable(t), path, raw)
+func bindColumnPathLogicalInEnv(env schemaEnv, path []string) (*logicalBoundColumn, error) {
+	_, typ, err := resolveColumnPathInEnv(env, path)
+	if err != nil {
+		return nil, err
+	}
+	return &logicalBoundColumn{rawPath: clonePath(path), typ: typ}, nil
 }
 
-func bindColumnPathInEnv(env schemaEnv, path []string, raw *ast.ColumnExpr) (*boundColumn, error) {
+func resolveColumnPathInEnv(env schemaEnv, path []string) (int, *table.TypeDescriptor, error) {
 	if len(path) == 0 {
-		return nil, fmt.Errorf("empty column path")
+		return -1, nil, fmt.Errorf("empty column path")
 	}
 	idx := env.colIndex(path[0])
 	if idx < 0 {
-		return nil, columnNotFoundError(path[0], env.columns)
+		return -1, nil, columnNotFoundError(path[0], env.columns)
 	}
 	typ := env.rawSchema(idx)
 	if typ == nil {
@@ -274,17 +456,17 @@ func bindColumnPathInEnv(env schemaEnv, path []string, raw *ast.ColumnExpr) (*bo
 	parentNullable := false
 	for _, seg := range path[1:] {
 		if typ == nil {
-			return nil, fmt.Errorf("field %q not found in column %q: parent schema is unknown", seg, strings.Join(path, "."))
+			return -1, nil, fmt.Errorf("field %q not found in column %q: parent schema is unknown", seg, strings.Join(path, "."))
 		}
 		if typ.Nullable || typ.Kind == table.TypeNull {
 			parentNullable = true
 		}
-		current := table.FinalizeSchema(typ)
+		current := finalizePlanningSchema(typ)
 		switch current.Kind {
 		case table.TypeUnion:
-			return nil, unionPathTraversalError(path, current)
+			return -1, nil, unionPathTraversalError(path, current)
 		case table.TypeList:
-			return nil, fmt.Errorf("cannot access field %q through list column %q of type %s", seg, strings.Join(path, "."), current.String())
+			return -1, nil, fmt.Errorf("cannot access field %q through list column %q of type %s", seg, strings.Join(path, "."), current.String())
 		case table.TypeRecord:
 			var next *table.TypeDescriptor
 			for _, field := range current.Fields {
@@ -294,48 +476,42 @@ func bindColumnPathInEnv(env schemaEnv, path []string, raw *ast.ColumnExpr) (*bo
 				}
 			}
 			if next == nil {
-				return nil, fmt.Errorf("field %q not found in column %q of type %s", seg, path[0], current.String())
+				return -1, nil, fmt.Errorf("field %q not found in column %q of type %s", seg, path[0], current.String())
 			}
 			typ = next
 		default:
-			return nil, fmt.Errorf("cannot access field %q in column %q of type %s", seg, path[0], current.String())
+			return -1, nil, fmt.Errorf("cannot access field %q in column %q of type %s", seg, path[0], current.String())
 		}
 	}
-	typ = table.NormalizeSchema(typ)
+	typ = normalizePlanningSchema(typ)
 	if parentNullable {
 		typ = table.WithNullable(typ)
 	}
-	return &boundColumn{
-		raw:        raw,
-		rawPath:    append([]string(nil), path...),
-		topIndex:   idx,
-		nestedPath: append([]string(nil), path[1:]...),
-		typ:        typ,
-	}, nil
+	return idx, typ, nil
 }
 
-func bindReduceExpression(expr ast.Expr, nestedSchema *table.TypeDescriptor) (boundExpr, error) {
+func bindLogicalReduceExpression(expr ast.Expr, nestedSchema *table.TypeDescriptor) (logicalBoundExpr, error) {
 	switch e := expr.(type) {
 	case *ast.LiteralExpr:
-		return &boundLiteral{raw: e}, nil
+		return &logicalBoundLiteral{raw: e}, nil
 	case *ast.ColumnExpr:
 		return nil, fmt.Errorf("column %q cannot be used directly in reduce; use an aggregate such as first(%s)", strings.Join(e.Path, "."), strings.Join(e.Path, "."))
 	case *ast.BinaryExpr:
-		left, err := bindReduceExpression(e.Left, nestedSchema)
+		left, err := bindLogicalReduceExpression(e.Left, nestedSchema)
 		if err != nil {
 			return nil, err
 		}
-		right, err := bindReduceExpression(e.Right, nestedSchema)
+		right, err := bindLogicalReduceExpression(e.Right, nestedSchema)
 		if err != nil {
 			return nil, err
 		}
-		return &boundBinary{raw: e, left: left, right: right}, nil
+		return &logicalBoundBinary{raw: e, left: left, right: right}, nil
 	case *ast.UnaryExpr:
-		operand, err := bindReduceExpression(e.Operand, nestedSchema)
+		operand, err := bindLogicalReduceExpression(e.Operand, nestedSchema)
 		if err != nil {
 			return nil, err
 		}
-		return &boundUnary{raw: e, operand: operand}, nil
+		return &logicalBoundUnary{raw: e, operand: operand}, nil
 	case *ast.FuncCallExpr:
 		spec, ok := builtinCatalog[e.Name]
 		if !ok {
@@ -344,27 +520,27 @@ func bindReduceExpression(expr ast.Expr, nestedSchema *table.TypeDescriptor) (bo
 		if spec.Category != builtinAggregate {
 			return nil, nonAggregateReduceFunctionError(e.Name)
 		}
-		args, err := bindAggregateArgs(e, nestedSchema)
+		args, err := bindLogicalAggregateArgs(e, nestedSchema)
 		if err != nil {
 			return nil, err
 		}
-		return &boundCall{raw: e, args: args}, nil
+		return &logicalBoundCall{raw: e, args: args}, nil
 	case *ast.StructExpr:
 		return nil, fmt.Errorf("struct constructor is not supported in reduce")
 	case *ast.ListExpr:
 		return nil, fmt.Errorf("list constructor is not supported in reduce")
 	case *ast.IsNullExpr:
-		operand, err := bindReduceExpression(e.Operand, nestedSchema)
+		operand, err := bindLogicalReduceExpression(e.Operand, nestedSchema)
 		if err != nil {
 			return nil, err
 		}
-		return &boundIsNull{raw: e, operand: operand}, nil
+		return &logicalBoundIsNull{raw: e, operand: operand}, nil
 	default:
 		return nil, fmt.Errorf("unknown expression type %T", expr)
 	}
 }
 
-func bindAggregateArgs(e *ast.FuncCallExpr, nestedSchema *table.TypeDescriptor) ([]boundExpr, error) {
+func bindLogicalAggregateArgs(e *ast.FuncCallExpr, nestedSchema *table.TypeDescriptor) ([]logicalBoundExpr, error) {
 	if err := validateAggregateFunctionArity(e); err != nil {
 		return nil, err
 	}
@@ -378,36 +554,39 @@ func bindAggregateArgs(e *ast.FuncCallExpr, nestedSchema *table.TypeDescriptor) 
 	if !ok {
 		return nil, fmt.Errorf("%s() argument must be a column reference", e.Name)
 	}
-	bound, err := bindAggregateColumnPath(nestedSchema, col.Path, col)
+	bound, err := bindLogicalAggregateColumnPath(nestedSchema, col.Path)
 	if err != nil {
 		return nil, fmt.Errorf("%s(%s): %w", e.Name, strings.Join(col.Path, "."), err)
 	}
-	return []boundExpr{bound}, nil
+	return []logicalBoundExpr{bound}, nil
 }
 
-func bindAggregateColumnPath(nestedSchema *table.TypeDescriptor, path []string, raw *ast.ColumnExpr) (*boundColumn, error) {
+func bindLogicalAggregateColumnPath(nestedSchema *table.TypeDescriptor, path []string) (*logicalBoundColumn, error) {
 	env, err := envForRecordSchema(nestedSchema)
 	if err != nil {
 		return nil, err
 	}
-	return bindColumnPathInEnv(env, path, raw)
+	return bindColumnPathLogicalInEnv(env, path)
 }
 
 func envForRecordSchema(schema *table.TypeDescriptor) (schemaEnv, error) {
 	if schema == nil {
 		return schemaEnv{}, fmt.Errorf("nested row schema is unknown")
 	}
-	rec := table.FinalizeSchema(schema)
+	rec := finalizePlanningSchema(normalizePlanningSchema(schema))
 	if rec.Kind != table.TypeRecord {
 		return schemaEnv{}, fmt.Errorf("nested row schema must be a record, got %s", rec.String())
 	}
-	cols := make([]string, len(rec.Fields))
-	schemas := make([]*table.TypeDescriptor, len(rec.Fields))
-	for i, field := range rec.Fields {
-		cols[i] = field.Name
-		schemas[i] = field.Type
+	env := schemaEnv{
+		columns: make([]string, len(rec.Fields)),
+		raw:     make([]*table.TypeDescriptor, len(rec.Fields)),
+		final:   make([]*table.TypeDescriptor, len(rec.Fields)),
 	}
-	return schemaEnvFromSchema(table.NewSchema(cols, schemas)), nil
+	for i, field := range rec.Fields {
+		env.columns[i] = field.Name
+		env.raw[i] = normalizePlanningSchema(field.Type)
+	}
+	return env, nil
 }
 
 func columnNotFoundError(name string, columns []string) error {
@@ -466,176 +645,201 @@ func minInt(values ...int) int {
 	return out
 }
 
-func typeCheckExpression(expr boundExpr) (typedExpr, error) {
+func typeCheckLogicalExpression(expr logicalBoundExpr) (logicalTypedExpr, error) {
 	switch e := expr.(type) {
-	case *boundLiteral:
-		return typedExpr{bound: expr, raw: e.raw, typ: literalType(e.raw)}, nil
-	case *boundColumn:
-		return typedExpr{bound: expr, raw: e.raw, typ: table.NormalizeSchema(e.typ)}, nil
-	case *boundBinary:
-		left, err := typeCheckExpression(e.left)
+	case *logicalBoundLiteral:
+		return logicalTypedExpr{bound: expr, raw: e.raw, typ: literalType(e.raw)}, nil
+	case *logicalBoundColumn:
+		return logicalTypedExpr{bound: expr, raw: &ast.ColumnExpr{Path: e.rawPath}, typ: normalizePlanningSchema(e.typ)}, nil
+	case *logicalBoundBinary:
+		left, err := typeCheckLogicalExpression(e.left)
 		if err != nil {
-			return typedExpr{}, err
+			return logicalTypedExpr{}, err
 		}
-		right, err := typeCheckExpression(e.right)
+		right, err := typeCheckLogicalExpression(e.right)
 		if err != nil {
-			return typedExpr{}, err
+			return logicalTypedExpr{}, err
 		}
-		typ, err := checkBinarySignature(e.raw.Op, left, right)
+		typ, err := checkBinarySignature(e.raw.Op, logicalSignatureExpr(left), logicalSignatureExpr(right))
 		if err != nil {
-			return typedExpr{}, err
+			return logicalTypedExpr{}, err
 		}
-		return typedExpr{bound: expr, raw: e.raw, typ: typ, left: &left, right: &right}, nil
-	case *boundUnary:
-		operand, err := typeCheckExpression(e.operand)
+		return logicalTypedExpr{bound: expr, raw: e.raw, typ: typ, left: &left, right: &right}, nil
+	case *logicalBoundUnary:
+		operand, err := typeCheckLogicalExpression(e.operand)
 		if err != nil {
-			return typedExpr{}, err
+			return logicalTypedExpr{}, err
 		}
-		typ, err := checkUnarySignature(e.raw.Op, operand)
+		typ, err := checkUnarySignature(e.raw.Op, logicalSignatureExpr(operand))
 		if err != nil {
-			return typedExpr{}, err
+			return logicalTypedExpr{}, err
 		}
-		return typedExpr{bound: expr, raw: e.raw, typ: typ, operand: &operand}, nil
-	case *boundCall:
-		args := make([]typedExpr, len(e.args))
+		return logicalTypedExpr{bound: expr, raw: e.raw, typ: typ, operand: &operand}, nil
+	case *logicalBoundCall:
+		args := make([]logicalTypedExpr, len(e.args))
 		for i, arg := range e.args {
-			typed, err := typeCheckExpression(arg)
+			typed, err := typeCheckLogicalExpression(arg)
 			if err != nil {
-				return typedExpr{}, err
+				return logicalTypedExpr{}, err
 			}
 			args[i] = typed
 		}
 		spec, ok := builtinCatalog[e.raw.Name]
 		if !ok {
-			return typedExpr{}, fmt.Errorf("unknown function %q", e.raw.Name)
+			return logicalTypedExpr{}, fmt.Errorf("unknown function %q", e.raw.Name)
 		}
 		if spec.Category == builtinAggregate {
-			return typedExpr{}, aggregateOutsideReduceError(e.raw.Name)
+			return logicalTypedExpr{}, aggregateOutsideReduceError(e.raw.Name)
 		}
-		typ, err := spec.Check(args)
+		signatureArgs := logicalSignatureExprs(args)
+		typ, err := spec.Check(signatureArgs)
 		if err != nil {
-			return typedExpr{}, err
+			return logicalTypedExpr{}, err
 		}
-		out := typedExpr{bound: expr, raw: e.raw, typ: typ, args: args, callEval: spec.TypedEval}
+		out := logicalTypedExpr{bound: expr, raw: e.raw, typ: typ, args: args}
 		switch e.raw.Name {
 		case "coalesce":
-			if typedArgsNeedCoercion(args, typ) {
-				out = coerceTypedExpression(out, typ)
+			if typedArgsNeedCoercion(signatureArgs, typ) {
+				out = coerceLogicalTypedExpression(out, typ)
 			}
 		case "if":
 			if len(args) == 3 && (runtimeCoercionNeeded(args[1].typ, typ) || runtimeCoercionNeeded(args[2].typ, typ)) {
-				out = coerceTypedExpression(out, typ)
+				out = coerceLogicalTypedExpression(out, typ)
 			}
 		}
 		return out, nil
-	case *boundStruct:
+	case *logicalBoundStruct:
 		seen := make(map[string]bool, len(e.fields))
 		fields := make([]table.FieldDescriptor, len(e.fields))
-		typedFields := make([]typedStructField, len(e.fields))
+		typedFields := make([]logicalTypedStructField, len(e.fields))
 		for i, field := range e.fields {
 			if seen[field.name] {
-				return typedExpr{}, fmt.Errorf("struct() duplicate field %q", field.name)
+				return logicalTypedExpr{}, fmt.Errorf("struct() duplicate field %q", field.name)
 			}
 			seen[field.name] = true
-			typed, err := typeCheckExpression(field.expr)
+			typed, err := typeCheckLogicalExpression(field.expr)
 			if err != nil {
-				return typedExpr{}, err
+				return logicalTypedExpr{}, err
 			}
 			fields[i] = table.FieldDescriptor{Name: field.name, Type: typed.typ}
-			typedFields[i] = typedStructField{name: field.name, raw: field.raw, expr: typed}
+			typedFields[i] = logicalTypedStructField{name: field.name, raw: field.raw, expr: typed}
 		}
-		return typedExpr{bound: expr, raw: e.raw, typ: &table.TypeDescriptor{Kind: table.TypeRecord, Fields: fields}, fields: typedFields}, nil
-	case *boundList:
+		return logicalTypedExpr{bound: expr, raw: e.raw, typ: &table.TypeDescriptor{Kind: table.TypeRecord, Fields: fields}, fields: typedFields}, nil
+	case *logicalBoundList:
 		elems := make([]*table.TypeDescriptor, len(e.elements))
-		typedElems := make([]typedExpr, len(e.elements))
+		typedElems := make([]logicalTypedExpr, len(e.elements))
 		for i, elem := range e.elements {
-			typed, err := typeCheckExpression(elem)
+			typed, err := typeCheckLogicalExpression(elem)
 			if err != nil {
-				return typedExpr{}, err
+				return logicalTypedExpr{}, err
 			}
 			elems[i] = typed.typ
 			typedElems[i] = typed
 		}
 		elemSchema := table.UnifyListLiteralElems(elems)
-		out := typedExpr{bound: expr, raw: e.raw, typ: &table.TypeDescriptor{Kind: table.TypeList, Elem: elemSchema}, elements: typedElems}
-		if typedArgsNeedCoercion(typedElems, elemSchema) {
-			out = coerceTypedExpression(out, out.typ)
+		out := logicalTypedExpr{bound: expr, raw: e.raw, typ: &table.TypeDescriptor{Kind: table.TypeList, Elem: elemSchema}, elements: typedElems}
+		if typedArgsNeedCoercion(logicalSignatureExprs(typedElems), elemSchema) {
+			out = coerceLogicalTypedExpression(out, out.typ)
 		}
 		return out, nil
-	case *boundIsNull:
-		operand, err := typeCheckExpression(e.operand)
+	case *logicalBoundIsNull:
+		operand, err := typeCheckLogicalExpression(e.operand)
 		if err != nil {
-			return typedExpr{}, err
+			return logicalTypedExpr{}, err
 		}
-		return typedExpr{bound: expr, raw: e.raw, typ: &table.TypeDescriptor{Kind: table.TypeBool}, operand: &operand}, nil
+		return logicalTypedExpr{bound: expr, raw: e.raw, typ: &table.TypeDescriptor{Kind: table.TypeBool}, operand: &operand}, nil
 	default:
-		return typedExpr{}, fmt.Errorf("unknown bound expression type %T", expr)
+		return logicalTypedExpr{}, fmt.Errorf("unknown logical bound expression type %T", expr)
 	}
 }
 
-func typeCheckReduceExpression(expr boundExpr) (typedExpr, error) {
+func typeCheckLogicalReduceExpression(expr logicalBoundExpr) (logicalTypedExpr, error) {
 	switch e := expr.(type) {
-	case *boundLiteral:
-		return typedExpr{bound: expr, raw: e.raw, typ: literalType(e.raw)}, nil
-	case *boundColumn:
-		return typedExpr{bound: expr, raw: e.raw, typ: table.NormalizeSchema(e.typ)}, nil
-	case *boundBinary:
-		left, err := typeCheckReduceExpression(e.left)
+	case *logicalBoundLiteral:
+		return logicalTypedExpr{bound: expr, raw: e.raw, typ: literalType(e.raw)}, nil
+	case *logicalBoundColumn:
+		return logicalTypedExpr{bound: expr, raw: &ast.ColumnExpr{Path: e.rawPath}, typ: normalizePlanningSchema(e.typ)}, nil
+	case *logicalBoundBinary:
+		left, err := typeCheckLogicalReduceExpression(e.left)
 		if err != nil {
-			return typedExpr{}, err
+			return logicalTypedExpr{}, err
 		}
-		right, err := typeCheckReduceExpression(e.right)
+		right, err := typeCheckLogicalReduceExpression(e.right)
 		if err != nil {
-			return typedExpr{}, err
+			return logicalTypedExpr{}, err
 		}
-		typ, err := checkBinarySignature(e.raw.Op, left, right)
+		typ, err := checkBinarySignature(e.raw.Op, logicalSignatureExpr(left), logicalSignatureExpr(right))
 		if err != nil {
-			return typedExpr{}, err
+			return logicalTypedExpr{}, err
 		}
-		return typedExpr{bound: expr, raw: e.raw, typ: typ, left: &left, right: &right}, nil
-	case *boundUnary:
-		operand, err := typeCheckReduceExpression(e.operand)
+		return logicalTypedExpr{bound: expr, raw: e.raw, typ: typ, left: &left, right: &right}, nil
+	case *logicalBoundUnary:
+		operand, err := typeCheckLogicalReduceExpression(e.operand)
 		if err != nil {
-			return typedExpr{}, err
+			return logicalTypedExpr{}, err
 		}
-		typ, err := checkUnarySignature(e.raw.Op, operand)
+		typ, err := checkUnarySignature(e.raw.Op, logicalSignatureExpr(operand))
 		if err != nil {
-			return typedExpr{}, err
+			return logicalTypedExpr{}, err
 		}
-		return typedExpr{bound: expr, raw: e.raw, typ: typ, operand: &operand}, nil
-	case *boundCall:
-		args := make([]typedExpr, len(e.args))
+		return logicalTypedExpr{bound: expr, raw: e.raw, typ: typ, operand: &operand}, nil
+	case *logicalBoundCall:
+		args := make([]logicalTypedExpr, len(e.args))
 		for i, arg := range e.args {
-			typed, err := typeCheckReduceExpression(arg)
+			typed, err := typeCheckLogicalReduceExpression(arg)
 			if err != nil {
-				return typedExpr{}, err
+				return logicalTypedExpr{}, err
 			}
 			args[i] = typed
 		}
 		spec, ok := builtinCatalog[e.raw.Name]
 		if !ok {
-			return typedExpr{}, fmt.Errorf("unknown function %q", e.raw.Name)
+			return logicalTypedExpr{}, fmt.Errorf("unknown function %q", e.raw.Name)
 		}
 		if spec.Category != builtinAggregate {
-			return typedExpr{}, nonAggregateReduceFunctionError(e.raw.Name)
+			return logicalTypedExpr{}, nonAggregateReduceFunctionError(e.raw.Name)
 		}
-		typ, err := spec.Check(args)
+		typ, err := spec.Check(logicalSignatureExprs(args))
 		if err != nil {
-			return typedExpr{}, err
+			return logicalTypedExpr{}, err
 		}
-		return typedExpr{bound: expr, raw: e.raw, typ: typ, args: args}, nil
-	case *boundStruct:
-		return typedExpr{}, fmt.Errorf("struct constructor is not supported in reduce")
-	case *boundList:
-		return typedExpr{}, fmt.Errorf("list constructor is not supported in reduce")
-	case *boundIsNull:
-		operand, err := typeCheckReduceExpression(e.operand)
+		return logicalTypedExpr{bound: expr, raw: e.raw, typ: typ, args: args}, nil
+	case *logicalBoundStruct:
+		return logicalTypedExpr{}, fmt.Errorf("struct constructor is not supported in reduce")
+	case *logicalBoundList:
+		return logicalTypedExpr{}, fmt.Errorf("list constructor is not supported in reduce")
+	case *logicalBoundIsNull:
+		operand, err := typeCheckLogicalReduceExpression(e.operand)
 		if err != nil {
-			return typedExpr{}, err
+			return logicalTypedExpr{}, err
 		}
-		return typedExpr{bound: expr, raw: e.raw, typ: &table.TypeDescriptor{Kind: table.TypeBool}, operand: &operand}, nil
+		return logicalTypedExpr{bound: expr, raw: e.raw, typ: &table.TypeDescriptor{Kind: table.TypeBool}, operand: &operand}, nil
 	default:
-		return typedExpr{}, fmt.Errorf("unknown bound expression type %T", expr)
+		return logicalTypedExpr{}, fmt.Errorf("unknown logical bound expression type %T", expr)
+	}
+}
+
+func logicalSignatureExpr(expr logicalTypedExpr) typedExpr {
+	return typedExpr{raw: expr.raw, typ: expr.typ}
+}
+
+func logicalSignatureExprs(args []logicalTypedExpr) []typedExpr {
+	out := make([]typedExpr, len(args))
+	for i, arg := range args {
+		out[i] = logicalSignatureExpr(arg)
+	}
+	return out
+}
+
+func coerceLogicalTypedExpression(expr logicalTypedExpr, target *table.TypeDescriptor) logicalTypedExpr {
+	target = finalizePlanningSchema(target)
+	child := expr
+	return logicalTypedExpr{
+		bound:    &logicalBoundCoerce{},
+		raw:      expr.raw,
+		typ:      target,
+		operand:  &child,
+		coerceTo: target,
 	}
 }
 
@@ -681,7 +885,7 @@ func checkBinarySignature(op string, left, right typedExpr) (*table.TypeDescript
 		if table.SchemaContainsUnion(left.typ) || table.SchemaContainsUnion(right.typ) {
 			return nil, fmt.Errorf("cannot compare union values")
 		}
-		if !table.IsComparable(table.FinalizeSchema(left.typ)) || !table.IsComparable(table.FinalizeSchema(right.typ)) {
+		if !table.IsComparable(finalizePlanningSchema(left.typ)) || !table.IsComparable(finalizePlanningSchema(right.typ)) {
 			return nil, fmt.Errorf("cannot compare %s with %s", schemaTypeName(left.typ), schemaTypeName(right.typ))
 		}
 		if _, err := unifyExpressionStrict(left.typ, right.typ); err != nil {
@@ -723,7 +927,7 @@ func checkUnarySignature(op string, operand typedExpr) (*table.TypeDescriptor, e
 		if !table.IsNumeric(operand.typ) {
 			return nil, fmt.Errorf("operator - requires numeric operand, got %s", schemaString(operand.typ))
 		}
-		return table.NormalizeSchema(operand.typ), nil
+		return normalizePlanningSchema(operand.typ), nil
 	default:
 		return nil, fmt.Errorf("unknown unary operator %q", op)
 	}
@@ -803,7 +1007,7 @@ func checkListContainsSignature(args []typedExpr) (*table.TypeDescriptor, error)
 	if !schemaKindOrNull(args[0].typ, table.TypeList) {
 		return nil, fmt.Errorf("list_contains() requires a list, got %s", schemaString(args[0].typ))
 	}
-	listSchema := table.NormalizeSchema(args[0].typ)
+	listSchema := normalizePlanningSchema(args[0].typ)
 	if listSchema.Kind == table.TypeList && listSchema.Elem != nil && listSchema.Elem.Kind != table.TypeMixed && !isNullOnly(args[1].typ) {
 		if _, err := unifyExpressionStrict(listSchema.Elem, args[1].typ); err != nil {
 			return nil, fmt.Errorf("list_contains() element type mismatch: list has %s, got %s", schemaString(listSchema.Elem), schemaString(args[1].typ))
@@ -904,18 +1108,6 @@ func unifyExpressionStrict(a, b *table.TypeDescriptor) (*table.TypeDescriptor, e
 	return out, nil
 }
 
-func coerceTypedExpression(expr typedExpr, target *table.TypeDescriptor) typedExpr {
-	target = table.FinalizeSchema(target)
-	child := expr
-	return typedExpr{
-		bound:    &boundCoerce{},
-		raw:      expr.raw,
-		typ:      target,
-		operand:  &child,
-		coerceTo: target,
-	}
-}
-
 func typedArgsNeedCoercion(args []typedExpr, target *table.TypeDescriptor) bool {
 	for _, arg := range args {
 		if runtimeCoercionNeeded(arg.typ, target) {
@@ -929,7 +1121,7 @@ func runtimeCoercionNeeded(from, target *table.TypeDescriptor) bool {
 	if from == nil || target == nil || isNullOnly(from) {
 		return false
 	}
-	return !sameRuntimeSchema(table.FinalizeSchema(from), table.FinalizeSchema(target))
+	return !sameRuntimeSchema(finalizePlanningSchema(from), finalizePlanningSchema(target))
 }
 
 func sameRuntimeSchema(a, b *table.TypeDescriptor) bool {
@@ -1014,7 +1206,7 @@ func schemaOrderableOrNull(schema *table.TypeDescriptor) bool {
 	if schema == nil {
 		return false
 	}
-	return schema.Kind == table.TypeNull || table.IsOrderable(table.FinalizeSchema(schema))
+	return schema.Kind == table.TypeNull || table.IsOrderable(finalizePlanningSchema(schema))
 }
 
 func isNullOnly(schema *table.TypeDescriptor) bool {
@@ -1026,26 +1218,26 @@ func schemaMayBeNull(schema *table.TypeDescriptor) bool {
 }
 
 func schemaString(schema *table.TypeDescriptor) string {
-	return table.Render(table.FinalizeSchema(schema))
+	return table.Render(finalizePlanningSchema(schema))
 }
 
 func schemaTypeName(schema *table.TypeDescriptor) string {
-	final := table.FinalizeSchema(schema)
+	final := finalizePlanningSchema(schema)
 	if final == nil {
 		return table.TypeName(table.TypeNull)
 	}
 	return table.TypeName(final.Kind)
 }
 
-func expressionLabel(expr boundExpr) string {
+func logicalExpressionLabel(expr logicalBoundExpr) string {
 	switch e := expr.(type) {
-	case *boundColumn:
+	case *logicalBoundColumn:
 		return strings.Join(e.rawPath, ".")
-	case *boundCall:
+	case *logicalBoundCall:
 		return e.raw.Name + "()"
-	case *boundBinary:
+	case *logicalBoundBinary:
 		return e.raw.Op
-	case *boundUnary:
+	case *logicalBoundUnary:
 		return e.raw.Op
 	default:
 		return "expression"

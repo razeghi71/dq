@@ -10,9 +10,9 @@ import (
 func TestTransformPlannerTDDPlansTransformInsideSimplePipelineWithoutRows(t *testing.T) {
 	input := simplePlannerInputTable()
 
-	plan, err := planSchemaPipeline(input.Schema(), parseSimplePlannerOps(t, `filter { age > 20 } | transform age2 = age + 1, label = upper(name), ratio = age / 2, profile = struct(name = name, city = city), tags = list(city, null) | filter { age2 > 30 and label is not null } | select name, age2, label, ratio, profile, tags`))
+	plan, err := planPhysicalPipelineForTest(input.Schema(), parseSimplePlannerOps(t, `filter { age > 20 } | transform age2 = age + 1, label = upper(name), ratio = age / 2, profile = struct(name = name, city = city), tags = list(city, null) | filter { age2 > 30 and label is not null } | select name, age2, label, ratio, profile, tags`))
 	if err != nil {
-		t.Fatalf("planSchemaPipeline with transform: %v", err)
+		t.Fatalf("planPhysicalPipelineForTest with transform: %v", err)
 	}
 	if len(plan.Ops) != 4 {
 		t.Fatalf("planned op count: got %d, want 4", len(plan.Ops))
@@ -45,9 +45,9 @@ func TestTransformPlannerTDDPlansTransformInsideSimplePipelineWithoutRows(t *tes
 func TestTransformPlannerTDDPreservesOverwriteAndAppendOrder(t *testing.T) {
 	input := simplePlannerInputTable()
 
-	plan, err := planSchemaPipeline(input.Schema(), parseSimplePlannerOps(t, `transform age = age / 2, city = upper(city), name_len = str_len(name) | select name, age, city, name_len`))
+	plan, err := planPhysicalPipelineForTest(input.Schema(), parseSimplePlannerOps(t, `transform age = age / 2, city = upper(city), name_len = str_len(name) | select name, age, city, name_len`))
 	if err != nil {
-		t.Fatalf("planSchemaPipeline with overwrite transform: %v", err)
+		t.Fatalf("planPhysicalPipelineForTest with overwrite transform: %v", err)
 	}
 	requireSimplePlannerSchema(t, plan.OutputSchema,
 		"name:string",
@@ -84,9 +84,9 @@ func TestTransformPlannerTDDDownstreamOpsBindTransformOutputInSamePlan(t *testin
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			plan, err := planSchemaPipeline(input, parseSimplePlannerOps(t, tc.pipeline))
+			plan, err := planPhysicalPipelineForTest(input, parseSimplePlannerOps(t, tc.pipeline))
 			if err != nil {
-				t.Fatalf("planSchemaPipeline(%q): %v", tc.pipeline, err)
+				t.Fatalf("planPhysicalPipelineForTest(%q): %v", tc.pipeline, err)
 			}
 			requireSimplePlannerSchema(t, plan.OutputSchema, tc.want...)
 		})
@@ -115,14 +115,14 @@ func TestTransformPlannerTDDRejectsInvalidTransformAndDownstreamSchemasBeforeRow
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := planSchemaPipeline(input, parseSimplePlannerOps(t, tc.pipeline))
+			_, err := planPhysicalPipelineForTest(input, parseSimplePlannerOps(t, tc.pipeline))
 			if err == nil {
-				t.Fatalf("planSchemaPipeline(%q): expected error", tc.pipeline)
+				t.Fatalf("planPhysicalPipelineForTest(%q): expected error", tc.pipeline)
 			}
 			msg := strings.ToLower(err.Error())
 			for _, want := range tc.wants {
 				if !strings.Contains(msg, strings.ToLower(want)) {
-					t.Fatalf("planSchemaPipeline(%q): got error %q, want substring %q", tc.pipeline, err, want)
+					t.Fatalf("planPhysicalPipelineForTest(%q): got error %q, want substring %q", tc.pipeline, err, want)
 				}
 			}
 		})
@@ -130,9 +130,9 @@ func TestTransformPlannerTDDRejectsInvalidTransformAndDownstreamSchemasBeforeRow
 }
 
 func TestTransformPlannerTDDExecutesPlannedTransformPipeline(t *testing.T) {
-	plan, err := planSchemaPipeline(usersTable().Schema(), parseSimplePlannerOps(t, `transform age2 = age + 1, bucket = if(age > 30, "senior", "standard") | filter { age2 > 31 } | select name, bucket | sort name`))
+	plan, err := planPhysicalPipelineForTest(usersTable().Schema(), parseSimplePlannerOps(t, `transform age2 = age + 1, bucket = if(age > 30, "senior", "standard") | filter { age2 > 31 } | select name, bucket | sort name`))
 	if err != nil {
-		t.Fatalf("planSchemaPipeline with executable transform: %v", err)
+		t.Fatalf("planPhysicalPipelineForTest with executable transform: %v", err)
 	}
 
 	result, err := executePlan(plan, usersTable())

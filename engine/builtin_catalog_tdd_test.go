@@ -268,7 +268,7 @@ func TestBuiltinCatalogCompiledFastPredicatesAreCatalogBacked(t *testing.T) {
 			}
 
 			tbl := compiledEquivalenceTable(t)
-			typed, err := planFilterExpr(schemaPlanCall(name, schemaPlanCol("name"), schemaPlanStringLit("a")), tbl)
+			typed, err := planPhysicalFilterExprForTest(schemaPlanCall(name, schemaPlanCol("name"), schemaPlanStringLit("a")), tbl)
 			if err != nil {
 				t.Fatalf("plan filter: %v", err)
 			}

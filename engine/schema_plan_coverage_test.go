@@ -105,15 +105,15 @@ func TestTypedPlannerAddsExplicitCoercionOnlyWhereNeeded(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			bound, err := bindExpression(tc.expr, tbl)
+			bound, err := bindLogicalExpressionInEnv(tc.expr, schemaEnvFromTable(tbl))
 			if err != nil {
 				t.Fatalf("bind: %v", err)
 			}
-			typed, err := typeCheckExpression(bound)
+			typed, err := typeCheckLogicalExpression(bound)
 			if err != nil {
 				t.Fatalf("type check: %v", err)
 			}
-			if got := countTypedCoercions(typed); got != tc.wantCoerces {
+			if got := countLogicalTypedCoercions(typed); got != tc.wantCoerces {
 				t.Fatalf("coercion nodes: got %d, want %d", got, tc.wantCoerces)
 			}
 		})
@@ -191,28 +191,28 @@ func TestRuntimeCoercionNeededIgnoresNullabilityOnly(t *testing.T) {
 	}
 }
 
-func countTypedCoercions(expr typedExpr) int {
+func countLogicalTypedCoercions(expr logicalTypedExpr) int {
 	count := 0
-	if _, ok := expr.bound.(*boundCoerce); ok {
+	if _, ok := expr.bound.(*logicalBoundCoerce); ok {
 		count++
 	}
 	if expr.left != nil {
-		count += countTypedCoercions(*expr.left)
+		count += countLogicalTypedCoercions(*expr.left)
 	}
 	if expr.right != nil {
-		count += countTypedCoercions(*expr.right)
+		count += countLogicalTypedCoercions(*expr.right)
 	}
 	if expr.operand != nil {
-		count += countTypedCoercions(*expr.operand)
+		count += countLogicalTypedCoercions(*expr.operand)
 	}
 	for _, arg := range expr.args {
-		count += countTypedCoercions(arg)
+		count += countLogicalTypedCoercions(arg)
 	}
 	for _, field := range expr.fields {
-		count += countTypedCoercions(field.expr)
+		count += countLogicalTypedCoercions(field.expr)
 	}
 	for _, elem := range expr.elements {
-		count += countTypedCoercions(elem)
+		count += countLogicalTypedCoercions(elem)
 	}
 	return count
 }
@@ -245,7 +245,7 @@ func TestPlanReduceExprSchemaEdges(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			typed, err := planReduceExpr(tc.expr, nested)
+			typed, err := planPhysicalReduceExprForTest(tc.expr, nested)
 			if err != nil {
 				t.Fatalf("plan reduce: %v", err)
 			}
@@ -272,7 +272,7 @@ func TestPlanReduceExprSchemaEdges(t *testing.T) {
 
 	for _, tc := range invalid {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := planReduceExpr(tc.expr, nested)
+			_, err := planPhysicalReduceExprForTest(tc.expr, nested)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
 			}
@@ -304,7 +304,7 @@ func TestPlanTransformExprSchemaEdges(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			typed, err := planTransformExpr(tc.expr, tbl)
+			typed, err := planPhysicalTransformExprForTest(tc.expr, tbl)
 			if err != nil {
 				t.Fatalf("plan transform: %v", err)
 			}
@@ -331,7 +331,7 @@ func TestPlanTransformExprSchemaEdges(t *testing.T) {
 
 	for _, tc := range invalid {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := planTransformExpr(tc.expr, tbl)
+			_, err := planPhysicalTransformExprForTest(tc.expr, tbl)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
 			}
@@ -340,13 +340,13 @@ func TestPlanTransformExprSchemaEdges(t *testing.T) {
 }
 
 func TestPlanFilterExprRequiresBooleanResult(t *testing.T) {
-	typed, err := planFilterExpr(schemaPlanBinary(">", schemaPlanCol("n"), schemaPlanIntLit(1)), nullablePlanningTable())
+	typed, err := planPhysicalFilterExprForTest(schemaPlanBinary(">", schemaPlanCol("n"), schemaPlanIntLit(1)), nullablePlanningTable())
 	if err != nil {
 		t.Fatalf("plan filter: %v", err)
 	}
 	requireSchemaPlanSchema(t, typed.typ, "bool?")
 
-	_, err = planFilterExpr(schemaPlanCol("n"), nullablePlanningTable())
+	_, err = planPhysicalFilterExprForTest(schemaPlanCol("n"), nullablePlanningTable())
 	if err == nil || !strings.Contains(err.Error(), "filter expression must return bool") {
 		t.Fatalf("expected non-bool filter error, got %v", err)
 	}
@@ -410,11 +410,11 @@ func TestTypedPlannerRejectsUnionMisuseWithoutLegacySchemaInference(t *testing.T
 			var err error
 			switch {
 			case tc.reduce:
-				_, err = planReduceExpr(tc.expr, nested)
+				_, err = planPhysicalReduceExprForTest(tc.expr, nested)
 			case tc.filter:
-				_, err = planFilterExpr(tc.expr, tbl)
+				_, err = planPhysicalFilterExprForTest(tc.expr, tbl)
 			default:
-				_, err = planTransformExpr(tc.expr, tbl)
+				_, err = planPhysicalTransformExprForTest(tc.expr, tbl)
 			}
 			if tc.wantErr == "" {
 				if err != nil {
