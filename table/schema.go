@@ -164,6 +164,36 @@ func WithNullable(t *TypeDescriptor) *TypeDescriptor {
 	return out
 }
 
+// WithDeepNullable returns a copy of t with nullability enabled at every
+// structural position. It is useful for schemas inferred from a bounded prefix:
+// later materialized values may still contain nulls at any already-known path.
+func WithDeepNullable(t *TypeDescriptor) *TypeDescriptor {
+	if t == nil {
+		return &TypeDescriptor{Kind: TypeNull, Nullable: true}
+	}
+	normalized := NormalizeSchema(t)
+	if normalized == nil {
+		return nil
+	}
+	out := *normalized
+	out.Nullable = true
+	switch normalized.Kind {
+	case TypeRecord:
+		out.Fields = make([]FieldDescriptor, len(normalized.Fields))
+		for i, field := range normalized.Fields {
+			out.Fields[i] = FieldDescriptor{Name: field.Name, Type: WithDeepNullable(field.Type)}
+		}
+	case TypeList:
+		out.Elem = WithDeepNullable(normalized.Elem)
+	case TypeUnion:
+		out.Branches = make([]*TypeDescriptor, len(normalized.Branches))
+		for i, branch := range normalized.Branches {
+			out.Branches[i] = WithDeepNullable(branch)
+		}
+	}
+	return &out
+}
+
 // UnionSchema builds a normalized union descriptor from branch descriptors.
 // Storage-equivalent branches are collapsed. Distinct structural branches stay
 // ordered, but source-level branch names/tags are not represented.

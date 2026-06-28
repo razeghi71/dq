@@ -124,6 +124,17 @@ dq 'users.csv | transform age2 = age + 1 | select age2'       # age2 is availabl
 dq 'users.csv | group city | reduce n = count() | select n'   # reduce output is available downstream
 ```
 
+When reading a single file source, a simple leading `select` and/or `filter` can reduce memory use on wide files:
+
+```bash
+dq 'wide.csv | select id, status | json'
+dq 'events.jsonl | filter { status == "active" } | select id | json'
+dq 'wide.csv | filter { status == "active" } | select id | json'
+dq 'wide.csv | select id, status | filter { status == "active" } | json'
+```
+
+For columns the query actually reads, rows and values match the unoptimized pipeline. This optimization only applies to the leading simple prefix; later `select` operations are not pushed across a non-simple filter such as `filter { id + 1 > 0 }`. Source-wide structure errors, such as duplicate CSV headers or malformed row widths, are still reported. After schema inference, values are checked for columns used by the source output or pushed filter; truly unused columns may not be validated and are not materialized into the output table for that optimized prefix. JSON/JSONL inputs still parse each logical record with the JSON decoder, but projected-away fields are not validated into table columns.
+
 Each pipeline stage sees the columns produced by previous stages. Within one `transform` or `reduce`, assignment target names must be unique and all right-hand sides see the input schema only:
 
 ```bash
@@ -508,7 +519,7 @@ dq 'events.jsonl with infer_rows=-1 | describe'
 dq 'events.jsonl with infer_rows=1000, max_bad_records=10 | count'
 ```
 
-Late fields outside the sampled JSON/JSONL schema are bad records; they are not silently dropped.
+If a bounded sample does not reach the end of the source, known JSON/JSONL schema positions are reported nullable because later records may contain nulls or missing fields. Late fields outside the sampled schema are still bad records; they are not silently dropped.
 
 ### CSV type inference
 
@@ -525,6 +536,8 @@ Inference chooses the narrowest type that covers the sampled values: ints stay i
 ```bash
 dq 'sales.csv with max_bad_records=10 | count'    # skip up to 10 bad rows
 ```
+
+When a bounded CSV inference sample does not reach the end of the file, column schemas are reported nullable because later rows may contain empty or `null` cells. Use `infer_rows=-1`, or a large enough sample to reach EOF, when you need exact nullability in `describe` or schema-based writers.
 
 `max_bad_records` skips whole rows, not individual cells. CSV row-width errors are still controlled separately with `allow_jagged_rows=true` and `ignore_unknown_values=true`.
 
@@ -548,3 +561,4 @@ dq 'users.csv | join left orders/part-*.csv on user_id'
 - Renamed columns with no overlap with the first file's header (e.g. `user_id` vs anchor `id`) are read positionally, not by name.
 - Literal paths with `[` (e.g. `data[1].csv`) are not globs unless `*`, `?`, or `{` is present.
 - All matched files are loaded into memory before the pipeline runs.
+- Single-file sources can avoid storing unneeded columns for an immediate simple `select`/`filter` prefix; glob sources currently load all columns before pipeline execution.

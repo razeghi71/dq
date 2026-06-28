@@ -121,8 +121,8 @@ func TestLoadJSONLDefaultInferRowsSamples20480Records(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if got := tbl.Col(tbl.ColIndex("amount")).Schema().String(); got != "float" {
-		t.Fatalf("amount schema: got %q, want float because record 20480 participates in default inference", got)
+	if got := tbl.Col(tbl.ColIndex("amount")).Schema().String(); got != "float?" {
+		t.Fatalf("amount schema: got %q, want float? because default bounded inference did not prove later nullability", got)
 	}
 	if got := tbl.Get(20480, "amount"); got.Type != table.TypeFloat || got.Float != 20 {
 		t.Fatalf("record 20481 amount: got %v, want coerced float 20", got)
@@ -234,8 +234,8 @@ func TestLoadJSONDefaultInferRowsSamples20480Elements(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if got := tbl.Col(tbl.ColIndex("amount")).Schema().String(); got != "float" {
-		t.Fatalf("amount schema: got %q, want float because element 20480 participates in default inference", got)
+	if got := tbl.Col(tbl.ColIndex("amount")).Schema().String(); got != "float?" {
+		t.Fatalf("amount schema: got %q, want float? because default bounded inference did not prove later nullability", got)
 	}
 	if got := tbl.Get(20480, "amount"); got.Type != table.TypeFloat || got.Float != 20 {
 		t.Fatalf("element 20481 amount: got %v, want coerced float 20", got)
@@ -401,8 +401,8 @@ func TestLoadJSONLateFieldsAfterSample(t *testing.T) {
 		if tbl.NumRows != 2 || tbl.Get(1, "id").Int != 3 {
 			t.Fatalf("late nested-list field record should be skipped, got %s", tbl.String())
 		}
-		if got := tbl.Col(tbl.ColIndex("orders")).Schema().String(); got != "list<record<amount:int>>" {
-			t.Fatalf("orders schema: got %q, want list<record<amount:int>>", got)
+		if got := tbl.Col(tbl.ColIndex("orders")).Schema().String(); got != "list<record<amount:int?>?>?" {
+			t.Fatalf("orders schema: got %q, want list<record<amount:int?>?>?", got)
 		}
 	})
 }
@@ -431,8 +431,8 @@ func TestLoadJSONNestedSchemaBadRecords(t *testing.T) {
 		if tbl.NumRows != 2 || tbl.Get(1, "id").Int != 3 {
 			t.Fatalf("nested bad record should be skipped, got %s", tbl.String())
 		}
-		if got := tbl.Col(tbl.ColIndex("orders")).Schema().String(); got != "list<record<amount:int>>" {
-			t.Fatalf("orders schema: got %q, want list<record<amount:int>>", got)
+		if got := tbl.Col(tbl.ColIndex("orders")).Schema().String(); got != "list<record<amount:int?>?>?" {
+			t.Fatalf("orders schema: got %q, want list<record<amount:int?>?>?", got)
 		}
 	})
 
@@ -447,8 +447,8 @@ func TestLoadJSONNestedSchemaBadRecords(t *testing.T) {
 		if err != nil {
 			t.Fatalf("load: %v", err)
 		}
-		if got := tbl.Col(tbl.ColIndex("xs")).Schema().String(); got != "list<mixed>" {
-			t.Fatalf("xs schema: got %q, want list<mixed>", got)
+		if got := tbl.Col(tbl.ColIndex("xs")).Schema().String(); got != "list<mixed?>?" {
+			t.Fatalf("xs schema: got %q, want list<mixed?>?", got)
 		}
 	})
 
@@ -526,7 +526,7 @@ func TestLoadJSONPostSampleNullabilityUpdatesSchema(t *testing.T) {
 			name:       "missing_nested_record_field",
 			input:      "{\"s\":{\"x\":1}}\n{\"s\":{}}\n",
 			column:     "s",
-			wantSchema: "record<x:int?>",
+			wantSchema: "record<x:int?>?",
 			check: func(t *testing.T, tbl *table.Table) {
 				t.Helper()
 				x := tbl.Get(1, "s").Fields[0].Value
@@ -539,7 +539,7 @@ func TestLoadJSONPostSampleNullabilityUpdatesSchema(t *testing.T) {
 			name:       "missing_list_record_field",
 			input:      "{\"orders\":[{\"amount\":10}]}\n{\"orders\":[{}]}\n",
 			column:     "orders",
-			wantSchema: "list<record<amount:int?>>",
+			wantSchema: "list<record<amount:int?>?>?",
 			check: func(t *testing.T, tbl *table.Table) {
 				t.Helper()
 				amount := tbl.Get(1, "orders").List[0].Fields[0].Value

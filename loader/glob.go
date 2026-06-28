@@ -12,7 +12,7 @@ import (
 // HasGlobMeta reports whether pattern should be expanded as a glob.
 // Literal paths with brackets (e.g. data[1].csv) are not globs unless *, ?, or { appear.
 func HasGlobMeta(pattern string) bool {
-	return strings.ContainsAny(pattern, "*?{")
+	return ast.HasGlobMeta(pattern)
 }
 
 func expandGlob(pattern string) ([]string, error) {

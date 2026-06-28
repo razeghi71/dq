@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestCLILogicalOptimizerBoundaryTDDNoOpHappyPathAcrossFlatFormats(t *testing.T) {
+func TestCLILogicalOptimizerBoundaryTDDPipelineSemanticsAcrossFlatFormats(t *testing.T) {
 	bin := buildCLI(t)
 	wantNames := map[string][]string{
 		"csv":     {"Alice", "Charlie", "Diana", "Frank"},
@@ -55,7 +55,7 @@ func TestCLILogicalOptimizerBoundaryTDDNoOpHappyPathAcrossFlatFormats(t *testing
 	}
 }
 
-func TestCLILogicalOptimizerBoundaryTDDNoOpPreservesRuntimeErrorOrderAcrossFlatFormats(t *testing.T) {
+func TestCLILogicalOptimizerBoundaryTDDPreservesRuntimeErrorOrderAcrossFlatFormats(t *testing.T) {
 	bin := buildCLI(t)
 
 	for _, input := range cliFlatUserInputFiles() {
@@ -84,7 +84,7 @@ func TestCLILogicalOptimizerBoundaryTDDNoOpPreservesRuntimeErrorOrderAcrossFlatF
 	}
 }
 
-func TestCLILogicalOptimizerBoundaryTDDNoOpPreservesColumnVisibilityAcrossFlatFormats(t *testing.T) {
+func TestCLILogicalOptimizerBoundaryTDDPreservesColumnVisibilityAcrossFlatFormats(t *testing.T) {
 	bin := buildCLI(t)
 	wantCounts := map[string]float64{
 		"csv":     2,
@@ -116,7 +116,7 @@ func TestCLILogicalOptimizerBoundaryTDDNoOpPreservesColumnVisibilityAcrossFlatFo
 	}
 }
 
-func TestCLILogicalOptimizerBoundaryTDDNoOpNestedPathsAcrossNestedFormats(t *testing.T) {
+func TestCLILogicalOptimizerBoundaryTDDNestedPathsAcrossNestedFormats(t *testing.T) {
 	bin := buildCLI(t)
 
 	for _, input := range cliNestedUserInputFiles() {
@@ -144,7 +144,7 @@ func TestCLILogicalOptimizerBoundaryTDDNoOpNestedPathsAcrossNestedFormats(t *tes
 	}
 }
 
-func TestCLILogicalOptimizerBoundaryTDDNoOpJoinGroupReduceDistinctAcrossFlatFormats(t *testing.T) {
+func TestCLILogicalOptimizerBoundaryTDDJoinGroupReduceDistinctAcrossFlatFormats(t *testing.T) {
 	bin := buildCLI(t)
 
 	for _, input := range cliFlatUserInputFiles() {
@@ -171,7 +171,7 @@ func TestCLILogicalOptimizerBoundaryTDDNoOpJoinGroupReduceDistinctAcrossFlatForm
 	}
 }
 
-func TestCLILogicalOptimizerBoundaryTDDNoOpDoesNotPruneBadRecordsInUnusedTextColumns(t *testing.T) {
+func TestCLILogicalOptimizerBoundaryTDDSourceProjectionReadSetControlsUnusedBadRecords(t *testing.T) {
 	bin := buildCLI(t)
 	dir := t.TempDir()
 
@@ -195,11 +195,17 @@ func TestCLILogicalOptimizerBoundaryTDDNoOpDoesNotPruneBadRecordsInUnusedTextCol
 			if err := os.WriteFile(input.path, input.data, 0o644); err != nil {
 				t.Fatalf("write %s: %v", input.path, err)
 			}
-			out := runCLIQueryExpectError(t, bin, input.path+` with infer_rows=1 | select id | count | json`)
+			query := input.path + ` with infer_rows=1 | select id | count | json`
+			rows := readCLIJSONMaps(t, runCLIQuery(t, bin, query))
+			if len(rows) != 1 || rows[0]["count"] != float64(2) {
+				t.Fatalf("projected source count rows: got %#v, want count=2", rows)
+			}
+
+			out := runCLIQueryExpectError(t, bin, input.path+` with infer_rows=1 | filter { id + 1 > 0 } | select id | count | json`)
 			msg := strings.ToLower(string(out))
-			for _, want := range []string{"unused", "int", "bad"} {
+			for _, want := range []string{"unused", "int"} {
 				if !strings.Contains(msg, want) {
-					t.Fatalf("expected no-op optimizer to preserve unused-column bad-record error containing %q, got:\n%s", want, out)
+					t.Fatalf("unsupported leading filter should read all columns and mention %q, got:\n%s", want, out)
 				}
 			}
 		})

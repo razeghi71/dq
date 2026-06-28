@@ -83,8 +83,8 @@ func TestCLIJSONLPostSampleNullabilityDescribeEndToEnd(t *testing.T) {
 	}
 	for column, want := range map[string]string{
 		"id":     "int?",
-		"s":      "record<x:int?>",
-		"orders": "list<record<amount:int?>>",
+		"s":      "record<x:int?>?",
+		"orders": "list<record<amount:int?>?>?",
 	} {
 		if got[column] != want {
 			t.Fatalf("%s schema: got %q, want %q; rows=%#v", column, got[column], want, rows)

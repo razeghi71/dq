@@ -73,6 +73,76 @@ func TestLoadCSVDefaultInferRowsSamples20480Rows(t *testing.T) {
 	}
 }
 
+func TestLoadCSVBoundedInferenceNullabilityTracksEOF(t *testing.T) {
+	t.Run("rows_exactly_equal_infer_rows_are_precise", func(t *testing.T) {
+		tbl, err := LoadReader(strings.NewReader("id\n1\n2\n"), Options{
+			Format:       "csv",
+			InferRows:    2,
+			InferRowsSet: true,
+		})
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		requireCSVInferenceColumnSchema(t, tbl, "id", "int")
+		if tbl.NumRows != 2 {
+			t.Fatalf("row count: got %d, want 2", tbl.NumRows)
+		}
+	})
+
+	t.Run("post_sample_probe_row_is_not_lost", func(t *testing.T) {
+		tbl, err := LoadReader(strings.NewReader("id\n1\n2\n3\n"), Options{
+			Format:       "csv",
+			InferRows:    2,
+			InferRowsSet: true,
+		})
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		requireCSVInferenceColumnSchema(t, tbl, "id", "int?")
+		if tbl.NumRows != 3 {
+			t.Fatalf("row count: got %d, want 3", tbl.NumRows)
+		}
+		if got := tbl.Get(2, "id"); got.Type != table.TypeInt || got.Int != 3 {
+			t.Fatalf("pending row value: got %v, want int 3", got)
+		}
+	})
+
+	t.Run("infer_rows_zero_header_only_is_precise", func(t *testing.T) {
+		tbl, err := LoadReader(strings.NewReader("id\n"), Options{
+			Format:       "csv",
+			InferRows:    0,
+			InferRowsSet: true,
+		})
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		requireCSVInferenceColumnSchema(t, tbl, "id", "string")
+		if tbl.NumRows != 0 {
+			t.Fatalf("row count: got %d, want 0", tbl.NumRows)
+		}
+	})
+
+	t.Run("glob_infer_rows_zero_header_only_is_precise", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "part-1.csv")
+		if err := os.WriteFile(path, []byte("id\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tbl, err := Load(filepath.Join(dir, "part-*.csv"), Options{
+			Format:       "csv",
+			InferRows:    0,
+			InferRowsSet: true,
+		})
+		if err != nil {
+			t.Fatalf("load glob: %v", err)
+		}
+		requireCSVInferenceColumnSchema(t, tbl, "id", "string")
+		if tbl.NumRows != 0 {
+			t.Fatalf("row count: got %d, want 0", tbl.NumRows)
+		}
+	})
+}
+
 func TestCSVNumericCandidateHelpers(t *testing.T) {
 	cases := []struct {
 		value       string
@@ -99,6 +169,17 @@ func TestCSVNumericCandidateHelpers(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func requireCSVInferenceColumnSchema(t *testing.T, tbl *table.Table, column, want string) {
+	t.Helper()
+	idx := tbl.ColIndex(column)
+	if idx < 0 {
+		t.Fatalf("missing column %q in %v", column, tbl.Columns)
+	}
+	if got := tbl.Col(idx).Schema().String(); got != want {
+		t.Fatalf("%s schema: got %s, want %s", column, got, want)
 	}
 }
 

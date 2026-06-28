@@ -70,6 +70,13 @@ func CompressionFormatsList() string {
 	return compressionsList
 }
 
+// HasGlobMeta reports whether pattern should be expanded as a glob. Literal
+// paths with brackets, such as data[1].csv, are not globs unless *, ?, or {
+// appear.
+func HasGlobMeta(pattern string) bool {
+	return strings.ContainsAny(pattern, "*?{")
+}
+
 // IsSupportedCompression reports whether name is a recognized load compression wrapper.
 func IsSupportedCompression(compression string) bool {
 	return isSupportedFormat(supportedCompressions, compression)

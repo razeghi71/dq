@@ -767,12 +767,19 @@ func materializeCSVGroups(columns []string, groups []csvRowGroup, cfg csvLoadCon
 		}
 	}
 	types := inferCSVColumnTypes(columns, groups, cfg.inferRows)
-	t := table.NewTableWithTypes(append([]string(nil), columns...), types)
+	totalRows := csvRowGroupCount(groups)
+	nullableAll := csvCollectedInferenceNeedsConservativeNullability(cfg.inferRows, totalRows)
+	schemas := csvSchemasFromTypes(columns, types, csvNullableColumns(columns, groups), nullableAll)
+	mat, err := csvMaterializationFor(columns, types, schemas, nil, cfg.source)
+	if err != nil {
+		return nil, err
+	}
+	t := table.NewTableWithSchemas(mat.columns, mat.schemas)
 	badRecords := 0
 	for _, group := range groups {
 		mapping := csvColumnMapping(columns, group.columns)
 		for _, row := range group.rows {
-			if err := addCSVTypedRow(t, row, mapping, group.source, columns, types, cfg, &badRecords); err != nil {
+			if err := addCSVTypedRow(t, row, mapping, group.source, columns, types, mat, cfg, &badRecords); err != nil {
 				return nil, err
 			}
 		}
@@ -780,9 +787,106 @@ func materializeCSVGroups(columns []string, groups []csvRowGroup, cfg csvLoadCon
 	return t, nil
 }
 
+type csvMaterialization struct {
+	columns          []string
+	schemas          []*table.TypeDescriptor
+	positionByColumn []int
+}
+
+func csvMaterializationFor(columns []string, types []table.ValueType, schemas []*table.TypeDescriptor, projectColumns []string, source string) (csvMaterialization, error) {
+	if schemas == nil {
+		schemas = csvSchemasFromTypes(columns, types, nil, false)
+	}
+	if len(projectColumns) == 0 {
+		positionByColumn := make([]int, len(columns))
+		for i := range columns {
+			positionByColumn[i] = i
+		}
+		return csvMaterialization{
+			columns:          append([]string(nil), columns...),
+			schemas:          append([]*table.TypeDescriptor(nil), schemas...),
+			positionByColumn: positionByColumn,
+		}, nil
+	}
+
+	index := make(map[string]int, len(columns))
+	for i, col := range columns {
+		index[col] = i
+	}
+	seen := make(map[string]bool, len(projectColumns))
+	outCols := make([]string, len(projectColumns))
+	outSchemas := make([]*table.TypeDescriptor, len(projectColumns))
+	positionByColumn := make([]int, len(columns))
+	for i := range positionByColumn {
+		positionByColumn[i] = -1
+	}
+	for outIdx, col := range projectColumns {
+		if seen[col] {
+			return csvMaterialization{}, fmt.Errorf("%s: projected column %q requested more than once", sourcePrefix(source), col)
+		}
+		seen[col] = true
+		srcIdx, ok := index[col]
+		if !ok {
+			return csvMaterialization{}, fmt.Errorf("%s: projected column %q not found", sourcePrefix(source), col)
+		}
+		outCols[outIdx] = col
+		if srcIdx < len(schemas) {
+			outSchemas[outIdx] = schemas[srcIdx]
+		}
+		positionByColumn[srcIdx] = outIdx
+	}
+	return csvMaterialization{
+		columns:          outCols,
+		schemas:          outSchemas,
+		positionByColumn: positionByColumn,
+	}, nil
+}
+
+func csvRowGroupCount(groups []csvRowGroup) int {
+	total := 0
+	for _, group := range groups {
+		total += len(group.rows)
+	}
+	return total
+}
+
+func csvCollectedInferenceNeedsConservativeNullability(inferRows, totalRows int) bool {
+	switch {
+	case totalRows == 0:
+		return false
+	case inferRows < 0:
+		return false
+	case inferRows == 0:
+		return true
+	default:
+		return inferRows < totalRows
+	}
+}
+
+func csvStreamingInferenceNeedsConservativeNullability(inferRows, totalRows int, sampleExhausted bool) bool {
+	switch {
+	case totalRows == 0:
+		return false
+	case inferRows < 0:
+		return false
+	case inferRows == 0:
+		return true
+	default:
+		return !sampleExhausted
+	}
+}
+
+func sourcePrefix(source string) string {
+	if source == "" {
+		return "source"
+	}
+	return source
+}
+
 // CSV inference intentionally parallels parseValue and table widening without
 // reusing table.Append: inference chooses a fixed load schema first, then
-// materialization strictly converts every post-inference cell to that schema.
+// materialization strictly converts every semantically read post-inference cell
+// to that schema.
 func inferCSVColumnTypes(columns []string, groups []csvRowGroup, inferRows int) []table.ValueType {
 	types := make([]table.ValueType, len(columns))
 	if inferRows == 0 {
@@ -846,8 +950,8 @@ func csvWidenInferredType(existing, incoming table.ValueType) table.ValueType {
 	return table.TypeString
 }
 
-func addCSVTypedRow(t *table.Table, row csvRawRow, mapping []int, source string, columns []string, types []table.ValueType, cfg csvLoadConfig, badRecords *int) error {
-	vals, err := csvTypedRowValues(row, mapping, source, columns, types)
+func addCSVTypedRow(t *table.Table, row csvRawRow, mapping []int, source string, columns []string, types []table.ValueType, mat csvMaterialization, cfg csvLoadConfig, badRecords *int) error {
+	vals, err := csvTypedRowValues(row, mapping, source, columns, types, mat)
 	if err != nil {
 		(*badRecords)++
 		if *badRecords > cfg.maxBadRecords {
@@ -859,10 +963,17 @@ func addCSVTypedRow(t *table.Table, row csvRawRow, mapping []int, source string,
 	return nil
 }
 
-func csvTypedRowValues(row csvRawRow, mapping []int, source string, columns []string, types []table.ValueType) ([]table.Value, error) {
-	vals := make([]table.Value, len(columns))
+func csvTypedRowValues(row csvRawRow, mapping []int, source string, columns []string, types []table.ValueType, mat csvMaterialization) ([]table.Value, error) {
+	vals := make([]table.Value, len(mat.columns))
 	for srcIdx, dst := range mapping {
 		if dst < 0 || srcIdx >= len(row.record) {
+			continue
+		}
+		if dst >= len(mat.positionByColumn) {
+			continue
+		}
+		outIdx := mat.positionByColumn[dst]
+		if outIdx < 0 {
 			continue
 		}
 		cell := strings.TrimSpace(row.record[srcIdx])
@@ -870,7 +981,7 @@ func csvTypedRowValues(row csvRawRow, mapping []int, source string, columns []st
 		if err != nil {
 			return nil, csvTypeError(row, source, columns[dst], types[dst], cell)
 		}
-		vals[dst] = v
+		vals[outIdx] = v
 	}
 	return vals, nil
 }
@@ -989,6 +1100,87 @@ func loadCSVReader(r io.Reader, cfg csvLoadConfig) (*table.Table, error) {
 	return loadCSVReaderStreaming(r, cfg)
 }
 
+type csvInferenceWindow struct {
+	sampleRows      []csvRawRow
+	pendingRows     []csvRawRow
+	nextRow         int
+	sampleExhausted bool
+}
+
+func readCSVInferenceWindow(reader *csv.Reader, columns []string, buffered []csvRawRow, startRow int, cfg csvLoadConfig) (csvInferenceWindow, error) {
+	window := csvInferenceWindow{
+		sampleRows: append([]csvRawRow(nil), buffered...),
+		nextRow:    startRow,
+	}
+
+	switch {
+	case cfg.inferRows < 0:
+		for {
+			record, err := reader.Read()
+			if err == io.EOF {
+				window.sampleExhausted = true
+				return window, nil
+			}
+			if err != nil {
+				return csvInferenceWindow{}, fmt.Errorf("error reading CSV row: %w", err)
+			}
+			if err := validateCSVRecord(record, len(columns), cfg, window.nextRow); err != nil {
+				return csvInferenceWindow{}, err
+			}
+			window.sampleRows = append(window.sampleRows, newCSVRawRow(record, window.nextRow))
+			window.nextRow++
+		}
+	case cfg.inferRows > 0:
+		initialCap := csvInferenceInitialCapacity(cfg.inferRows, len(window.sampleRows))
+		if cap(window.sampleRows) < initialCap {
+			prealloc := make([]csvRawRow, 0, initialCap)
+			prealloc = append(prealloc, window.sampleRows...)
+			window.sampleRows = prealloc
+		}
+		for len(window.sampleRows) < cfg.inferRows {
+			record, err := reader.Read()
+			if err == io.EOF {
+				window.sampleExhausted = true
+				return window, nil
+			}
+			if err != nil {
+				return csvInferenceWindow{}, fmt.Errorf("error reading CSV row: %w", err)
+			}
+			if err := validateCSVRecord(record, len(columns), cfg, window.nextRow); err != nil {
+				return csvInferenceWindow{}, err
+			}
+			window.sampleRows = append(window.sampleRows, newCSVRawRow(record, window.nextRow))
+			window.nextRow++
+		}
+	}
+
+	record, err := reader.Read()
+	if err == io.EOF {
+		window.sampleExhausted = true
+		return window, nil
+	}
+	if err != nil {
+		return csvInferenceWindow{}, fmt.Errorf("error reading CSV row: %w", err)
+	}
+	if err := validateCSVRecord(record, len(columns), cfg, window.nextRow); err != nil {
+		return csvInferenceWindow{}, err
+	}
+	window.pendingRows = append(window.pendingRows, newCSVRawRow(record, window.nextRow))
+	window.nextRow++
+	return window, nil
+}
+
+func csvInferenceInitialCapacity(inferRows, bufferedRows int) int {
+	if inferRows <= bufferedRows {
+		return bufferedRows
+	}
+	const maxInitialCapacity = 1024
+	if inferRows < maxInitialCapacity {
+		return inferRows
+	}
+	return maxInitialCapacity
+}
+
 func loadCSVReaderStreaming(r io.Reader, cfg csvLoadConfig) (*table.Table, error) {
 	reader := newCSVReader(r, cfg.delim)
 	columns, buffered, startRow, empty, err := prepareCSVReader(reader, cfg)
@@ -1002,47 +1194,35 @@ func loadCSVReaderStreaming(r io.Reader, cfg csvLoadConfig) (*table.Table, error
 		return nil, err
 	}
 
-	sampleRows := buffered
-	if cfg.inferRows > 0 {
-		initialCap := cfg.inferRows
-		if initialCap > defaultInferRows {
-			initialCap = defaultInferRows
-		}
-		if cap(sampleRows) < initialCap {
-			prealloc := make([]csvRawRow, 0, initialCap)
-			prealloc = append(prealloc, sampleRows...)
-			sampleRows = prealloc
-		}
-		rowNum := startRow
-		for len(sampleRows) < cfg.inferRows {
-			record, err := reader.Read()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return nil, fmt.Errorf("error reading CSV row: %w", err)
-			}
-			if err := validateCSVRecord(record, len(columns), cfg, rowNum); err != nil {
-				return nil, err
-			}
-			sampleRows = append(sampleRows, newCSVRawRow(record, rowNum))
-			rowNum++
-		}
-		startRow = rowNum
+	window, err := readCSVInferenceWindow(reader, columns, buffered, startRow, cfg)
+	if err != nil {
+		return nil, err
 	}
 
-	group := csvRowGroup{columns: append([]string(nil), columns...), source: cfg.source, rows: sampleRows}
+	group := csvRowGroup{columns: append([]string(nil), columns...), source: cfg.source, rows: window.sampleRows}
 	types := inferCSVColumnTypes(columns, []csvRowGroup{group}, cfg.inferRows)
-	t := table.NewTableWithTypes(append([]string(nil), columns...), types)
+	totalRows := len(window.sampleRows) + len(window.pendingRows)
+	nullableAll := csvStreamingInferenceNeedsConservativeNullability(cfg.inferRows, totalRows, window.sampleExhausted)
+	schemas := csvSchemasFromTypes(columns, types, csvNullableColumns(columns, []csvRowGroup{group}), nullableAll)
+	mat, err := csvMaterializationFor(columns, types, schemas, nil, cfg.source)
+	if err != nil {
+		return nil, err
+	}
+	t := table.NewTableWithSchemas(mat.columns, mat.schemas)
 	mapping := csvColumnMapping(columns, columns)
 	badRecords := 0
-	for _, row := range sampleRows {
-		if err := addCSVTypedRow(t, row, mapping, cfg.source, columns, types, cfg, &badRecords); err != nil {
+	for _, row := range window.sampleRows {
+		if err := addCSVTypedRow(t, row, mapping, cfg.source, columns, types, mat, cfg, &badRecords); err != nil {
+			return nil, err
+		}
+	}
+	for _, row := range window.pendingRows {
+		if err := addCSVTypedRow(t, row, mapping, cfg.source, columns, types, mat, cfg, &badRecords); err != nil {
 			return nil, err
 		}
 	}
 
-	rowNum := startRow
+	rowNum := window.nextRow
 	for {
 		record, err := reader.Read()
 		if err == io.EOF {
@@ -1055,7 +1235,7 @@ func loadCSVReaderStreaming(r io.Reader, cfg csvLoadConfig) (*table.Table, error
 			return nil, err
 		}
 		row := csvRawRow{record: record, rowNum: rowNum}
-		if err := addCSVTypedRow(t, row, mapping, cfg.source, columns, types, cfg, &badRecords); err != nil {
+		if err := addCSVTypedRow(t, row, mapping, cfg.source, columns, types, mat, cfg, &badRecords); err != nil {
 			return nil, err
 		}
 		rowNum++
@@ -1333,8 +1513,7 @@ func loadJSONLReader(r io.Reader, cfg jsonLoadConfig) (*table.Table, error) {
 }
 
 func collectJSONLRecords(r io.Reader, source string) ([]jsonLogicalRecord, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), 64*1024*1024)
+	scanner := newJSONLScanner(r)
 	var records []jsonLogicalRecord
 	lineNum := 0
 	for scanner.Scan() {
@@ -1393,6 +1572,12 @@ func collectJSONLRecords(r io.Reader, source string) ([]jsonLogicalRecord, error
 	return records, nil
 }
 
+func newJSONLScanner(r io.Reader) *bufio.Scanner {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 64*1024), 64*1024*1024)
+	return scanner
+}
+
 func requireJSONDecoderEOF(dec *json.Decoder) error {
 	var extra interface{}
 	err := dec.Decode(&extra)
@@ -1443,6 +1628,9 @@ func buildTableFromJSONRecords(records []jsonLogicalRecord, cfg jsonLoadConfig) 
 		inferredGood[i] = true
 	}
 
+	if jsonInferenceNeedsConservativeNullability(cfg.inferRows, inferSeen, len(records)) {
+		state.schemas = deepNullableSchemas(state.schemas)
+	}
 	t := table.NewTableWithSchemas(state.columns, state.schemas)
 	for i, rec := range records {
 		if skip[i] {
@@ -1467,6 +1655,21 @@ func buildTableFromJSONRecords(records []jsonLogicalRecord, cfg jsonLoadConfig) 
 	}
 
 	return t, nil
+}
+
+func jsonInferenceNeedsConservativeNullability(inferRows, inferSeen, totalRecords int) bool {
+	if totalRecords == 0 || inferRows < 0 {
+		return false
+	}
+	return inferSeen < totalRecords
+}
+
+func deepNullableSchemas(schemas []*table.TypeDescriptor) []*table.TypeDescriptor {
+	out := make([]*table.TypeDescriptor, len(schemas))
+	for i, schema := range schemas {
+		out[i] = table.WithDeepNullable(schema)
+	}
+	return out
 }
 
 func (s *jsonSchemaInference) inferRecord(fields []table.RecordField) error {
@@ -1979,10 +2182,6 @@ func (ctx *avroSchemaContext) collectNamedTypes(schema any, namespace string) {
 	}
 }
 
-func avroValue(v any, schema any, namespace string) table.Value {
-	return newAvroSchemaContext(schema, namespace).value(v, schema, namespace)
-}
-
 func (ctx *avroSchemaContext) value(v any, schema any, namespace string) table.Value {
 	if v == nil {
 		return table.Null()
@@ -2105,10 +2304,6 @@ func avroTypeNamespace(schema any, parentNamespace string) string {
 		return ns
 	}
 	return parentNamespace
-}
-
-func avroSchemaName(schema any, namespace string) string {
-	return newAvroSchemaContext(schema, namespace).schemaName(schema, namespace)
 }
 
 func (ctx *avroSchemaContext) schemaName(schema any, namespace string) string {
@@ -2280,10 +2475,6 @@ func (ctx *avroSchemaContext) schemaNamespace(schema any, parentNamespace string
 	return avroTypeNamespace(schema, parentNamespace)
 }
 
-func avroRecordValue(v any, schema map[string]any, namespace string) table.Value {
-	return newAvroSchemaContext(schema, namespace).recordValue(v, schema, namespace)
-}
-
 func (ctx *avroSchemaContext) recordValue(v any, schema map[string]any, namespace string) table.Value {
 	rec, ok := asMap(v)
 	if !ok {
@@ -2313,10 +2504,6 @@ func (ctx *avroSchemaContext) recordValue(v any, schema map[string]any, namespac
 	return table.RecordVal(fields)
 }
 
-func avroArrayValue(v any, itemSchema any, namespace string) table.Value {
-	return newAvroSchemaContext(itemSchema, namespace).arrayValue(v, itemSchema, namespace)
-}
-
 func (ctx *avroSchemaContext) arrayValue(v any, itemSchema any, namespace string) table.Value {
 	items, ok := asSlice(v)
 	if !ok {
@@ -2327,10 +2514,6 @@ func (ctx *avroSchemaContext) arrayValue(v any, itemSchema any, namespace string
 		values[i] = ctx.value(item, itemSchema, namespace)
 	}
 	return table.ListVal(values)
-}
-
-func avroFieldSchemaDescriptor(schema any, namespace string) *table.TypeDescriptor {
-	return newAvroSchemaContext(schema, namespace).fieldSchemaDescriptor(schema, namespace, nil)
 }
 
 func (ctx *avroSchemaContext) fieldSchemaDescriptor(schema any, namespace string, resolving map[string]bool) *table.TypeDescriptor {
@@ -2412,10 +2595,6 @@ func avroPrimitiveSchemaDescriptor(name string) *table.TypeDescriptor {
 	}
 }
 
-func avroRecordSchemaDescriptor(schema map[string]any, namespace string) *table.TypeDescriptor {
-	return newAvroSchemaContext(schema, namespace).recordSchemaDescriptor(schema, namespace, nil)
-}
-
 func (ctx *avroSchemaContext) recordSchemaDescriptor(schema map[string]any, namespace string, resolving map[string]bool) *table.TypeDescriptor {
 	fieldsRaw, ok := asSlice(schema["fields"])
 	if !ok {
@@ -2458,37 +2637,9 @@ func loadAvro(filename string) (*table.Table, error) {
 	codec := ocfr.Codec()
 	schema := codec.Schema()
 
-	var rootSchema any
-	if err := json.Unmarshal([]byte(schema), &rootSchema); err != nil {
-		return nil, fmt.Errorf("cannot parse Avro schema: %w", err)
-	}
-	rootMap, _ := asMap(rootSchema)
-	rootNamespace := avroTypeNamespace(rootMap, "")
-	avroCtx := newAvroSchemaContext(rootSchema, rootNamespace)
-
-	var schemaDef struct {
-		Fields []struct {
-			Name string `json:"name"`
-			Type any    `json:"type"`
-		} `json:"fields"`
-	}
-	if err := json.Unmarshal([]byte(schema), &schemaDef); err != nil {
-		return nil, fmt.Errorf("cannot parse Avro schema: %w", err)
-	}
-
-	columns := make([]string, len(schemaDef.Fields))
-	schemas := make([]*table.TypeDescriptor, len(schemaDef.Fields))
-	fieldSchemas := make(map[string]any, len(schemaDef.Fields))
-	for i, field := range schemaDef.Fields {
-		columns[i] = field.Name
-		if recursiveName, ok := avroCtx.recursiveNamedReference(field.Type, rootNamespace, nil); ok {
-			return nil, fmt.Errorf("unsupported recursive Avro schema for field %q: named type %q is recursive", field.Name, recursiveName)
-		}
-		schemas[i] = avroCtx.fieldSchemaDescriptor(field.Type, rootNamespace, nil)
-		if schemas[i] == nil {
-			return nil, fmt.Errorf("unsupported Avro schema for field %q", field.Name)
-		}
-		fieldSchemas[field.Name] = field.Type
+	columns, schemas, fieldSchemas, err := avroSchemaParts(schema)
+	if err != nil {
+		return nil, err
 	}
 
 	t := table.NewTableWithSchemas(columns, schemas)
@@ -2511,7 +2662,7 @@ func loadAvro(filename string) (*table.Table, error) {
 				vals[i] = table.Null()
 				continue
 			}
-			val := avroCtx.value(v, fieldSchemas[col], rootNamespace)
+			val := fieldSchemas.context.value(v, fieldSchemas.schemas[col], fieldSchemas.rootNamespace)
 			vals[i] = val
 		}
 		if err := addMetadataTypedRow(t, vals, "Avro record"); err != nil {
@@ -2524,6 +2675,48 @@ func loadAvro(filename string) (*table.Table, error) {
 	}
 
 	return t, nil
+}
+
+type avroFieldSchemas struct {
+	context       *avroSchemaContext
+	rootNamespace string
+	schemas       map[string]any
+}
+
+func avroSchemaParts(schema string) ([]string, []*table.TypeDescriptor, avroFieldSchemas, error) {
+	var rootSchema any
+	if err := json.Unmarshal([]byte(schema), &rootSchema); err != nil {
+		return nil, nil, avroFieldSchemas{}, fmt.Errorf("cannot parse Avro schema: %w", err)
+	}
+	rootMap, _ := asMap(rootSchema)
+	rootNamespace := avroTypeNamespace(rootMap, "")
+	avroCtx := newAvroSchemaContext(rootSchema, rootNamespace)
+
+	var schemaDef struct {
+		Fields []struct {
+			Name string `json:"name"`
+			Type any    `json:"type"`
+		} `json:"fields"`
+	}
+	if err := json.Unmarshal([]byte(schema), &schemaDef); err != nil {
+		return nil, nil, avroFieldSchemas{}, fmt.Errorf("cannot parse Avro schema: %w", err)
+	}
+
+	columns := make([]string, len(schemaDef.Fields))
+	schemas := make([]*table.TypeDescriptor, len(schemaDef.Fields))
+	fieldSchemas := make(map[string]any, len(schemaDef.Fields))
+	for i, field := range schemaDef.Fields {
+		columns[i] = field.Name
+		if recursiveName, ok := avroCtx.recursiveNamedReference(field.Type, rootNamespace, nil); ok {
+			return nil, nil, avroFieldSchemas{}, fmt.Errorf("unsupported recursive Avro schema for field %q: named type %q is recursive", field.Name, recursiveName)
+		}
+		schemas[i] = avroCtx.fieldSchemaDescriptor(field.Type, rootNamespace, nil)
+		if schemas[i] == nil {
+			return nil, nil, avroFieldSchemas{}, fmt.Errorf("unsupported Avro schema for field %q", field.Name)
+		}
+		fieldSchemas[field.Name] = field.Type
+	}
+	return columns, schemas, avroFieldSchemas{context: avroCtx, rootNamespace: rootNamespace, schemas: fieldSchemas}, nil
 }
 
 func loadParquet(filename string) (*table.Table, error) {

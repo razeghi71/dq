@@ -152,7 +152,7 @@ func joinKeyComparableSchema(schema *table.TypeDescriptor) *table.TypeDescriptor
 // Glob metacharacters are stripped first; if the basename is empty afterward,
 // the parent directory name is used ("orders/*.csv" -> "orders").
 func joinBasename(filename string) string {
-	stripMeta := strings.ContainsAny(filename, "*?{")
+	stripMeta := ast.HasGlobMeta(filename)
 	if s := sanitizeJoinBasename(filepath.Base(filename), stripMeta); s != "" {
 		return s
 	}

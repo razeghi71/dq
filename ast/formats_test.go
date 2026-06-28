@@ -76,6 +76,23 @@ func TestDataFormatNames(t *testing.T) {
 	}
 }
 
+func TestHasGlobMeta(t *testing.T) {
+	cases := []struct {
+		pattern string
+		want    bool
+	}{
+		{"data[1].csv", false},
+		{"logs/*.csv", true},
+		{"logs/part-?.csv", true},
+		{"logs/{a,b}.csv", true},
+	}
+	for _, tc := range cases {
+		if got := HasGlobMeta(tc.pattern); got != tc.want {
+			t.Fatalf("HasGlobMeta(%q): got %v, want %v", tc.pattern, got, tc.want)
+		}
+	}
+}
+
 func TestStreamFormatsAreLoadFormats(t *testing.T) {
 	for _, format := range streamDataFormatNames {
 		if !IsSupportedLoadFormat(format) {

@@ -446,3 +446,16 @@ func TestCentralTypeAPITableSchemaUsesLogicalNamesAfterShallowClone(t *testing.T
 		t.Fatalf("schema column type: got %q, want %q", got, want)
 	}
 }
+
+func TestWithDeepNullableMarksEveryKnownSchemaPosition(t *testing.T) {
+	schema := recordOf(
+		field("id", td(TypeInt)),
+		field("items", listOf(recordOf(field("amount", td(TypeFloat))))),
+	)
+
+	got := WithDeepNullable(schema)
+	requireSchemaString(t, got, "record<id:int?, items:list<record<amount:float?>?>?>?")
+	if schema.Nullable {
+		t.Fatal("WithDeepNullable mutated input top-level nullability")
+	}
+}

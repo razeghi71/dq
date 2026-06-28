@@ -72,8 +72,8 @@ func TestIntegrationJSONLPostSampleNullabilityDescribe(t *testing.T) {
 	result := loadAndQuery(t, path+" with infer_rows=1", "describe")
 	assertDescribeSchemaRows(t, result, map[string]describeSchemaMeta{
 		"id":     {typ: "int", rows: 2, schema: "int?"},
-		"s":      {typ: "record", rows: 2, schema: "record<x:int?>"},
-		"orders": {typ: "list", rows: 2, schema: "list<record<amount:int?>>"},
+		"s":      {typ: "record", rows: 2, schema: "record<x:int?>?"},
+		"orders": {typ: "list", rows: 2, schema: "list<record<amount:int?>?>?"},
 	})
 }
 

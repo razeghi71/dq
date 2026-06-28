@@ -12,7 +12,7 @@ func EffectiveFormat(filename, explicitFormat string) string {
 	if explicitFormat != "" {
 		return strings.ToLower(explicitFormat)
 	}
-	if filename == "-" || strings.ContainsAny(filename, "*?{") {
+	if filename == "-" || HasGlobMeta(filename) {
 		return ""
 	}
 	return inferFormatFromFilename(filename)
@@ -24,7 +24,7 @@ func EffectiveCompression(filename, explicitCompression string) string {
 	if explicitCompression != "" {
 		return strings.ToLower(explicitCompression)
 	}
-	if filename == "-" || strings.ContainsAny(filename, "*?{") {
+	if filename == "-" || HasGlobMeta(filename) {
 		return ""
 	}
 	compression, _ := inferCompressionFromFilename(filename)

@@ -12,8 +12,9 @@ import (
 
 // EvalContext provides column lookup for typed expression evaluation.
 type EvalContext struct {
-	Table  *table.Table
-	RowIdx int
+	Table     *table.Table
+	RowIdx    int
+	RowValues []table.Value
 }
 
 func evalLiteral(e *ast.LiteralExpr) table.Value {

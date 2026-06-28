@@ -144,12 +144,33 @@ func TestCLICentralTypeCSVNullOnlyAndAllStringModesStayStable(t *testing.T) {
 		requireCLIDescribeSchema(t, rows, "note", "string", "string", 0)
 	})
 
+	t.Run("header_only_infer_rows_zero_csv", func(t *testing.T) {
+		path := writeCLICSVInferenceFile(t, dir, "header-only-zero.csv", "id,zip,note\n")
+		rows := readCLIDescribeRows(t, runCLIQuery(t, bin, path+" with infer_rows=0 | describe | json"))
+		requireCLIDescribeSchema(t, rows, "id", "string", "string", 0)
+		requireCLIDescribeSchema(t, rows, "zip", "string", "string", 0)
+		requireCLIDescribeSchema(t, rows, "note", "string", "string", 0)
+	})
+
+	t.Run("bounded_infer_rows_exact_eof_csv", func(t *testing.T) {
+		path := writeCLICSVInferenceFile(t, dir, "exact-eof.csv", "id\n1\n2\n")
+		rows := readCLIDescribeRows(t, runCLIQuery(t, bin, path+" with infer_rows=2 | describe | json"))
+		requireCLIDescribeSchema(t, rows, "id", "int", "int", 2)
+	})
+
 	t.Run("infer_rows_zero_preserves_text_identifiers", func(t *testing.T) {
 		path := writeCLICSVInferenceFile(t, dir, "ids.csv", "id,zip,active\n007,02110,true\n")
 		rows := readCLIDescribeRows(t, runCLIQuery(t, bin, path+" with infer_rows=0 | describe | json"))
-		requireCLIDescribeSchema(t, rows, "id", "string", "string", 1)
-		requireCLIDescribeSchema(t, rows, "zip", "string", "string", 1)
-		requireCLIDescribeSchema(t, rows, "active", "string", "string", 1)
+		requireCLIDescribeSchema(t, rows, "id", "string", "string?", 1)
+		requireCLIDescribeSchema(t, rows, "zip", "string", "string?", 1)
+		requireCLIDescribeSchema(t, rows, "active", "string", "string?", 1)
+	})
+
+	t.Run("headerless_single_data_row_infer_rows_zero_is_nullable", func(t *testing.T) {
+		path := writeCLICSVInferenceFile(t, dir, "headerless-single.dat", "007,Alice\n")
+		rows := readCLIDescribeRows(t, runCLIQuery(t, bin, path+" with format=csv, header=false, infer_rows=0 | describe | json"))
+		requireCLIDescribeSchema(t, rows, "col1", "string", "string?", 1)
+		requireCLIDescribeSchema(t, rows, "col2", "string", "string?", 1)
 	})
 }
 

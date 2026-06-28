@@ -10,6 +10,7 @@ import (
 )
 
 var benchmarkResult *table.Table
+var benchmarkPhysical physicalPipeline
 
 func benchmarkPipeline(b *testing.B, input *table.Table, pipeline string) {
 	benchmarkPipelineWithLoad(b, input, pipeline, nil)
@@ -124,6 +125,32 @@ func BenchmarkInterpretedRegexFilter(b *testing.B) {
 
 func BenchmarkInterpretedNestedStringTransform(b *testing.B) {
 	benchmarkPipeline(b, benchmarkFlatRows(10000), "transform u = upper(trim(name)) | select u | count")
+}
+
+func BenchmarkPhysicalPlanSchemaPreservingPipeline(b *testing.B) {
+	input := benchmarkFlatRows(1)
+	q, err := parser.Parse("bench.csv | filter { age > 10 } | head 1 | sort age | distinct | tail 1 | count")
+	if err != nil {
+		b.Fatalf("parse benchmark query: %v", err)
+	}
+	logical, err := planLogicalPipelineFromTableWithLoad(input, q.Ops, nil)
+	if err != nil {
+		b.Fatalf("logical benchmark plan: %v", err)
+	}
+	optimized, err := optimizeLogicalPipeline(logical)
+	if err != nil {
+		b.Fatalf("optimize benchmark plan: %v", err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var physical physicalPipeline
+		if err := planPhysicalPipelineInto(optimized, &physical); err != nil {
+			b.Fatalf("physical benchmark plan: %v", err)
+		}
+		benchmarkPhysical = physical
+	}
 }
 
 func BenchmarkNestedDotPathFilter(b *testing.B) {

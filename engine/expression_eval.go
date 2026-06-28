@@ -47,6 +47,16 @@ func evalTypedExpression(expr typedExpr, ctx *EvalContext) (table.Value, error) 
 }
 
 func evalBoundColumn(e *boundColumn, ctx *EvalContext) (table.Value, error) {
+	if ctx != nil && ctx.RowValues != nil {
+		if e == nil || e.topIndex < 0 || e.topIndex >= len(ctx.RowValues) {
+			name := "<unknown>"
+			if e != nil && len(e.rawPath) > 0 {
+				name = e.rawPath[0]
+			}
+			return table.Null(), fmt.Errorf("column %q not found", name)
+		}
+		return resolveNestedValuePath(ctx.RowValues[e.topIndex], e.nestedPath)
+	}
 	if e == nil || ctx == nil || ctx.Table == nil || e.topIndex < 0 || e.topIndex >= len(ctx.Table.Columns) {
 		name := "<unknown>"
 		if e != nil && len(e.rawPath) > 0 {

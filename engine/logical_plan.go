@@ -13,6 +13,7 @@ import (
 // Logical plans are immutable after construction; optimizer and physical
 // planning stages may read them, but must not rewrite them in place.
 type logicalPipeline struct {
+	Source       *logicalSource
 	Ops          []logicalOp
 	InputEnv     schemaEnv
 	InputSchema  table.Schema
@@ -62,7 +63,8 @@ type logicalTail struct {
 
 type logicalFilter struct {
 	logicalBase
-	expr logicalTypedExpr
+	expr           logicalTypedExpr
+	sourcePushable bool
 }
 
 type logicalTransform struct {
@@ -142,12 +144,12 @@ type logicalJoin struct {
 	rightKeys []logicalPathBinding
 }
 
-// optimizedLogicalPipeline is intentionally separate from logicalPipeline even
-// while the optimizer is a semantic no-op. The current no-op pass shares the
-// immutable logical facts to avoid planning-time allocation regressions. Future
-// optimization passes that rewrite anything must allocate replacement optimized
-// nodes instead of mutating shared logical plan internals.
+// optimizedLogicalPipeline is intentionally separate from logicalPipeline. When
+// no source rewrite applies, optimization shares immutable logical facts to
+// avoid planning-time allocation regressions. Rewrites allocate replacement
+// optimized metadata instead of mutating shared logical plan internals.
 type optimizedLogicalPipeline struct {
+	Source       *optimizedSource
 	Ops          []logicalOp
 	InputEnv     schemaEnv
 	InputSchema  table.Schema
@@ -155,6 +157,7 @@ type optimizedLogicalPipeline struct {
 }
 
 type physicalPipeline struct {
+	Source       *physicalSource
 	Ops          []plannedOp
 	InputSchema  table.Schema
 	OutputSchema table.Schema
@@ -199,7 +202,7 @@ func planLogicalOp(input schemaEnv, op ast.Op, load LoadFunc) (logicalOp, error)
 		if err != nil {
 			return nil, fmt.Errorf("filter: %w", err)
 		}
-		return logicalFilter{logicalBase: logicalBaseFromEnv(input), expr: expr}, nil
+		return logicalFilter{logicalBase: logicalBaseFromEnv(input), expr: expr, sourcePushable: sourceFilterASTCanPush(o.Expr)}, nil
 	case *ast.TransformOp:
 		return planLogicalTransform(o, input)
 	case *ast.GroupOp:
@@ -633,15 +636,17 @@ func optimizeLogicalPipelineInto(plan *logicalPipeline, out *optimizedLogicalPip
 	if out == nil {
 		return fmt.Errorf("optimize logical pipeline: nil output")
 	}
-	// The no-op optimizer creates the optimized ADT wrapper without copying the
-	// immutable logical facts. Keeping this allocation-free matters for cheap
-	// per-call CLI pipelines; real rewrites must allocate replacement nodes.
+	// The default optimizer path creates the optimized ADT wrapper without
+	// copying immutable logical facts. Keeping that allocation-free matters for
+	// cheap per-call CLI pipelines; rewrites must allocate replacement metadata.
 	*out = optimizedLogicalPipeline{
+		Source:       optimizedSourceFromLogical(plan.Source),
 		Ops:          plan.Ops,
 		InputEnv:     plan.InputEnv,
 		InputSchema:  plan.InputSchema,
 		OutputSchema: plan.OutputSchema,
 	}
+	optimizeSourcePushdown(out)
 	return nil
 }
 
@@ -671,7 +676,13 @@ func planPhysicalPipelineInto(plan *optimizedLogicalPipeline, out *physicalPipel
 		}
 	}
 
+	source, err := physicalSourceFromOptimized(plan.Source)
+	if err != nil {
+		return err
+	}
+
 	*out = physicalPipeline{
+		Source:       source,
 		Ops:          ops,
 		InputSchema:  plan.InputSchema,
 		OutputSchema: output,
