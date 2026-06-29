@@ -1,6 +1,7 @@
 package loader
 
 import (
+	"bufio"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	goavro "github.com/linkedin/goavro/v2"
 	parquet "github.com/parquet-go/parquet-go"
 	"github.com/razeghi71/dq/ast"
+	"github.com/razeghi71/dq/rowstream"
 	"github.com/razeghi71/dq/table"
 )
 
@@ -21,9 +23,11 @@ import (
 type PreparedSource struct {
 	Schema table.Schema
 
-	csv  *preparedCSVSource
-	js   *preparedJSONSource
-	file *preparedFileSource
+	csv    *preparedCSVSource
+	js     *preparedJSONSource
+	file   *preparedFileSource
+	liveJS *preparedLiveJSONSource
+	glob   *preparedGlobSource
 }
 
 type RowPredicate func(row []table.Value) (bool, error)
@@ -78,16 +82,30 @@ type preparedCSVSource struct {
 	loaded      bool
 }
 
-// CanPrepare reports whether Prepare can acquire a source schema without
-// consuming an unreplayable stream or expanding a multi-file source.
+// CanPrepare reports whether a source class can enter prepared planning without
+// materializing full source rows. It is not full load validation; glob formats
+// are validated after expansion by Prepare.
 func CanPrepare(filename string, opts Options) bool {
-	if filename == "" || IsStdin(filename) || HasGlobMeta(filename) {
+	if filename == "" {
 		return false
 	}
 	opts = normalizeOptions(opts)
+	if IsStdin(filename) {
+		return canPrepareFormat(opts.Format, true)
+	}
+	if HasGlobMeta(filename) && opts.Format == "" {
+		return true
+	}
 	format, _ := resolveFormatCompression(filename, opts)
+	return canPrepareFormat(format, false)
+}
+
+func canPrepareFormat(format string, stdin bool) bool {
 	switch format {
 	case "csv", "json", "jsonl", "avro", "parquet":
+		if stdin {
+			return ast.IsStreamLoadFormat(format)
+		}
 		return true
 	default:
 		return false
@@ -101,8 +119,23 @@ func Prepare(filename string, opts Options) (*PreparedSource, error) {
 	if IsStdin(filename) {
 		return nil, fmt.Errorf("prepare source: stdin is not prepareable without consuming it")
 	}
+	return prepareReplayable(filename, opts)
+}
+
+// PrepareInput inspects a source, using stdin when filename is "-". Stdin
+// prepared sources are one-shot: schema acquisition retains the live stream
+// state needed by LoadSpec or StreamSpec.
+func PrepareInput(filename string, opts Options, stdin io.Reader) (*PreparedSource, error) {
+	opts = normalizeOptions(opts)
+	if IsStdin(filename) {
+		return prepareStdin(stdin, opts)
+	}
+	return prepareReplayable(filename, opts)
+}
+
+func prepareReplayable(filename string, opts Options) (*PreparedSource, error) {
 	if HasGlobMeta(filename) {
-		return nil, fmt.Errorf("prepare source: globs are not prepareable yet")
+		return prepareGlob(filename, opts)
 	}
 	format, compression := resolveFormatCompression(filename, opts)
 	if err := validateOptionsForFormat(opts, format); err != nil {
@@ -297,6 +330,30 @@ func (p *PreparedSource) LoadSpec(spec SourceLoadSpec) (*table.Table, error) {
 		return p.js.load(spec)
 	case p.file != nil:
 		return p.file.load(spec)
+	case p.liveJS != nil:
+		return p.liveJS.load(spec)
+	case p.glob != nil:
+		return p.glob.load(spec)
+	default:
+		return nil, fmt.Errorf("prepared source is not configured")
+	}
+}
+
+func (p *PreparedSource) StreamSpec(spec SourceLoadSpec) (rowstream.Stream, error) {
+	if p == nil {
+		return nil, fmt.Errorf("prepared source is not configured")
+	}
+	switch {
+	case p.csv != nil:
+		return p.csv.stream(spec)
+	case p.js != nil:
+		return p.js.stream(spec)
+	case p.file != nil:
+		return p.file.stream(spec)
+	case p.liveJS != nil:
+		return p.liveJS.stream(spec)
+	case p.glob != nil:
+		return p.glob.stream(spec)
 	default:
 		return nil, fmt.Errorf("prepared source is not configured")
 	}
@@ -304,10 +361,17 @@ func (p *PreparedSource) LoadSpec(spec SourceLoadSpec) (*table.Table, error) {
 
 // Close releases the prepared source when planning fails before Load is called.
 func (p *PreparedSource) Close() error {
-	if p == nil || p.csv == nil {
+	if p == nil {
 		return nil
 	}
-	return p.csv.close()
+	switch {
+	case p.csv != nil:
+		return p.csv.close()
+	case p.liveJS != nil:
+		return p.liveJS.close()
+	default:
+		return nil
+	}
 }
 
 func preparedSourceLoadPlanFor(schema table.Schema, spec SourceLoadSpec, source string) (preparedSourceLoadPlan, error) {
@@ -400,20 +464,28 @@ func sourceColumnProjection(schema table.Schema, columns []string, source string
 }
 
 func addPreparedSourceReadRow(t *table.Table, readVals []table.Value, plan preparedSourceLoadPlan) error {
+	vals, keep, err := preparedSourceOutputRow(readVals, plan)
+	if err != nil || !keep {
+		return err
+	}
+	return t.AddRowTyped(vals)
+}
+
+func preparedSourceOutputRow(readVals []table.Value, plan preparedSourceLoadPlan) ([]table.Value, bool, error) {
 	if plan.predicate != nil {
 		keep, err := plan.predicate(readVals)
 		if err != nil {
-			return err
+			return nil, false, err
 		}
 		if !keep {
-			return nil
+			return nil, false, nil
 		}
 	}
 	vals := make([]table.Value, len(plan.outputFromRead))
 	for i, readIdx := range plan.outputFromRead {
 		vals[i] = readVals[readIdx]
 	}
-	return t.AddRowTyped(vals)
+	return vals, true, nil
 }
 
 type csvPreparedLoadPlan struct {
@@ -486,13 +558,25 @@ func (p *preparedCSVSource) load(spec SourceLoadSpec) (*table.Table, error) {
 	mapping := csvColumnMapping(p.columns, p.columns)
 	badRecords := 0
 	for _, row := range p.sampleRows {
-		if err := addPreparedCSVTypedRow(t, row, mapping, cfg.source, p.columns, p.types, plan, cfg, &badRecords); err != nil {
+		vals, keep, err := preparedCSVOutputRow(row, mapping, cfg.source, p.columns, p.types, plan, cfg, &badRecords)
+		if err != nil {
 			return nil, err
+		}
+		if keep {
+			if err := t.AddRowTypedExact(vals); err != nil {
+				return nil, err
+			}
 		}
 	}
 	for _, row := range p.pendingRows {
-		if err := addPreparedCSVTypedRow(t, row, mapping, cfg.source, p.columns, p.types, plan, cfg, &badRecords); err != nil {
+		vals, keep, err := preparedCSVOutputRow(row, mapping, cfg.source, p.columns, p.types, plan, cfg, &badRecords)
+		if err != nil {
 			return nil, err
+		}
+		if keep {
+			if err := t.AddRowTypedExact(vals); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -509,38 +593,149 @@ func (p *preparedCSVSource) load(spec SourceLoadSpec) (*table.Table, error) {
 			return nil, err
 		}
 		row := csvRawRow{record: record, rowNum: rowNum}
-		if err := addPreparedCSVTypedRow(t, row, mapping, cfg.source, p.columns, p.types, plan, cfg, &badRecords); err != nil {
+		vals, keep, err := preparedCSVOutputRow(row, mapping, cfg.source, p.columns, p.types, plan, cfg, &badRecords)
+		if err != nil {
 			return nil, err
+		}
+		if keep {
+			if err := t.AddRowTypedExact(vals); err != nil {
+				return nil, err
+			}
 		}
 		rowNum++
 	}
 	return t, nil
 }
 
-func addPreparedCSVTypedRow(t *table.Table, row csvRawRow, mapping []int, source string, columns []string, types []table.ValueType, plan csvPreparedLoadPlan, cfg csvLoadConfig, badRecords *int) error {
+func preparedCSVOutputRow(row csvRawRow, mapping []int, source string, columns []string, types []table.ValueType, plan csvPreparedLoadPlan, cfg csvLoadConfig, badRecords *int) ([]table.Value, bool, error) {
 	readVals, err := csvTypedRowValues(row, mapping, source, columns, types, plan.read)
 	if err != nil {
 		(*badRecords)++
 		if *badRecords > cfg.maxBadRecords {
-			return err
+			return nil, false, err
 		}
-		return nil
+		return nil, false, nil
 	}
 	if plan.predicate != nil {
 		keep, err := plan.predicate(readVals)
 		if err != nil {
-			return err
+			return nil, false, err
 		}
 		if !keep {
-			return nil
+			return nil, false, nil
 		}
 	}
 	vals := make([]table.Value, len(plan.outputFromRead))
 	for i, readIdx := range plan.outputFromRead {
 		vals[i] = readVals[readIdx]
 	}
-	t.AddRow(vals)
-	return nil
+	return vals, true, nil
+}
+
+func (p *preparedCSVSource) stream(spec SourceLoadSpec) (rowstream.Stream, error) {
+	if p.loaded {
+		return nil, fmt.Errorf("prepared source already loaded")
+	}
+	p.loaded = true
+	if p.empty {
+		return &csvPreparedStream{
+			closer: p.closer,
+			schema: table.NewSchema(nil, nil),
+			closed: false,
+		}, nil
+	}
+	plan, err := csvPreparedLoadPlanFor(p.columns, p.types, p.schemas, spec, p.cfg.source)
+	if err != nil {
+		_ = p.close()
+		return nil, err
+	}
+	buffered := make([]csvRawRow, 0, len(p.sampleRows)+len(p.pendingRows))
+	buffered = append(buffered, p.sampleRows...)
+	buffered = append(buffered, p.pendingRows...)
+	return &csvPreparedStream{
+		closer:   p.closer,
+		reader:   p.reader,
+		cfg:      p.cfg,
+		columns:  append([]string(nil), p.columns...),
+		types:    append([]table.ValueType(nil), p.types...),
+		mapping:  csvColumnMapping(p.columns, p.columns),
+		plan:     plan,
+		buffered: buffered,
+		rowNum:   p.startRow,
+		schema:   table.NewSchema(plan.output.columns, plan.output.schemas),
+	}, nil
+}
+
+type csvPreparedStream struct {
+	closer     io.Closer
+	reader     *csv.Reader
+	cfg        csvLoadConfig
+	columns    []string
+	types      []table.ValueType
+	mapping    []int
+	plan       csvPreparedLoadPlan
+	buffered   []csvRawRow
+	bufferedAt int
+	rowNum     int
+	badRecords int
+	schema     table.Schema
+	closed     bool
+}
+
+func (s *csvPreparedStream) Schema() table.Schema {
+	return s.schema
+}
+
+func (s *csvPreparedStream) Next() (rowstream.Row, bool, error) {
+	for {
+		var row csvRawRow
+		if s.bufferedAt < len(s.buffered) {
+			row = s.buffered[s.bufferedAt]
+			s.bufferedAt++
+		} else {
+			if s.reader == nil {
+				if err := s.Close(); err != nil {
+					return nil, false, err
+				}
+				return nil, false, nil
+			}
+			record, err := s.reader.Read()
+			if err == io.EOF {
+				if err := s.Close(); err != nil {
+					return nil, false, err
+				}
+				return nil, false, nil
+			}
+			if err != nil {
+				return nil, false, fmt.Errorf("error reading CSV row: %w", err)
+			}
+			if err := validateCSVRecord(record, len(s.columns), s.cfg, s.rowNum); err != nil {
+				return nil, false, err
+			}
+			row = csvRawRow{record: record, rowNum: s.rowNum}
+			s.rowNum++
+		}
+		vals, keep, err := preparedCSVOutputRow(row, s.mapping, s.cfg.source, s.columns, s.types, s.plan, s.cfg, &s.badRecords)
+		if err != nil {
+			return nil, false, err
+		}
+		if keep {
+			return vals, true, nil
+		}
+	}
+}
+
+func (s *csvPreparedStream) Close() error {
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	if s.closer == nil {
+		return nil
+	}
+	err := s.closer.Close()
+	s.closer = nil
+	return err
 }
 
 func (p *preparedCSVSource) close() error {
@@ -580,6 +775,266 @@ func (p *preparedJSONSource) load(spec SourceLoadSpec) (*table.Table, error) {
 	return buildTableFromJSONRecordsWithPlan(records, p.cfg, plan)
 }
 
+func (p *preparedJSONSource) stream(spec SourceLoadSpec) (rowstream.Stream, error) {
+	if p.loaded {
+		return nil, fmt.Errorf("prepared source already loaded")
+	}
+	p.loaded = true
+
+	plan, err := preparedSourceLoadPlanFor(table.NewSchema(p.state.columns, p.state.schemas), spec, p.filename)
+	if err != nil {
+		return nil, err
+	}
+	return &preparedJSONStream{
+		filename:        p.filename,
+		format:          p.format,
+		cfg:             p.cfg,
+		plan:            plan,
+		buffered:        append([]jsonLogicalRecord(nil), p.records...),
+		recordsComplete: p.recordsComplete,
+		schema:          table.NewSchema(plan.outputColumns, plan.outputSchemas),
+	}, nil
+}
+
+type preparedJSONStream struct {
+	filename        string
+	format          string
+	cfg             jsonLoadConfig
+	plan            preparedSourceLoadPlan
+	buffered        []jsonLogicalRecord
+	bufferedAt      int
+	recordsComplete bool
+	rest            jsonRecordStream
+	restOpened      bool
+	nextRow         int
+	badRecords      int
+	schema          table.Schema
+	closed          bool
+}
+
+type jsonRecordStream interface {
+	Next() (jsonLogicalRecord, bool, error)
+	Close() error
+}
+
+func (s *preparedJSONStream) Schema() table.Schema {
+	return s.schema
+}
+
+func (s *preparedJSONStream) Next() (rowstream.Row, bool, error) {
+	for {
+		rec, ok, err := s.nextRecord()
+		if err != nil || !ok {
+			return nil, ok, err
+		}
+		rowIdx := s.nextRow
+		s.nextRow++
+		vals, keep, err := preparedJSONOutputRow(rec, rowIdx, s.cfg, s.plan, &s.badRecords)
+		if err != nil {
+			return nil, false, err
+		}
+		if keep {
+			return vals, true, nil
+		}
+	}
+}
+
+func (s *preparedJSONStream) nextRecord() (jsonLogicalRecord, bool, error) {
+	if s.bufferedAt < len(s.buffered) {
+		rec := s.buffered[s.bufferedAt]
+		s.bufferedAt++
+		return rec, true, nil
+	}
+	if s.recordsComplete {
+		if err := s.Close(); err != nil {
+			return jsonLogicalRecord{}, false, err
+		}
+		return jsonLogicalRecord{}, false, nil
+	}
+	if !s.restOpened {
+		rest, err := openJSONRestStream(s.filename, s.format, s.cfg, len(s.buffered))
+		if err != nil {
+			return jsonLogicalRecord{}, false, err
+		}
+		s.rest = rest
+		s.restOpened = true
+	}
+	rec, ok, err := s.rest.Next()
+	if err != nil || !ok {
+		if !ok {
+			if err := s.Close(); err != nil {
+				return jsonLogicalRecord{}, false, err
+			}
+		}
+		return rec, ok, err
+	}
+	return rec, true, nil
+}
+
+func (s *preparedJSONStream) Close() error {
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	if s.rest != nil {
+		return s.rest.Close()
+	}
+	return nil
+}
+
+func openJSONRestStream(filename, format string, cfg jsonLoadConfig, skip int) (jsonRecordStream, error) {
+	f, err := openInputReader(filename, cfg.compression)
+	if err != nil {
+		return nil, err
+	}
+	switch format {
+	case "json":
+		stream, err := newJSONArrayRecordStream(f, cfg, skip)
+		if err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+		return stream, nil
+	case "jsonl":
+		return newJSONLRecordStream(f, cfg, skip), nil
+	default:
+		_ = f.Close()
+		return nil, fmt.Errorf("prepared json source: unsupported format %q", format)
+	}
+}
+
+type jsonArrayRecordStream struct {
+	closer io.Closer
+	dec    *json.Decoder
+	cfg    jsonLoadConfig
+	rowIdx int
+	closed bool
+}
+
+func newJSONArrayRecordStream(closer io.Closer, cfg jsonLoadConfig, skip int) (*jsonArrayRecordStream, error) {
+	r, ok := closer.(io.Reader)
+	if !ok {
+		return nil, fmt.Errorf("json stream: source is not readable")
+	}
+	dec := json.NewDecoder(r)
+	dec.UseNumber()
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, fmt.Errorf("cannot parse JSON: %w (expected array of objects)", err)
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '[' {
+		return nil, fmt.Errorf("cannot parse JSON: expected array of objects")
+	}
+	stream := &jsonArrayRecordStream{closer: closer, dec: dec, cfg: cfg}
+	for i := 0; i < skip; i++ {
+		if !dec.More() {
+			if err := stream.consumeEnd(); err != nil {
+				return nil, err
+			}
+			return stream, nil
+		}
+		if _, err := decodeJSONElementRecord(dec, cfg.source, i); err != nil {
+			return nil, err
+		}
+		stream.rowIdx++
+	}
+	return stream, nil
+}
+
+func (s *jsonArrayRecordStream) Next() (jsonLogicalRecord, bool, error) {
+	if s.closed {
+		return jsonLogicalRecord{}, false, nil
+	}
+	if !s.dec.More() {
+		if err := s.consumeEnd(); err != nil {
+			return jsonLogicalRecord{}, false, err
+		}
+		if err := s.Close(); err != nil {
+			return jsonLogicalRecord{}, false, err
+		}
+		return jsonLogicalRecord{}, false, nil
+	}
+	rec, err := decodeJSONElementRecord(s.dec, s.cfg.source, s.rowIdx)
+	if err != nil {
+		return jsonLogicalRecord{}, false, err
+	}
+	s.rowIdx++
+	return rec, true, nil
+}
+
+func (s *jsonArrayRecordStream) consumeEnd() error {
+	return validateJSONArrayEnd(s.dec)
+}
+
+func (s *jsonArrayRecordStream) DrainSyntax() error {
+	if s.closed {
+		return nil
+	}
+	if err := validateJSONArraySyntaxRemainder(s.dec); err != nil {
+		_ = s.Close()
+		return err
+	}
+	return s.Close()
+}
+
+func (s *jsonArrayRecordStream) Close() error {
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	return s.closer.Close()
+}
+
+type jsonlRecordStream struct {
+	closer  io.Closer
+	scanner *bufio.Scanner
+	source  string
+	lineNum int
+	closed  bool
+}
+
+func newJSONLRecordStream(closer io.Closer, cfg jsonLoadConfig, skip int) *jsonlRecordStream {
+	r := closer.(io.Reader)
+	stream := &jsonlRecordStream{closer: closer, scanner: newJSONLScanner(r), source: cfg.source}
+	for skipped := 0; skipped < skip && stream.scanner.Scan(); {
+		stream.lineNum++
+		if strings.TrimSpace(stream.scanner.Text()) == "" {
+			continue
+		}
+		skipped++
+	}
+	return stream
+}
+
+func (s *jsonlRecordStream) Next() (jsonLogicalRecord, bool, error) {
+	if s.closed {
+		return jsonLogicalRecord{}, false, nil
+	}
+	for s.scanner.Scan() {
+		s.lineNum++
+		line := strings.TrimSpace(s.scanner.Text())
+		if line == "" {
+			continue
+		}
+		return decodeJSONLLineRecord(line, s.source, s.lineNum), true, nil
+	}
+	if err := s.scanner.Err(); err != nil {
+		return jsonLogicalRecord{}, false, fmt.Errorf("error reading JSONL: %w", err)
+	}
+	if err := s.Close(); err != nil {
+		return jsonLogicalRecord{}, false, err
+	}
+	return jsonLogicalRecord{}, false, nil
+}
+
+func (s *jsonlRecordStream) Close() error {
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	return s.closer.Close()
+}
+
 func (p *preparedFileSource) load(spec SourceLoadSpec) (*table.Table, error) {
 	if p.loaded {
 		return nil, fmt.Errorf("prepared source already loaded")
@@ -595,6 +1050,26 @@ func (p *preparedFileSource) load(spec SourceLoadSpec) (*table.Table, error) {
 		return loadPreparedAvroSource(p.filename, plan)
 	case "parquet":
 		return loadPreparedParquetSource(p.filename, plan)
+	default:
+		return nil, fmt.Errorf("prepared source: unsupported metadata format %q", format)
+	}
+}
+
+func (p *preparedFileSource) stream(spec SourceLoadSpec) (rowstream.Stream, error) {
+	if p.loaded {
+		return nil, fmt.Errorf("prepared source already loaded")
+	}
+	p.loaded = true
+	plan, err := preparedSourceLoadPlanFor(p.schema, spec, p.filename)
+	if err != nil {
+		return nil, err
+	}
+	format, _ := resolveFormatCompression(p.filename, p.opts)
+	switch format {
+	case "avro":
+		return streamPreparedAvroSource(p.filename, plan)
+	case "parquet":
+		return streamPreparedParquetSource(p.filename, plan)
 	default:
 		return nil, fmt.Errorf("prepared source: unsupported metadata format %q", format)
 	}
@@ -657,12 +1132,11 @@ func inspectJSONSchemaFromReader(r io.Reader, cfg jsonLoadConfig) (preparedJSONI
 		}
 	}
 	if sampleExhausted {
-		if _, err := dec.Token(); err != nil {
-			return preparedJSONInspection{}, fmt.Errorf("cannot parse JSON: %w (expected array of objects)", err)
+		if err := validateJSONArrayEnd(dec); err != nil {
+			return preparedJSONInspection{}, err
 		}
-		if err := requireJSONDecoderEOF(dec); err != nil {
-			return preparedJSONInspection{}, fmt.Errorf("cannot parse JSON: %w (expected array of objects)", err)
-		}
+	} else if err := validateJSONArraySyntaxRemainder(dec); err != nil {
+		return preparedJSONInspection{}, err
 	}
 	if jsonPreparedInferenceNeedsConservativeNullability(cfg.inferRows, inferSeen, sampleExhausted) {
 		state.schemas = deepNullableSchemas(state.schemas)
@@ -672,6 +1146,26 @@ func inspectJSONSchemaFromReader(r io.Reader, cfg jsonLoadConfig) (preparedJSONI
 		records:         records,
 		recordsComplete: sampleExhausted,
 	}, nil
+}
+
+func validateJSONArraySyntaxRemainder(dec *json.Decoder) error {
+	for dec.More() {
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return fmt.Errorf("cannot parse JSON: %w (expected array of objects)", err)
+		}
+	}
+	return validateJSONArrayEnd(dec)
+}
+
+func validateJSONArrayEnd(dec *json.Decoder) error {
+	if _, err := dec.Token(); err != nil {
+		return fmt.Errorf("cannot parse JSON: %w (expected array of objects)", err)
+	}
+	if err := requireJSONDecoderEOF(dec); err != nil {
+		return fmt.Errorf("cannot parse JSON: %w (expected array of objects)", err)
+	}
+	return nil
 }
 
 func decodeJSONElementRecord(dec *json.Decoder, source string, rowIdx int) (jsonLogicalRecord, error) {
@@ -780,24 +1274,47 @@ func buildTableFromJSONRecordsWithPlan(records []jsonLogicalRecord, cfg jsonLoad
 	t := table.NewTableWithSchemas(plan.outputColumns, plan.outputSchemas)
 	badRecords := 0
 	for i, rec := range records {
-		if rec.err != nil {
-			if err := countJSONBadRecord(rec, i, rec.err, cfg.maxBadRecords, &badRecords); err != nil {
-				return nil, err
-			}
-			continue
-		}
-		readVals, err := jsonRecordReadValues(rec.fields, plan)
-		if err == nil {
-			err = addPreparedSourceReadRow(t, readVals, plan)
-		}
+		vals, keep, err := preparedJSONOutputRow(rec, i, cfg, plan, &badRecords)
 		if err != nil {
-			if err := countJSONBadRecord(rec, i, err, cfg.maxBadRecords, &badRecords); err != nil {
+			return nil, err
+		}
+		if keep {
+			if err := t.AddRowTyped(vals); err != nil {
 				return nil, err
 			}
-			continue
 		}
 	}
 	return t, nil
+}
+
+func preparedJSONOutputRow(rec jsonLogicalRecord, rowIdx int, cfg jsonLoadConfig, plan preparedSourceLoadPlan, badRecords *int) ([]table.Value, bool, error) {
+	if rec.err != nil {
+		if err := countJSONBadRecord(rec, rowIdx, rec.err, cfg.maxBadRecords, badRecords); err != nil {
+			return nil, false, err
+		}
+		return nil, false, nil
+	}
+	readVals, err := jsonRecordReadValues(rec.fields, plan)
+	if err != nil {
+		if err := countJSONBadRecord(rec, rowIdx, err, cfg.maxBadRecords, badRecords); err != nil {
+			return nil, false, err
+		}
+		return nil, false, nil
+	}
+	if plan.predicate != nil {
+		keep, err := plan.predicate(readVals)
+		if err != nil {
+			return nil, false, err
+		}
+		if !keep {
+			return nil, false, nil
+		}
+	}
+	vals := make([]table.Value, len(plan.outputFromRead))
+	for i, readIdx := range plan.outputFromRead {
+		vals[i] = readVals[readIdx]
+	}
+	return vals, true, nil
 }
 
 func jsonRecordReadValues(fields []table.RecordField, plan preparedSourceLoadPlan) ([]table.Value, error) {
@@ -999,6 +1516,195 @@ func loadPreparedParquetSource(filename string, plan preparedSourceLoadPlan) (*t
 		}
 	}
 	return t, nil
+}
+
+func streamPreparedAvroSource(filename string, plan preparedSourceLoadPlan) (rowstream.Stream, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return nil, fmt.Errorf("cannot open %s: %w", filename, err)
+	}
+	ocfr, err := goavro.NewOCFReader(f)
+	if err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("cannot read Avro OCF from %s: %w", filename, err)
+	}
+	columns, schemas, fieldSchemas, err := avroSchemaParts(ocfr.Codec().Schema())
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if err := validatePreparedSourceSchema(plan, table.NewSchema(columns, schemas)); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return &avroPreparedStream{
+		closer:       f,
+		reader:       ocfr,
+		plan:         plan,
+		fieldSchemas: fieldSchemas,
+		schema:       table.NewSchema(plan.outputColumns, plan.outputSchemas),
+	}, nil
+}
+
+type avroPreparedStream struct {
+	closer       io.Closer
+	reader       *goavro.OCFReader
+	plan         preparedSourceLoadPlan
+	fieldSchemas avroFieldSchemas
+	schema       table.Schema
+	closed       bool
+}
+
+func (s *avroPreparedStream) Schema() table.Schema {
+	return s.schema
+}
+
+func (s *avroPreparedStream) Next() (rowstream.Row, bool, error) {
+	for s.reader.Scan() {
+		datum, err := s.reader.Read()
+		if err != nil {
+			return nil, false, fmt.Errorf("error reading Avro record: %w", err)
+		}
+		rec, ok := datum.(map[string]interface{})
+		if !ok {
+			return nil, false, fmt.Errorf("unexpected Avro record type %T", datum)
+		}
+		readVals := make([]table.Value, len(s.plan.readSourceIndexes))
+		for readIdx, sourceIdx := range s.plan.readSourceIndexes {
+			col := s.plan.sourceColumns[sourceIdx]
+			v, exists := rec[col]
+			if !exists || v == nil {
+				readVals[readIdx] = table.Null()
+				continue
+			}
+			val := s.fieldSchemas.context.value(v, s.fieldSchemas.schemas[col], s.fieldSchemas.rootNamespace)
+			cv, err := table.CoerceValueToSchemaAtPath(val, s.plan.sourceSchemas[sourceIdx], col)
+			if err != nil {
+				return nil, false, fmt.Errorf("error materializing Avro record: %w", err)
+			}
+			readVals[readIdx] = cv
+		}
+		vals, keep, err := preparedSourceOutputRow(readVals, s.plan)
+		if err != nil {
+			return nil, false, fmt.Errorf("error materializing Avro record: %w", err)
+		}
+		if keep {
+			return vals, true, nil
+		}
+	}
+	if err := s.reader.Err(); err != nil {
+		return nil, false, fmt.Errorf("error reading Avro file: %w", err)
+	}
+	if err := s.Close(); err != nil {
+		return nil, false, err
+	}
+	return nil, false, nil
+}
+
+func (s *avroPreparedStream) Close() error {
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	return s.closer.Close()
+}
+
+func streamPreparedParquetSource(filename string, plan preparedSourceLoadPlan) (rowstream.Stream, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return nil, fmt.Errorf("cannot open %s: %w", filename, err)
+	}
+	reader := parquet.NewGenericReader[any](f)
+	schema := reader.Schema()
+	columns := parquetColumns(schema, reader)
+	schemas := parquetColumnSchemas(schema, columns)
+	if err := validatePreparedSourceSchema(plan, table.NewSchema(columns, schemas)); err != nil {
+		_ = reader.Close()
+		_ = f.Close()
+		return nil, err
+	}
+	return &parquetPreparedStream{
+		file:   f,
+		reader: reader,
+		plan:   plan,
+		buf:    make([]any, 128),
+		schema: table.NewSchema(plan.outputColumns, plan.outputSchemas),
+	}, nil
+}
+
+type parquetPreparedStream struct {
+	file     io.Closer
+	reader   *parquet.GenericReader[any]
+	plan     preparedSourceLoadPlan
+	buf      []any
+	bufN     int
+	bufAt    int
+	schema   table.Schema
+	closed   bool
+	finished bool
+}
+
+func (s *parquetPreparedStream) Schema() table.Schema {
+	return s.schema
+}
+
+func (s *parquetPreparedStream) Next() (rowstream.Row, bool, error) {
+	for {
+		if s.bufAt < s.bufN {
+			row, ok := s.buf[s.bufAt].(map[string]any)
+			s.bufAt++
+			if !ok {
+				return nil, false, fmt.Errorf("unexpected parquet row type %T", s.buf[s.bufAt-1])
+			}
+			readVals := make([]table.Value, len(s.plan.readSourceIndexes))
+			for readIdx, sourceIdx := range s.plan.readSourceIndexes {
+				col := s.plan.sourceColumns[sourceIdx]
+				val := parquetValue(row[col], s.plan.sourceSchemas[sourceIdx])
+				cv, err := table.CoerceValueToSchemaAtPath(val, s.plan.sourceSchemas[sourceIdx], col)
+				if err != nil {
+					return nil, false, fmt.Errorf("error materializing Parquet row: %w", err)
+				}
+				readVals[readIdx] = cv
+			}
+			vals, keep, err := preparedSourceOutputRow(readVals, s.plan)
+			if err != nil {
+				return nil, false, fmt.Errorf("error materializing Parquet row: %w", err)
+			}
+			if keep {
+				return vals, true, nil
+			}
+			continue
+		}
+		if s.finished {
+			if err := s.Close(); err != nil {
+				return nil, false, err
+			}
+			return nil, false, nil
+		}
+		n, err := s.reader.Read(s.buf)
+		s.bufN = n
+		s.bufAt = 0
+		if err == io.EOF {
+			s.finished = true
+			if n == 0 {
+				continue
+			}
+		} else if err != nil {
+			return nil, false, fmt.Errorf("error reading Parquet rows: %w", err)
+		}
+	}
+}
+
+func (s *parquetPreparedStream) Close() error {
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	err := s.reader.Close()
+	if fileErr := s.file.Close(); err == nil {
+		err = fileErr
+	}
+	return err
 }
 
 func validatePreparedSourceSchema(plan preparedSourceLoadPlan, got table.Schema) error {

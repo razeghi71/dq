@@ -89,6 +89,36 @@ func TestCLIGlobPreservesSchemasAcrossFormats(t *testing.T) {
 	})
 }
 
+func TestCLIGlobPermissiveShardSchemaWideningAcrossBinaryFormats(t *testing.T) {
+	bin := buildCLI(t)
+
+	for _, format := range []string{"avro", "parquet"} {
+		t.Run(format, func(t *testing.T) {
+			dir := t.TempDir()
+			intCSV := writeCLIGlobSchemaFile(t, dir, "int.csv", "id\n7\n")
+			stringCSV := writeCLIGlobSchemaFile(t, dir, "string.csv", "id\neight\n")
+
+			runCLIQuery(t, bin, intCSV+" | "+format+" to "+filepath.Join(dir, "part-0."+format))
+			runCLIQuery(t, bin, stringCSV+" | "+format+" to "+filepath.Join(dir, "part-1."+format))
+
+			glob := filepath.Join(dir, "part-*."+format)
+			rows := readCLIDescribeRows(t, runCLIQuery(t, bin, glob+" | describe | json"))
+			requireCLIDescribeSchema(t, rows, "id", "string", "string", 2)
+
+			outRows := decodeCLIGlobSchemaJSONRows(t, runCLIQuery(t, bin, glob+" | select id | json"))
+			if len(outRows) != 2 {
+				t.Fatalf("%s widened rows: got %#v, want 2 rows", format, outRows)
+			}
+			for i, want := range []string{"7", "eight"} {
+				got, ok := outRows[i]["id"].(string)
+				if !ok || got != want {
+					t.Fatalf("%s widened row %d: got %#v, want id=%q", format, i, outRows[i], want)
+				}
+			}
+		})
+	}
+}
+
 func writeCLIGlobSchemaFile(t *testing.T, dir, name, content string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)

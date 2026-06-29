@@ -1260,14 +1260,17 @@ func TestSelectColsWithSchemaAllowsExactNestedRenameWithNullableWidening(t *test
 	requireRecordValue(t, projected.GetAt(0, 0), []RecordField{{Name: "x", Value: IntVal(7)}})
 }
 
-func TestNewTableWithSchemasDuplicateRecordFieldSchemaIsNotStored(t *testing.T) {
+func TestNewTableWithSchemasDuplicateRecordFieldSchemaCannotAppendTypedValues(t *testing.T) {
 	tbl := NewTableWithSchemas([]string{"payload"}, []*TypeDescriptor{
 		recordOf(
 			field("x", td(TypeInt)),
 			field("x", td(TypeInt)),
 		),
 	})
-	requireSchemaString(t, tbl.Col(0).Schema(), "string")
+	requireSchemaString(t, tbl.Col(0).RawSchema(), "record<x:int, x:int>")
+	if got := tbl.Col(0).ColType(); got != TypeNull {
+		t.Fatalf("invalid schema storage type: got %s, want null", TypeName(got))
+	}
 
 	err := tbl.AddRowTyped([]Value{
 		RecordVal([]RecordField{{Name: "x", Value: IntVal(1)}}),
@@ -1275,7 +1278,7 @@ func TestNewTableWithSchemasDuplicateRecordFieldSchemaIsNotStored(t *testing.T) 
 	if err == nil {
 		t.Fatal("expected typed append error")
 	}
-	if got, want := err.Error(), "payload expected string, got record<x:int>"; got != want {
+	if got, want := err.Error(), "payload.x duplicate record field"; got != want {
 		t.Fatalf("error: got %q, want %q", got, want)
 	}
 }

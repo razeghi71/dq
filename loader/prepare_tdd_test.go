@@ -276,6 +276,33 @@ func TestPrepareTDDCSVEmptySource(t *testing.T) {
 	}
 }
 
+func TestPrepareTDDCSVLoadSpecUsesStrictFixedSchemaAppend(t *testing.T) {
+	path := writeSourceProjectionTDDFile(t, "strict-append.csv", "id\n1\n")
+	prepared, err := Prepare(path, Options{})
+	if err != nil {
+		t.Fatalf("prepare csv: %v", err)
+	}
+	defer prepared.Close()
+
+	_, err = prepared.LoadSpec(SourceLoadSpec{
+		ReadColumns:   []string{"id"},
+		OutputColumns: []string{"id"},
+		Predicate: func(row []table.Value) (bool, error) {
+			row[0] = table.StrVal("not-an-int")
+			return true, nil
+		},
+	})
+	if err == nil {
+		t.Fatal("expected fixed-schema append error")
+	}
+	msg := strings.ToLower(err.Error())
+	for _, want := range []string{"id", "int", "string"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("strict append error should mention %q, got %v", want, err)
+		}
+	}
+}
+
 func TestPrepareTDDCanPrepareMatrix(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -284,8 +311,10 @@ func TestPrepareTDDCanPrepareMatrix(t *testing.T) {
 		want     bool
 	}{
 		{name: "empty", filename: "", want: false},
-		{name: "stdin", filename: "-", opts: Options{Format: "csv"}, want: false},
-		{name: "glob", filename: "part-*.csv", opts: Options{Format: "csv"}, want: false},
+		{name: "stdin", filename: "-", opts: Options{Format: "csv"}, want: true},
+		{name: "glob", filename: "part-*.csv", opts: Options{Format: "csv"}, want: true},
+		{name: "glob_implicit_extension", filename: "part-*.csv", want: true},
+		{name: "glob_implicit_extensionless_pattern", filename: "part-*", want: true},
 		{name: "csv", filename: "users.csv", want: true},
 		{name: "json", filename: "users.json", want: true},
 		{name: "jsonl", filename: "users.jsonl", want: true},
@@ -540,6 +569,18 @@ func TestPrepareTDDJSONLikeInspectionErrorsAndBadRecordBudget(t *testing.T) {
 		}
 		if strings.Contains(msg, "row 12") {
 			t.Fatalf("malformed JSON array syntax should not be counted repeatedly, got %v", err)
+		}
+	}
+
+	malformedBoundedArray := writeSourceProjectionTDDFile(t, "malformed-bounded-array.json", `[{"id":1}, bad]`)
+	if _, err := Prepare(malformedBoundedArray, Options{InferRows: 1, InferRowsSet: true}); err == nil {
+		t.Fatal("expected malformed JSON array tail to fail despite bounded inference")
+	} else {
+		msg := strings.ToLower(err.Error())
+		for _, want := range []string{"cannot parse json", "invalid character"} {
+			if !strings.Contains(msg, want) {
+				t.Fatalf("bounded malformed JSON array error should mention %q, got %v", want, err)
+			}
 		}
 	}
 

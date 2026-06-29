@@ -8,6 +8,7 @@ import (
 	"github.com/razeghi71/dq/engine"
 	"github.com/razeghi71/dq/loader"
 	"github.com/razeghi71/dq/parser"
+	"github.com/razeghi71/dq/rowstream"
 	"github.com/razeghi71/dq/table"
 	"github.com/razeghi71/dq/writer"
 )
@@ -34,16 +35,23 @@ func runQuery(query string, stdout io.Writer, disallowStdin bool) error {
 		return runMaterializedQuery(q, stdout)
 	}
 
-	prepared, err := loader.Prepare(q.Source.Filename, sourceOpts)
+	prepared, err := loader.PrepareInput(q.Source.Filename, sourceOpts, nil)
 	if err != nil {
 		return fmt.Errorf("load error: %w", err)
 	}
 	defer prepared.Close()
 
-	result, err := engine.ExecuteSourceQuery(q, engine.SourceInfo{
-		Filename: q.Source.Filename,
-		Load:     q.Source.Load,
-		Schema:   prepared.Schema,
+	result, err := engine.ExecuteSourceAdaptiveQuery(q, engine.SourceInfo{
+		Filename:        q.Source.Filename,
+		Load:            q.Source.Load,
+		Schema:          prepared.Schema,
+		DisablePushdown: loader.IsStdin(q.Source.Filename) || loader.HasGlobMeta(q.Source.Filename),
+	}, func(filename string, opts ast.LoadOptions, spec engine.SourceLoadSpec) (rowstream.Stream, error) {
+		return prepared.StreamSpec(loader.SourceLoadSpec{
+			ReadColumns:   spec.ReadColumns,
+			OutputColumns: spec.OutputColumns,
+			Predicate:     loader.RowPredicate(spec.Predicate),
+		})
 	}, func(filename string, opts ast.LoadOptions, spec engine.SourceLoadSpec) (*table.Table, error) {
 		return prepared.LoadSpec(loader.SourceLoadSpec{
 			ReadColumns:   spec.ReadColumns,
@@ -66,7 +74,7 @@ func runMaterializedQuery(q *ast.Query, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("load error: %w", err)
 	}
-	result, err := engine.Execute(q, input, func(filename string, opts ast.LoadOptions) (*table.Table, error) {
+	result, err := engine.ExecuteStreaming(q, input, func(filename string, opts ast.LoadOptions) (*table.Table, error) {
 		return loader.Load(filename, loader.FromAST(opts))
 	})
 	if err != nil {

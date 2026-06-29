@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/razeghi71/dq/ast"
+	"github.com/razeghi71/dq/rowstream"
 	"github.com/razeghi71/dq/table"
 )
 
@@ -32,6 +33,28 @@ func Execute(query *ast.Query, input *table.Table, load LoadFunc) (*table.Table,
 	// the plan input schema here would be redundant. Test-only helpers validate
 	// mismatches when executing prebuilt plans directly.
 	return executePlannedOps(physical.Ops, input)
+}
+
+// ExecuteStreaming runs the query pipeline through the streaming physical
+// interpreter over an already materialized input table. It is a compatibility
+// bridge for source forms that do not yet provide a native source stream.
+func ExecuteStreaming(query *ast.Query, input *table.Table, load LoadFunc) (*table.Table, error) {
+	if len(query.Ops) == 0 {
+		return input, nil
+	}
+	logical, err := planLogicalPipelineFromTableWithLoad(input, query.Ops, load)
+	if err != nil {
+		return nil, err
+	}
+	var optimized optimizedLogicalPipeline
+	if err := optimizeLogicalPipelineInto(logical, &optimized); err != nil {
+		return nil, err
+	}
+	var physical physicalPipeline
+	if err := planPhysicalPipelineInto(&optimized, &physical); err != nil {
+		return nil, err
+	}
+	return executePlannedOpsStreaming(physical.Ops, rowstream.FromTable(input))
 }
 
 // resolveColumnPath walks a dot-path (e.g. ["address", "city"]) to extract a value from a row.

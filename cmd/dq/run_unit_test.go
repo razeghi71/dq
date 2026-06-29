@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/razeghi71/dq/loader"
+	"github.com/razeghi71/dq/parser"
 )
 
 func writeRunCSV(t *testing.T) string {
@@ -86,6 +87,42 @@ func TestRunQueryStringMaterializedGlobWritesStdout(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stdout: got %q, missing %q", out, want)
 		}
+	}
+}
+
+func TestRunMaterializedQueryCompatibilityPath(t *testing.T) {
+	path := writeRunCSV(t)
+	q, err := parser.Parse(path + " | select name | csv")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	var stdout bytes.Buffer
+	if err := runMaterializedQuery(q, &stdout); err != nil {
+		t.Fatalf("run materialized query: %v", err)
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "name\nAlice\nBob" {
+		t.Fatalf("stdout: got %q", got)
+	}
+}
+
+func TestRunMaterializedQueryCompatibilityErrors(t *testing.T) {
+	missing, err := parser.Parse(filepath.Join(t.TempDir(), "missing.unknown") + " | count")
+	if err != nil {
+		t.Fatalf("parse missing: %v", err)
+	}
+	var stdout bytes.Buffer
+	if err := runMaterializedQuery(missing, &stdout); err == nil || !strings.Contains(err.Error(), "load error") {
+		t.Fatalf("materialized load error: got %v", err)
+	}
+
+	path := writeRunCSV(t)
+	bad, err := parser.Parse(path + " | select missing | csv")
+	if err != nil {
+		t.Fatalf("parse bad query: %v", err)
+	}
+	stdout.Reset()
+	if err := runMaterializedQuery(bad, &stdout); err == nil || !strings.Contains(err.Error(), "error:") {
+		t.Fatalf("materialized execution error: got %v", err)
 	}
 }
 
@@ -201,8 +238,9 @@ func TestRunQueryUsesPreparedSourceForReplayableLiteralFiles(t *testing.T) {
 		{name: "avro", filename: "users.avro", want: true},
 		{name: "parquet", filename: "users.parquet", want: true},
 		{name: "extensionless_with_format", filename: "users.data", opts: loader.Options{Format: "jsonl"}, want: true},
-		{name: "stdin", filename: "-", opts: loader.Options{Format: "csv"}, want: false},
-		{name: "glob", filename: "users-*.csv", opts: loader.Options{Format: "csv"}, want: false},
+		{name: "stdin", filename: "-", opts: loader.Options{Format: "csv"}, want: true},
+		{name: "glob", filename: "users-*.csv", opts: loader.Options{Format: "csv"}, want: true},
+		{name: "glob_implicit_extension", filename: "users-*.csv", want: true},
 		{name: "unknown", filename: "users.unknown", want: false},
 	}
 	for _, tc := range cases {

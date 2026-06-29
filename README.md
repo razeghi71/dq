@@ -135,6 +135,22 @@ dq 'wide.csv | select id, status | filter { status == "active" } | json'
 
 For columns the query actually reads, rows and values match the unoptimized pipeline. This optimization only applies to the leading simple prefix; later `select` operations are not pushed across a non-simple filter such as `filter { id + 1 > 0 }`. Source-wide structure errors, such as duplicate CSV headers or malformed row widths, are still reported. After schema inference, values are checked for columns used by the source output or pushed filter; truly unused columns may not be validated and are not materialized into the output table for that optimized prefix. JSON/JSONL inputs still parse each logical record with the JSON decoder, but projected-away fields are not validated into table columns.
 
+## Memory Model
+
+Primary single-file and glob CSV, JSON, JSONL, Avro, and Parquet sources can stream rows after schema acquisition. CLI stdin can stream CSV, JSON, and JSONL, including gzip, zstd, and zlib-wrapped deflate text streams:
+
+```bash
+dq 'huge.csv | head 5'
+dq 'events.jsonl | filter { status == "failed" } | count'
+dq 'wide.parquet | select id, status | head 20 | json'
+```
+
+`head N` stops upstream once N rows have been produced. Row-content errors after that point are not evaluated. Source-wide errors needed before rows can stream, such as duplicate CSV headers or malformed JSON array syntax found during schema acquisition, are still reported.
+
+`filter`, `select`, `remove`, `rename`, row-local `transform`, and `head` can stream. `count` is bounded-memory but blocking: it must read every upstream row needed for the final count before emitting one row. `tail`, `sort`, `distinct`, `group`, `reduce`, and `join` materialize before running. After a blocking operation finishes, later streaming operations can stop early again, so `sort id | transform y = year(raw) | head 1` only evaluates the transformed suffix until `head` has its row.
+
+Single-file sources may also push an adjacent simple `select`/`filter` prefix into the source scanner. Glob and CLI stdin sources stream rows but currently read all source columns before pipeline operations, so existing bad-record visibility stays the same. Stdin with `infer_rows=-1` must buffer the full logical input during schema acquisition because stdin cannot be rewound. Stdin JSON arrays with bounded inference also retain the remaining array records after the sample so malformed top-level array syntax still fails before results are returned. Output writers still receive a final table, so a query that streams many rows to `json`/`csv` may materialize at the writer boundary.
+
 Each pipeline stage sees the columns produced by previous stages. Within one `transform` or `reduce`, assignment target names must be unique and all right-hand sides see the input schema only:
 
 ```bash
@@ -551,7 +567,7 @@ dq 'users.csv | join left orders/part-*.csv on user_id'
 ```
 
 - Patterns are matched relative to the current working directory.
-- Matched files are loaded and concatenated.
+- Primary-source globs stream matched files in deterministic expanded order after schema acquisition. Join globs are loaded as join inputs.
 - CSV glob shards follow the CSV header rules below; compatible extended headers create a column union and missing values are null.
 - CSV header names must be unique; duplicate header names fail at load time.
 - JSON/JSONL glob shards use one sampled schema in deterministic path order. Fields first seen after the sample are bad records; use `with format=jsonl, infer_rows=-1` (or a larger `infer_rows`) when sparse late fields should be part of the schema.
@@ -560,5 +576,4 @@ dq 'users.csv | join left orders/part-*.csv on user_id'
 - Positional shards: values map to the first file's columns by position. CSV row-width rules match single-file loading (strict by default): use `with format=csv, allow_jagged_rows=true` and/or `with format=csv, ignore_unknown_values=true` on globs (format is required at parse time for CSV-only options).
 - Renamed columns with no overlap with the first file's header (e.g. `user_id` vs anchor `id`) are read positionally, not by name.
 - Literal paths with `[` (e.g. `data[1].csv`) are not globs unless `*`, `?`, or `{` is present.
-- All matched files are loaded into memory before the pipeline runs.
-- Single-file sources can avoid storing unneeded columns for an immediate simple `select`/`filter` prefix; glob sources currently load all columns before pipeline execution.
+- Single-file sources can stream rows and avoid storing unneeded columns for an immediate simple `select`/`filter` prefix; glob sources stream rows but currently read all source columns before pipeline operations.

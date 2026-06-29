@@ -18,6 +18,179 @@ func TestFixedSchemaContractAddRowTypedScalarCompatibility(t *testing.T) {
 	requireSchemaString(t, tbl.Col(tbl.ColIndex("amount")).Schema(), "float")
 }
 
+func TestFixedSchemaContractAddRowTypedExactRequiresAlreadyNormalizedValues(t *testing.T) {
+	tbl := NewTableWithSchemas([]string{"id", "amount"}, []*TypeDescriptor{
+		td(TypeInt),
+		td(TypeFloat),
+	})
+
+	if err := tbl.AddRowTypedExact([]Value{IntVal(1), FloatVal(10)}); err != nil {
+		t.Fatalf("AddRowTypedExact exact row returned error: %v", err)
+	}
+	requireSchemaString(t, tbl.Col(tbl.ColIndex("id")).Schema(), "int")
+	requireSchemaString(t, tbl.Col(tbl.ColIndex("amount")).Schema(), "float")
+
+	err := tbl.AddRowTypedExact([]Value{IntVal(2), IntVal(20)})
+	requireSchemaError(t, err, "amount", "float", "int")
+	if tbl.NumRows != 1 || tbl.Col(0).Len() != 1 || tbl.Col(1).Len() != 1 {
+		t.Fatalf("failed exact append partially modified table: rows=%d lens=(%d,%d)", tbl.NumRows, tbl.Col(0).Len(), tbl.Col(1).Len())
+	}
+}
+
+func TestFixedSchemaContractAddRowTypedExactStructuralSchemas(t *testing.T) {
+	tbl := NewTableWithSchemas([]string{"xs", "payload", "u", "anys", "empty"}, []*TypeDescriptor{
+		{Kind: TypeList, Elem: td(TypeInt)},
+		recordOf(field("id", td(TypeInt)), field("name", td(TypeString))),
+		UnionSchema([]*TypeDescriptor{td(TypeInt), td(TypeString)}, false),
+		{Kind: TypeList, Elem: &TypeDescriptor{Kind: TypeMixed}},
+		{Kind: TypeNull, Nullable: true},
+	})
+
+	if err := tbl.AddRowTypedExact([]Value{
+		ListVal([]Value{IntVal(1), IntVal(2)}),
+		RecordVal([]RecordField{{Name: "id", Value: IntVal(1)}, {Name: "name", Value: StrVal("Ada")}}),
+		StrVal("branch"),
+		ListVal([]Value{BoolVal(true), StrVal("open")}),
+		Null(),
+	}); err != nil {
+		t.Fatalf("AddRowTypedExact structural row returned error: %v", err)
+	}
+	if got := tbl.Get(0, "anys"); got.Type != TypeList || len(got.List) != 2 || got.List[0].Type != TypeBool || got.List[1].Type != TypeString {
+		t.Fatalf("list<mixed> value was not preserved: got %v", got)
+	}
+
+	cases := []struct {
+		name string
+		row  []Value
+		path string
+		want string
+		got  string
+	}{
+		{
+			name: "list_element",
+			row: []Value{
+				ListVal([]Value{IntVal(1), StrVal("bad")}),
+				RecordVal([]RecordField{{Name: "id", Value: IntVal(1)}, {Name: "name", Value: StrVal("Ada")}}),
+				IntVal(1),
+				ListVal([]Value{StrVal("ok")}),
+				Null(),
+			},
+			path: "xs[]",
+			want: "int",
+			got:  "string",
+		},
+		{
+			name: "record_field",
+			row: []Value{
+				ListVal([]Value{IntVal(1)}),
+				RecordVal([]RecordField{{Name: "id", Value: StrVal("bad")}, {Name: "name", Value: StrVal("Ada")}}),
+				IntVal(1),
+				ListVal([]Value{StrVal("ok")}),
+				Null(),
+			},
+			path: "payload.id",
+			want: "int",
+			got:  "string",
+		},
+		{
+			name: "union_branch",
+			row: []Value{
+				ListVal([]Value{IntVal(1)}),
+				RecordVal([]RecordField{{Name: "id", Value: IntVal(1)}, {Name: "name", Value: StrVal("Ada")}}),
+				BoolVal(true),
+				ListVal([]Value{StrVal("ok")}),
+				Null(),
+			},
+			path: "u",
+			want: "union<int,string>",
+			got:  "bool",
+		},
+		{
+			name: "null_only",
+			row: []Value{
+				ListVal([]Value{IntVal(1)}),
+				RecordVal([]RecordField{{Name: "id", Value: IntVal(1)}, {Name: "name", Value: StrVal("Ada")}}),
+				IntVal(1),
+				ListVal([]Value{StrVal("ok")}),
+				StrVal("not-null"),
+			},
+			path: "empty",
+			want: "string?",
+			got:  "string",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tbl.AddRowTypedExact(tc.row)
+			requireSchemaError(t, err, tc.path, tc.want, tc.got)
+			if tbl.NumRows != 1 {
+				t.Fatalf("failed exact structural append mutated row count: got %d", tbl.NumRows)
+			}
+		})
+	}
+}
+
+func TestFixedSchemaContractAddRowTypedExactRejectsTopLevelMixed(t *testing.T) {
+	tbl := NewTableWithSchemas([]string{"any"}, []*TypeDescriptor{{Kind: TypeMixed}})
+
+	err := tbl.AddRowTypedExact([]Value{BoolVal(true)})
+	if err == nil {
+		t.Fatal("expected top-level mixed schema error")
+	}
+	if got, want := err.Error(), "any mixed schema is only valid inside list elements"; got != want {
+		t.Fatalf("top-level mixed exact append error: got %q, want %q", got, want)
+	}
+	if tbl.NumRows != 0 || tbl.Col(0).Len() != 0 {
+		t.Fatalf("failed top-level mixed append partially modified table: rows=%d len=%d", tbl.NumRows, tbl.Col(0).Len())
+	}
+}
+
+func TestFixedSchemaContractAddRowTypedRejectsTopLevelMixed(t *testing.T) {
+	tbl := NewTableWithSchemas([]string{"any"}, []*TypeDescriptor{{Kind: TypeMixed}})
+
+	if got := tbl.Col(0).ColType(); got != TypeNull {
+		t.Fatalf("invalid mixed storage type: got %s, want null", TypeName(got))
+	}
+	err := tbl.AddRowTyped([]Value{BoolVal(true)})
+	if err == nil {
+		t.Fatal("expected top-level mixed schema error")
+	}
+	if got, want := err.Error(), "any mixed schema is only valid inside list elements"; got != want {
+		t.Fatalf("top-level mixed typed append error: got %q, want %q", got, want)
+	}
+	if tbl.NumRows != 0 || tbl.Col(0).Len() != 0 {
+		t.Fatalf("failed top-level mixed typed append partially modified table: rows=%d len=%d", tbl.NumRows, tbl.Col(0).Len())
+	}
+}
+
+func TestFixedSchemaContractAddRowTypedExactRejectsRecordShapeChanges(t *testing.T) {
+	schema := recordOf(field("id", td(TypeInt)), field("name", td(TypeString)))
+
+	t.Run("missing_or_extra_field", func(t *testing.T) {
+		tbl := NewTableWithSchemas([]string{"payload"}, []*TypeDescriptor{schema})
+		err := tbl.AddRowTypedExact([]Value{RecordVal([]RecordField{{Name: "id", Value: IntVal(1)}})})
+		requireSchemaError(t, err, "payload", "record<id:int, name:string>", "record<id:int>")
+		if tbl.NumRows != 0 || tbl.Col(0).Len() != 0 {
+			t.Fatalf("failed exact record append partially modified table: rows=%d len=%d", tbl.NumRows, tbl.Col(0).Len())
+		}
+	})
+
+	t.Run("duplicate_field", func(t *testing.T) {
+		tbl := NewTableWithSchemas([]string{"payload"}, []*TypeDescriptor{schema})
+		err := tbl.AddRowTypedExact([]Value{RecordVal([]RecordField{
+			{Name: "id", Value: IntVal(1)},
+			{Name: "id", Value: IntVal(2)},
+		})})
+		if err == nil || err.Error() != "payload.id duplicate record field" {
+			t.Fatalf("duplicate field error: got %v", err)
+		}
+		if tbl.NumRows != 0 || tbl.Col(0).Len() != 0 {
+			t.Fatalf("failed duplicate record append partially modified table: rows=%d len=%d", tbl.NumRows, tbl.Col(0).Len())
+		}
+	})
+}
+
 func TestFixedSchemaContractAddRowTypedRejectsScalarStringification(t *testing.T) {
 	cases := []struct {
 		name   string

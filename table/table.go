@@ -939,7 +939,7 @@ func NewTableWithSchemas(columns []string, schemas []*TypeDescriptor) *Table {
 		typ := TypeNull
 		if i < len(schemas) && schemas[i] != nil {
 			schema = schemaForStorage(schemas[i])
-			typ = FinalizeSchema(schema).Kind
+			typ = storageTypeForSchema(schema)
 		}
 		t.cols[i] = &Column{name: name, typ: typ, schema: schema, hasUnion: SchemaContainsUnion(schema)}
 	}
@@ -996,6 +996,39 @@ func (t *Table) AddRow(values []Value) {
 // for permissive widening.
 func (t *Table) AddRowTyped(values []Value) error {
 	return t.addRowTyped(values, nil)
+}
+
+// AddRowTypedExact appends a row after validating that every value is already in
+// the fixed column schema. It does not coerce values or widen schemas, and it
+// mutates the table only after the whole row has been validated. Use this when a
+// caller has already normalized values to the planned schema.
+func (t *Table) AddRowTypedExact(values []Value) error {
+	for i, col := range t.cols {
+		v := Null()
+		if i < len(values) {
+			v = values[i]
+		}
+		if col.typ == TypeNull && col.schema != nil {
+			if err := ValidateSchemaAtPath(col.schema, col.name); err != nil {
+				return err
+			}
+		}
+		if err := exactValueFitsSchema(v, col.schema, col.name, false); err != nil {
+			return err
+		}
+		if v.Type != TypeNull && col.typ == TypeNull {
+			return fmt.Errorf("column %q has no concrete type for non-null %s value", col.name, TypeName(v.Type))
+		}
+	}
+	for i, col := range t.cols {
+		v := Null()
+		if i < len(values) {
+			v = values[i]
+		}
+		col.appendCoerced(v)
+	}
+	t.NumRows++
+	return nil
 }
 
 // AddRowTypedColumns appends a row after validating only the selected columns
@@ -1089,7 +1122,7 @@ func newColumnWithSchema(name string, schema *TypeDescriptor) *Column {
 	typ := TypeNull
 	if schema != nil {
 		cloned = schemaForStorage(schema)
-		typ = FinalizeSchema(cloned).Kind
+		typ = storageTypeForSchema(cloned)
 	}
 	return &Column{name: name, typ: typ, schema: cloned, hasUnion: SchemaContainsUnion(cloned)}
 }
@@ -1099,10 +1132,14 @@ func schemaForStorage(schema *TypeDescriptor) *TypeDescriptor {
 		return nil
 	}
 	cloned := NormalizeSchema(schema)
-	if err := ValidateSchema(cloned); err != nil {
-		return &TypeDescriptor{Kind: TypeString, Nullable: schema.Nullable}
-	}
 	return cloned
+}
+
+func storageTypeForSchema(schema *TypeDescriptor) ValueType {
+	if schema == nil || ValidateSchema(schema) != nil {
+		return TypeNull
+	}
+	return FinalizeSchema(schema).Kind
 }
 
 func preallocateColumnStorage(c *Column, capacity int) {
@@ -1177,6 +1214,103 @@ func shouldValidateTypedColumn(idx int, typedColumns []int) bool {
 		}
 	}
 	return false
+}
+
+func exactValueFitsSchema(v Value, schema *TypeDescriptor, path string, allowMixed bool) error {
+	if schema == nil {
+		return nil
+	}
+	if v.Type == TypeNull {
+		if schema.Kind == TypeMixed && !allowMixed {
+			return exactValueSchemaError(path, schema, v)
+		}
+		if schema.Kind == TypeNull || schema.Nullable || schema.Kind == TypeMixed {
+			return nil
+		}
+		return exactValueSchemaError(path, schema, v)
+	}
+	if schema.Kind == TypeMixed {
+		if !allowMixed {
+			return exactValueSchemaError(path, schema, v)
+		}
+		return nil
+	}
+
+	switch schema.Kind {
+	case TypeInt:
+		if v.Type == TypeInt {
+			return nil
+		}
+	case TypeFloat:
+		if v.Type == TypeFloat {
+			return nil
+		}
+	case TypeString:
+		if v.Type == TypeString {
+			return nil
+		}
+	case TypeBool:
+		if v.Type == TypeBool {
+			return nil
+		}
+	case TypeList:
+		if v.Type != TypeList {
+			return exactValueSchemaError(path, schema, v)
+		}
+		for _, elem := range v.List {
+			if err := exactValueFitsSchema(elem, schema.Elem, appendSchemaPath(path, "[]"), true); err != nil {
+				return err
+			}
+		}
+		return nil
+	case TypeRecord:
+		if v.Type != TypeRecord {
+			return exactValueSchemaError(path, schema, v)
+		}
+		return exactRecordFitsSchema(v, schema, path, allowMixed)
+	case TypeUnion:
+		for _, branch := range schema.Branches {
+			if exactValueFitsSchema(v, branch, path, allowMixed) == nil {
+				return nil
+			}
+		}
+	case TypeNull:
+		// Non-null values never fit a null-only schema.
+	default:
+		return nil
+	}
+	return exactValueSchemaError(path, schema, v)
+}
+
+func exactRecordFitsSchema(v Value, schema *TypeDescriptor, path string, allowMixed bool) error {
+	if len(v.Fields) != len(schema.Fields) {
+		return exactValueSchemaError(path, schema, v)
+	}
+	seen := make([]bool, len(v.Fields))
+	for _, target := range schema.Fields {
+		found := -1
+		for i, field := range v.Fields {
+			if field.Name != target.Name {
+				continue
+			}
+			if found >= 0 || seen[i] {
+				return fmt.Errorf("%s duplicate record field", joinSchemaPath(path, field.Name))
+			}
+			found = i
+		}
+		if found < 0 {
+			return exactValueSchemaError(path, schema, v)
+		}
+		seen[found] = true
+		if err := exactValueFitsSchema(v.Fields[found].Value, target.Type, joinSchemaPath(path, target.Name), allowMixed); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func exactValueSchemaError(path string, expected *TypeDescriptor, actual Value) error {
+	return &SchemaError{Path: path, Expected: FinalizeSchema(expected), Actual: FinalizeSchema(InferValueSchema(actual))}
 }
 
 func coerceValueForTypedAppend(v Value, schema *TypeDescriptor, path string) (Value, error) {
@@ -1477,10 +1611,7 @@ func (t *Table) SelectColsWithSchema(indices []int, schema Schema) (*Table, erro
 		if actualSchema == nil {
 			actualSchema = col.Schema()
 		}
-		plannedType := TypeNull
-		if plannedSchema != nil {
-			plannedType = FinalizeSchema(plannedSchema).Kind
-		}
+		plannedType := storageTypeForSchema(plannedSchema)
 		if col.typ != TypeNull && plannedType != col.typ {
 			return nil, fmt.Errorf("select columns with schema: column %q storage type %s incompatible with planned schema %s", col.name, TypeName(col.typ), Render(plannedSchema))
 		}

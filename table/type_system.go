@@ -34,6 +34,9 @@ const (
 	CoerceExactMode ValueCoerceMode = iota
 	// CoerceCoerciveMode allows documented storage-compatible coercions.
 	CoerceCoerciveMode
+	// CoercePermissiveMode preserves legacy AddRow widening semantics. Use it
+	// only with schemas produced by UnifyPermissiveMode/MergeSchemasPermissive.
+	CoercePermissiveMode
 )
 
 // NormalizeSchema returns the deterministic canonical descriptor for dq's
@@ -63,10 +66,11 @@ func UnifySchemas(a, b *TypeDescriptor, mode SchemaUnifyMode) (*TypeDescriptor, 
 
 // UnifySchemasAtPath is UnifySchemas with a diagnostic path prefix.
 func UnifySchemasAtPath(a, b *TypeDescriptor, mode SchemaUnifyMode, path string) (*TypeDescriptor, error) {
-	if err := ValidateSchemaAtPath(a, path); err != nil {
+	allowMixed := mode == UnifyListLiteralMode
+	if err := validateSchemaAtPath(a, path, allowMixed); err != nil {
 		return nil, err
 	}
-	if err := ValidateSchemaAtPath(b, path); err != nil {
+	if err := validateSchemaAtPath(b, path, allowMixed); err != nil {
 		return nil, err
 	}
 	switch mode {
@@ -108,6 +112,8 @@ func CoerceValueToSchemaModeAtPath(v Value, schema *TypeDescriptor, mode ValueCo
 		return coerceValueToExactUnionBranch(v, schema, path)
 	case CoerceCoerciveMode:
 		return coerceValueToSchema(v, schema, path)
+	case CoercePermissiveMode:
+		return coerceValueToPermissiveSchemaAtPath(v, schema, path)
 	default:
 		return coerceValueToSchema(v, schema, path)
 	}
@@ -130,23 +136,46 @@ func CoerceValueToFinalSchemaModeAtPath(v Value, schema *TypeDescriptor, mode Va
 		return coerceValueToExactUnionBranch(v, schema, path)
 	case CoerceCoerciveMode:
 		return coerceValueToSchema(v, schema, path)
+	case CoercePermissiveMode:
+		return coerceValueToPermissiveSchemaAtPath(v, schema, path)
 	default:
 		return coerceValueToSchema(v, schema, path)
 	}
 }
 
+func coerceValueToPermissiveSchemaAtPath(v Value, schema *TypeDescriptor, path string) (Value, error) {
+	cv := coerceValueToSchemaPermissive(v, schema)
+	checked, err := coerceValueToSchema(cv, schema, path)
+	if err != nil {
+		return Null(), err
+	}
+	return checked, nil
+}
+
 // ValidateSchema rejects ambiguous descriptors such as records with duplicate
-// field names. Nil schemas are accepted as unknown schemas.
+// field names, and descriptors that place mixed outside a list element subtree.
+// Nil schemas are accepted as unknown schemas.
 func ValidateSchema(schema *TypeDescriptor) error {
 	return ValidateSchemaAtPath(schema, "")
 }
 
 // ValidateSchemaAtPath is ValidateSchema with a diagnostic path prefix.
 func ValidateSchemaAtPath(schema *TypeDescriptor, path string) error {
+	return validateSchemaAtPath(schema, path, false)
+}
+
+func validateSchemaAtPath(schema *TypeDescriptor, path string, allowMixed bool) error {
 	if schema == nil {
 		return nil
 	}
 	switch schema.Kind {
+	case TypeMixed:
+		if !allowMixed {
+			if path == "" {
+				path = "<value>"
+			}
+			return fmt.Errorf("%s mixed schema is only valid inside list elements", path)
+		}
 	case TypeRecord:
 		seen := make(map[string]struct{}, len(schema.Fields))
 		for _, field := range schema.Fields {
@@ -154,15 +183,15 @@ func ValidateSchemaAtPath(schema *TypeDescriptor, path string) error {
 				return fmt.Errorf("%s duplicate record field", joinSchemaPath(path, field.Name))
 			}
 			seen[field.Name] = struct{}{}
-			if err := ValidateSchemaAtPath(field.Type, joinSchemaPath(path, field.Name)); err != nil {
+			if err := validateSchemaAtPath(field.Type, joinSchemaPath(path, field.Name), allowMixed); err != nil {
 				return err
 			}
 		}
 	case TypeList:
-		return ValidateSchemaAtPath(schema.Elem, appendSchemaPath(path, "[]"))
+		return validateSchemaAtPath(schema.Elem, appendSchemaPath(path, "[]"), true)
 	case TypeUnion:
 		for _, branch := range schema.Branches {
-			if err := ValidateSchemaAtPath(branch, path); err != nil {
+			if err := validateSchemaAtPath(branch, path, allowMixed); err != nil {
 				return err
 			}
 		}

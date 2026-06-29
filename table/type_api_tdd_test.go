@@ -56,6 +56,48 @@ func TestCentralTypeAPIRenderAndSameAreDeterministic(t *testing.T) {
 	}
 }
 
+func TestCentralTypeAPIValidateSchemaRestrictsMixedToListElements(t *testing.T) {
+	valid := []struct {
+		name   string
+		schema *TypeDescriptor
+	}{
+		{name: "list_mixed", schema: listOf(mixedType())},
+		{name: "list_record_field_mixed", schema: listOf(recordOf(field("amount", mixedType())))},
+		{name: "record_list_mixed", schema: recordOf(field("items", listOf(recordOf(field("amount", mixedType())))))},
+	}
+
+	for _, tc := range valid {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidateSchema(tc.schema); err != nil {
+				t.Fatalf("ValidateSchema(%s) returned error: %v", Render(tc.schema), err)
+			}
+		})
+	}
+
+	invalid := []struct {
+		name   string
+		path   string
+		schema *TypeDescriptor
+	}{
+		{name: "top_level_mixed", path: "<value>", schema: mixedType()},
+		{name: "record_field_mixed", path: "payload", schema: recordOf(field("payload", mixedType()))},
+		{name: "union_branch_mixed", path: "<value>", schema: UnionOf([]*TypeDescriptor{td(TypeString), mixedType()}, false)},
+	}
+
+	for _, tc := range invalid {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateSchema(tc.schema)
+			if err == nil {
+				t.Fatal("expected ValidateSchema to reject mixed outside list elements")
+			}
+			want := tc.path + " mixed schema is only valid inside list elements"
+			if err.Error() != want {
+				t.Fatalf("ValidateSchema error: got %q, want %q", err.Error(), want)
+			}
+		})
+	}
+}
+
 func TestCentralTypeAPIStructuralUnionContract(t *testing.T) {
 	one := UnionOf([]*TypeDescriptor{td(TypeInt), nullable(TypeInt), nil, nullLiteralType()}, false)
 	requireSchemaString(t, one, "int?")
@@ -121,6 +163,16 @@ func TestCentralTypeAPIAssignabilityModes(t *testing.T) {
 		t.Fatal("coercive record assignability should allow missing nullable fields")
 	}
 
+	if SchemaAssignable(mixedType(), td(TypeBool), AssignCoerciveMode) {
+		t.Fatal("top-level mixed assignability should be rejected by schema validation")
+	}
+	if SchemaAssignable(recordOf(field("payload", mixedType())), recordOf(field("payload", td(TypeBool))), AssignCoerciveMode) {
+		t.Fatal("record-field mixed assignability should be rejected outside list elements")
+	}
+	if !SchemaAssignable(listOf(mixedType()), listOf(td(TypeBool)), AssignCoerciveMode) {
+		t.Fatal("list<mixed> assignability should accept heterogeneous list element values")
+	}
+
 	value := RecordVal([]RecordField{{Name: "x", Value: IntVal(1)}})
 	coerced, err := CoerceValueToSchemaMode(value, recordTarget, CoerceCoerciveMode)
 	if err != nil {
@@ -165,6 +217,48 @@ func TestCentralTypeAPICoercionModes(t *testing.T) {
 	}
 	if _, err := CoerceValueToFinalSchemaMode(value, finalSchema, CoerceExactMode); err == nil {
 		t.Fatal("final-schema exact coercion should reject int into float field")
+	}
+
+	permissiveSchema := recordOf(
+		field("x", td(TypeString)),
+		field("items", listOf(recordOf(field("amount", td(TypeString))))),
+		field("missing", nullable(TypeString)),
+	)
+	permissiveValue := RecordVal([]RecordField{
+		{Name: "x", Value: IntVal(7)},
+		{Name: "items", Value: ListVal([]Value{
+			RecordVal([]RecordField{{Name: "amount", Value: IntVal(9)}}),
+		})},
+	})
+	got, err = CoerceValueToSchemaMode(permissiveValue, permissiveSchema, CoercePermissiveMode)
+	if err != nil {
+		t.Fatalf("permissive mode returned error: %v", err)
+	}
+	if !Equal(got, RecordVal([]RecordField{
+		{Name: "x", Value: StrVal("7")},
+		{Name: "items", Value: ListVal([]Value{
+			RecordVal([]RecordField{{Name: "amount", Value: StrVal("9")}}),
+		})},
+		{Name: "missing", Value: Null()},
+	})) {
+		t.Fatalf("permissive mode: got %s", got.AsString())
+	}
+
+	got, err = CoerceValueToFinalSchemaMode(IntVal(42), td(TypeString), CoercePermissiveMode)
+	if err != nil {
+		t.Fatalf("final-schema permissive mode returned error: %v", err)
+	}
+	if got.Type != TypeString || got.Str != "42" {
+		t.Fatalf("final-schema permissive mode: got %v, want string 42", got)
+	}
+	if _, err := CoerceValueToSchemaMode(IntVal(1), td(TypeBool), CoercePermissiveMode); err == nil {
+		t.Fatal("permissive mode should reject values that cannot fit the target schema after widening")
+	}
+
+	if _, err := CoerceValueToSchema(BoolVal(true), mixedType()); err == nil {
+		t.Fatal("top-level mixed coercion should be rejected by schema validation")
+	} else if got, want := err.Error(), "<value> mixed schema is only valid inside list elements"; got != want {
+		t.Fatalf("top-level mixed coercion error: got %q, want %q", got, want)
 	}
 }
 
@@ -282,7 +376,6 @@ func TestCentralTypeAPIUnifyStrictRejectsIncompatibleTypes(t *testing.T) {
 			wantExpected: "int",
 			wantActual:   "string",
 		},
-		{name: "top_level_mixed_is_not_scalar_escape_hatch", a: mixedType(), b: td(TypeInt), wantPath: "", wantExpected: "mixed", wantActual: "int"},
 	}
 
 	for _, tc := range cases {
@@ -290,6 +383,16 @@ func TestCentralTypeAPIUnifyStrictRejectsIncompatibleTypes(t *testing.T) {
 			_, err := UnifyStrict(tc.a, tc.b)
 			requireSchemaError(t, err, tc.wantPath, tc.wantExpected, tc.wantActual)
 		})
+	}
+}
+
+func TestCentralTypeAPIUnifyStrictRejectsTopLevelMixedAsInvalidSchema(t *testing.T) {
+	_, err := UnifyStrict(mixedType(), td(TypeInt))
+	if err == nil {
+		t.Fatal("expected UnifyStrict to reject top-level mixed before unification")
+	}
+	if got, want := err.Error(), "<value> mixed schema is only valid inside list elements"; got != want {
+		t.Fatalf("UnifyStrict top-level mixed error: got %q, want %q", got, want)
 	}
 }
 

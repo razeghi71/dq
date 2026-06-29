@@ -4,13 +4,15 @@ import (
 	"fmt"
 
 	"github.com/razeghi71/dq/ast"
+	"github.com/razeghi71/dq/rowstream"
 	"github.com/razeghi71/dq/table"
 )
 
 type SourceInfo struct {
-	Filename string
-	Load     ast.LoadOptions
-	Schema   table.Schema
+	Filename        string
+	Load            ast.LoadOptions
+	Schema          table.Schema
+	DisablePushdown bool
 }
 
 type SourcePredicate func(row []table.Value) (bool, error)
@@ -23,10 +25,13 @@ type SourceLoadSpec struct {
 
 type SourceLoadFunc func(filename string, opts ast.LoadOptions, spec SourceLoadSpec) (*table.Table, error)
 
+type SourceStreamFunc func(filename string, opts ast.LoadOptions, spec SourceLoadSpec) (rowstream.Stream, error)
+
 type logicalSource struct {
-	filename string
-	load     ast.LoadOptions
-	schema   table.Schema
+	filename        string
+	load            ast.LoadOptions
+	schema          table.Schema
+	disablePushdown bool
 }
 
 type optimizedSource struct {
@@ -45,10 +50,61 @@ func ExecuteSourceQuery(query *ast.Query, source SourceInfo, loadSource SourceLo
 	if loadSource == nil {
 		return nil, fmt.Errorf("source loader not configured")
 	}
+	physical, err := planPhysicalSourceQuery(query, source, loadJoin)
+	if err != nil {
+		return nil, err
+	}
+	input, err := loadSource(physical.Source.filename, physical.Source.load, physical.Source.spec)
+	if err != nil {
+		return nil, fmt.Errorf("load error: %w", err)
+	}
+	if err := validateSourceInputSchema(physical.InputSchema, input); err != nil {
+		return nil, err
+	}
+	return executePlannedOps(physical.Ops, input)
+}
+
+func ExecuteSourceStreamQuery(query *ast.Query, source SourceInfo, streamSource SourceStreamFunc, loadJoin LoadFunc) (*table.Table, error) {
+	if streamSource == nil {
+		return nil, fmt.Errorf("source stream loader not configured")
+	}
+	physical, err := planPhysicalSourceQuery(query, source, loadJoin)
+	if err != nil {
+		return nil, err
+	}
+	return executePhysicalSourceStreamQuery(physical, streamSource)
+}
+
+func ExecuteSourceAdaptiveQuery(query *ast.Query, source SourceInfo, streamSource SourceStreamFunc, loadSource SourceLoadFunc, loadJoin LoadFunc) (*table.Table, error) {
+	physical, err := planPhysicalSourceQuery(query, source, loadJoin)
+	if err != nil {
+		return nil, err
+	}
+	if shouldLoadSourceMaterializedForStreaming(physical.Ops) {
+		if loadSource == nil {
+			return nil, fmt.Errorf("source loader not configured")
+		}
+		input, err := loadSource(physical.Source.filename, physical.Source.load, physical.Source.spec)
+		if err != nil {
+			return nil, fmt.Errorf("load error: %w", err)
+		}
+		if err := validateSourceInputSchema(physical.InputSchema, input); err != nil {
+			return nil, err
+		}
+		return executePlannedOpsStreaming(physical.Ops, rowstream.FromTable(input))
+	}
+	if streamSource == nil {
+		return nil, fmt.Errorf("source stream loader not configured")
+	}
+	return executePhysicalSourceStreamQuery(physical, streamSource)
+}
+
+func planPhysicalSourceQuery(query *ast.Query, source SourceInfo, loadJoin LoadFunc) (*physicalPipeline, error) {
 	logical, err := planLogicalQueryWithSource(query, logicalSource{
-		filename: source.Filename,
-		load:     source.Load,
-		schema:   source.Schema,
+		filename:        source.Filename,
+		load:            source.Load,
+		schema:          source.Schema,
+		disablePushdown: source.DisablePushdown,
 	}, loadJoin)
 	if err != nil {
 		return nil, err
@@ -64,14 +120,69 @@ func ExecuteSourceQuery(query *ast.Query, source SourceInfo, loadSource SourceLo
 	if physical.Source == nil {
 		return nil, fmt.Errorf("source physical plan missing source")
 	}
-	input, err := loadSource(physical.Source.filename, physical.Source.load, physical.Source.spec)
+	return &physical, nil
+}
+
+func executePhysicalSourceStreamQuery(physical *physicalPipeline, streamSource SourceStreamFunc) (*table.Table, error) {
+	if physical == nil || physical.Source == nil {
+		return nil, fmt.Errorf("source physical plan missing source")
+	}
+	input, err := streamSource(physical.Source.filename, physical.Source.load, physical.Source.spec)
 	if err != nil {
 		return nil, fmt.Errorf("load error: %w", err)
 	}
-	if err := validateSourceInputSchema(physical.InputSchema, input); err != nil {
+	if err := validateSourceStreamSchema(physical.InputSchema, input); err != nil {
+		_ = input.Close()
 		return nil, err
 	}
-	return executePlannedOps(physical.Ops, input)
+	return executePlannedOpsStreaming(physical.Ops, sourceErrorStream{Stream: input})
+}
+
+func shouldLoadSourceMaterializedForStreaming(ops []plannedOp) bool {
+	for i := 0; i < len(ops); {
+		if end := rowLocalSpanEnd(ops, i); end > i {
+			span := ops[i:end]
+			next := nextPlannedOp(ops, end)
+			if rowSpanCanDropRows(span) || next == nil {
+				return false
+			}
+			if _, earlyStop := next.(plannedHead); earlyStop {
+				return false
+			}
+			if _, fold := next.(plannedCount); fold {
+				return false
+			}
+			if _, fold := next.(plannedDescribe); fold {
+				return false
+			}
+			if isMaterializedStreamingBoundary(next) {
+				return true
+			}
+			i = end
+			continue
+		}
+		switch ops[i].(type) {
+		case plannedHead, plannedCount, plannedDescribe:
+			return false
+		case plannedTail, plannedGroup, plannedReduce, plannedSort, plannedDistinct, plannedJoin:
+			return true
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+type sourceErrorStream struct {
+	rowstream.Stream
+}
+
+func (s sourceErrorStream) Next() (rowstream.Row, bool, error) {
+	row, ok, err := s.Stream.Next()
+	if err != nil {
+		return nil, false, fmt.Errorf("load error: %w", err)
+	}
+	return row, ok, nil
 }
 
 func planLogicalQueryWithSource(query *ast.Query, source logicalSource, load LoadFunc) (*logicalPipeline, error) {
@@ -95,6 +206,9 @@ func optimizedSourceFromLogical(source *logicalSource) *optimizedSource {
 
 func optimizeSourcePushdown(plan *optimizedLogicalPipeline) {
 	if plan == nil || plan.Source == nil {
+		return
+	}
+	if plan.Source.source.disablePushdown {
 		return
 	}
 	source := plan.Source.source
@@ -186,6 +300,30 @@ func validateSourceInputSchema(want table.Schema, got *table.Table) error {
 		}
 		if !table.SchemaAssignable(w.Type, env.rawSchema(i), table.AssignExactMode) {
 			return fmt.Errorf("execute source plan: input schema for column %q mismatch: planned %s, got %s", w.Name, table.Render(w.Type), table.Render(env.rawSchema(i)))
+		}
+	}
+	return nil
+}
+
+func validateSourceStreamSchema(want table.Schema, got rowstream.Stream) error {
+	if got == nil {
+		if len(want.Columns) == 0 {
+			return nil
+		}
+		return fmt.Errorf("execute source plan: input schema column count mismatch: planned %d columns, got 0", len(want.Columns))
+	}
+	schema := got.Schema()
+	if len(want.Columns) != len(schema.Columns) {
+		return fmt.Errorf("execute source plan: input schema column count mismatch: planned %d columns, got %d", len(want.Columns), len(schema.Columns))
+	}
+	for i := range want.Columns {
+		w := want.Columns[i]
+		g := schema.Columns[i]
+		if w.Name != g.Name {
+			return fmt.Errorf("execute source plan: input schema column %d mismatch: planned %q, got %q", i, w.Name, g.Name)
+		}
+		if !table.SchemaAssignable(w.Type, g.Type, table.AssignExactMode) {
+			return fmt.Errorf("execute source plan: input schema for column %q mismatch: planned %s, got %s", w.Name, table.Render(w.Type), table.Render(g.Type))
 		}
 	}
 	return nil
