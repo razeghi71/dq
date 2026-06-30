@@ -34,11 +34,11 @@ func TestExecuteSourceStreamQueryPlansPushdownAndStreamsRows(t *testing.T) {
 	if result.NumRows != 1 || result.GetAt(0, 0).Str != "Bob" {
 		t.Fatalf("result: rows=%d first=%v, want Bob", result.NumRows, result.GetAt(0, 0))
 	}
-	if strings.Join(gotSpec.OutputColumns, ",") != "name" {
-		t.Fatalf("output columns: got %v, want [name]", gotSpec.OutputColumns)
+	if strings.Join(gotSpec.OutputColumns.Names(), ",") != "name" {
+		t.Fatalf("output columns: got %v, want [name]", gotSpec.OutputColumns.Names())
 	}
-	if strings.Join(gotSpec.ReadColumns, ",") != "name,id" {
-		t.Fatalf("read columns: got %v, want [name id]", gotSpec.ReadColumns)
+	if strings.Join(gotSpec.ReadColumns.Names(), ",") != "name,id" {
+		t.Fatalf("read columns: got %v, want [name id]", gotSpec.ReadColumns.Names())
 	}
 	if gotSpec.Predicate == nil {
 		t.Fatal("expected pushed source predicate")
@@ -50,7 +50,7 @@ func TestExecuteSourceQueryMaterializedSourceContracts(t *testing.T) {
 	source := sourceStreamPlanInfo()
 
 	result, err := ExecuteSourceQuery(q, source, func(filename string, opts ast.LoadOptions, spec SourceLoadSpec) (*table.Table, error) {
-		return sourceStreamPlanFullTable(), nil
+		return sourceStreamPlanTableForSpec(t, spec), nil
 	}, nil)
 	if err != nil {
 		t.Fatalf("execute source query: %v", err)
@@ -68,22 +68,22 @@ func TestExecuteSourceQueryMaterializedSourceContracts(t *testing.T) {
 		t.Fatalf("source load error: got %v", err)
 	}
 	if _, err := ExecuteSourceQuery(q, source, func(filename string, opts ast.LoadOptions, spec SourceLoadSpec) (*table.Table, error) {
-		return table.NewTable([]string{"wrong"}), nil
+		return table.NewTable([]string{"wrong", "extra"}), nil
 	}, nil); err == nil || !strings.Contains(err.Error(), "input schema column count mismatch") {
 		t.Fatalf("source schema mismatch error: got %v", err)
 	}
 	if _, err := ExecuteSourceQuery(q, source, func(filename string, opts ast.LoadOptions, spec SourceLoadSpec) (*table.Table, error) {
 		return table.NewTableWithSchemas(
-			[]string{"id", "wrong"},
-			[]*table.TypeDescriptor{{Kind: table.TypeInt}, {Kind: table.TypeString}},
+			[]string{"wrong"},
+			[]*table.TypeDescriptor{{Kind: table.TypeString}},
 		), nil
-	}, nil); err == nil || !strings.Contains(err.Error(), "column 1 mismatch") {
+	}, nil); err == nil || !strings.Contains(err.Error(), "column 0 mismatch") {
 		t.Fatalf("source schema name mismatch error: got %v", err)
 	}
 	if _, err := ExecuteSourceQuery(q, source, func(filename string, opts ast.LoadOptions, spec SourceLoadSpec) (*table.Table, error) {
 		return table.NewTableWithSchemas(
-			[]string{"id", "name"},
-			[]*table.TypeDescriptor{{Kind: table.TypeString}, {Kind: table.TypeString}},
+			[]string{"name"},
+			[]*table.TypeDescriptor{{Kind: table.TypeInt}},
 		), nil
 	}, nil); err == nil || !strings.Contains(err.Error(), "schema for column") {
 		t.Fatalf("source schema type mismatch error: got %v", err)
@@ -94,7 +94,7 @@ func TestExecuteSourceStreamQueryWrapsLazySourceErrors(t *testing.T) {
 	q := parseSourceStreamPlanQuery(t, `input.csv | count`)
 	_, err := ExecuteSourceStreamQuery(q, sourceStreamPlanInfo(), func(filename string, opts ast.LoadOptions, spec SourceLoadSpec) (rowstream.Stream, error) {
 		return &sourceStreamPlanErrorStream{
-			schema: sourceStreamPlanInfo().Schema,
+			schema: sourceStreamPlanSchemaForColumns(t, spec.OutputColumns.Names()),
 			err:    fmt.Errorf("late row failed"),
 		}, nil
 	}, nil)
@@ -177,7 +177,7 @@ func TestExecuteSourceAdaptiveQueryLoadsMaterializedBeforeNonDroppingBlockingSpa
 		return nil, fmt.Errorf("stream should not be used")
 	}, func(filename string, opts ast.LoadOptions, spec SourceLoadSpec) (*table.Table, error) {
 		loaded = true
-		return sourceStreamPlanFullTable(), nil
+		return sourceStreamPlanTableForSpec(t, spec), nil
 	}, nil)
 	if err != nil {
 		t.Fatalf("execute adaptive source query: %v", err)
@@ -197,7 +197,7 @@ func TestExecuteSourceAdaptiveQueryStreamsDroppingSpanBeforeBlockingOp(t *testin
 
 	result, err := ExecuteSourceAdaptiveQuery(q, sourceStreamPlanInfo(), func(filename string, opts ast.LoadOptions, spec SourceLoadSpec) (rowstream.Stream, error) {
 		streamed = true
-		return rowstream.FromTable(sourceStreamPlanFullTable()), nil
+		return rowstream.FromTable(sourceStreamPlanTableForSpec(t, spec)), nil
 	}, func(filename string, opts ast.LoadOptions, spec SourceLoadSpec) (*table.Table, error) {
 		loaded = true
 		return nil, fmt.Errorf("materialized load should not be used")
@@ -482,4 +482,57 @@ func sourceStreamPlanFullTable() *table.Table {
 		panic(err)
 	}
 	return t
+}
+
+func sourceStreamPlanTableForSpec(tb testing.TB, spec SourceLoadSpec) *table.Table {
+	tb.Helper()
+	full := sourceStreamPlanFullTable()
+	if spec.OutputColumns.IsAll() {
+		return full
+	}
+
+	outputColumns := spec.OutputColumns.Names()
+	schema := sourceStreamPlanSchemaForColumns(tb, outputColumns)
+	cols := make([]string, len(schema.Columns))
+	schemas := make([]*table.TypeDescriptor, len(schema.Columns))
+	for i, col := range schema.Columns {
+		cols[i] = col.Name
+		schemas[i] = col.Type
+	}
+	out := table.NewTableWithSchemas(cols, schemas)
+	for row := 0; row < full.NumRows; row++ {
+		vals := make([]table.Value, len(outputColumns))
+		for i, col := range outputColumns {
+			idx := full.ColIndex(col)
+			if idx < 0 {
+				tb.Fatalf("sourceStreamPlanTableForSpec: missing output column %q", col)
+			}
+			vals[i] = full.GetAt(row, idx)
+		}
+		if err := out.AddRowTyped(vals); err != nil {
+			tb.Fatalf("sourceStreamPlanTableForSpec: add row: %v", err)
+		}
+	}
+	return out
+}
+
+func sourceStreamPlanSchemaForColumns(tb testing.TB, columns []string) table.Schema {
+	tb.Helper()
+	source := sourceStreamPlanInfo().Schema
+	if columns == nil {
+		return source
+	}
+	sourceIndex := make(map[string]table.SchemaColumn, len(source.Columns))
+	for _, col := range source.Columns {
+		sourceIndex[col.Name] = col
+	}
+	out := make([]table.SchemaColumn, len(columns))
+	for i, name := range columns {
+		col, ok := sourceIndex[name]
+		if !ok {
+			tb.Fatalf("sourceStreamPlanSchemaForColumns: missing output column %q", name)
+		}
+		out[i] = col
+	}
+	return table.Schema{Columns: out}
 }

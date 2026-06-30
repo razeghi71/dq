@@ -1563,10 +1563,6 @@ func coerceRecordToExactSchemaNoTypeCoercion(v Value, schema *TypeDescriptor, pa
 	return coerceRecordToExactSchemaWith(v, schema, path, coerceValueToExactUnionBranch)
 }
 
-func coerceRecordToExactSchema(v Value, schema *TypeDescriptor, path string) (Value, error) {
-	return coerceRecordToExactSchemaWith(v, schema, path, coerceValueToUnionBranch)
-}
-
 func coerceRecordToAssignableSchema(v Value, schema *TypeDescriptor, path string) (Value, error) {
 	schemaFields := make(map[string]*TypeDescriptor, len(schema.Fields))
 	for i := range schema.Fields {

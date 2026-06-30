@@ -770,7 +770,7 @@ func materializeCSVGroups(columns []string, groups []csvRowGroup, cfg csvLoadCon
 	totalRows := csvRowGroupCount(groups)
 	nullableAll := csvCollectedInferenceNeedsConservativeNullability(cfg.inferRows, totalRows)
 	schemas := csvSchemasFromTypes(columns, types, csvNullableColumns(columns, groups), nullableAll)
-	mat, err := csvMaterializationFor(columns, types, schemas, nil, cfg.source)
+	mat, err := csvMaterializationFor(columns, types, schemas, table.AllColumns(), cfg.source)
 	if err != nil {
 		return nil, err
 	}
@@ -793,11 +793,11 @@ type csvMaterialization struct {
 	positionByColumn []int
 }
 
-func csvMaterializationFor(columns []string, types []table.ValueType, schemas []*table.TypeDescriptor, projectColumns []string, source string) (csvMaterialization, error) {
+func csvMaterializationFor(columns []string, types []table.ValueType, schemas []*table.TypeDescriptor, projection table.ColumnSelection, source string) (csvMaterialization, error) {
 	if schemas == nil {
 		schemas = csvSchemasFromTypes(columns, types, nil, false)
 	}
-	if len(projectColumns) == 0 {
+	if projection.IsAll() {
 		positionByColumn := make([]int, len(columns))
 		for i := range columns {
 			positionByColumn[i] = i
@@ -809,6 +809,7 @@ func csvMaterializationFor(columns []string, types []table.ValueType, schemas []
 		}, nil
 	}
 
+	projectColumns := projection.Names()
 	index := make(map[string]int, len(columns))
 	for i, col := range columns {
 		index[col] = i
@@ -1204,7 +1205,7 @@ func loadCSVReaderStreaming(r io.Reader, cfg csvLoadConfig) (*table.Table, error
 	totalRows := len(window.sampleRows) + len(window.pendingRows)
 	nullableAll := csvStreamingInferenceNeedsConservativeNullability(cfg.inferRows, totalRows, window.sampleExhausted)
 	schemas := csvSchemasFromTypes(columns, types, csvNullableColumns(columns, []csvRowGroup{group}), nullableAll)
-	mat, err := csvMaterializationFor(columns, types, schemas, nil, cfg.source)
+	mat, err := csvMaterializationFor(columns, types, schemas, table.AllColumns(), cfg.source)
 	if err != nil {
 		return nil, err
 	}

@@ -108,6 +108,10 @@ func BenchmarkSimpleIntFilter(b *testing.B) {
 }
 
 func BenchmarkAppendOnlyTransform(b *testing.B) {
+	benchmarkPipeline(b, benchmarkFlatRows(10000), "transform age2 = age + 1 | select age2")
+}
+
+func BenchmarkDeadTransformBeforeCount(b *testing.B) {
 	benchmarkPipeline(b, benchmarkFlatRows(10000), "transform age2 = age + 1 | select age2 | count")
 }
 
@@ -116,7 +120,7 @@ func BenchmarkStringPredicateFilter(b *testing.B) {
 }
 
 func BenchmarkInterpretedUpperTransform(b *testing.B) {
-	benchmarkPipeline(b, benchmarkFlatRows(10000), "transform u = upper(name) | select u | count")
+	benchmarkPipeline(b, benchmarkFlatRows(10000), "transform u = upper(name) | select u")
 }
 
 func BenchmarkInterpretedRegexFilter(b *testing.B) {
@@ -124,7 +128,7 @@ func BenchmarkInterpretedRegexFilter(b *testing.B) {
 }
 
 func BenchmarkInterpretedNestedStringTransform(b *testing.B) {
-	benchmarkPipeline(b, benchmarkFlatRows(10000), "transform u = upper(trim(name)) | select u | count")
+	benchmarkPipeline(b, benchmarkFlatRows(10000), "transform u = upper(trim(name)) | select u")
 }
 
 func BenchmarkPhysicalPlanSchemaPreservingPipeline(b *testing.B) {

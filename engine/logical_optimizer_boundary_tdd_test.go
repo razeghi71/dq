@@ -87,14 +87,14 @@ func TestLogicalOptimizerBoundaryTDDNoOpPreservesOperationOrderAndRuntimeErrors(
 			wantCount: 0,
 		},
 		{
-			name:     "erroring_transform_before_filter_still_errors",
-			pipeline: `transform y = year("bad-date") | filter { false } | count`,
-			wantErr:  []string{"transform", "y", "year"},
+			name:      "dead_erroring_transform_before_filter_is_eliminated",
+			pipeline:  `transform y = year("bad-date") | filter { false } | count`,
+			wantCount: 0,
 		},
 		{
-			name:     "unused_erroring_transform_is_not_eliminated",
-			pipeline: `transform unused = year("bad-date") | select name`,
-			wantErr:  []string{"transform", "unused", "year"},
+			name:      "unused_erroring_transform_is_eliminated",
+			pipeline:  `transform unused = year("bad-date") | select name | count`,
+			wantCount: 6,
 		},
 		{
 			name:     "select_removes_column_for_later_filter",
@@ -762,7 +762,7 @@ func TestLogicalOptimizerBoundaryTDDPhysicalJoinRejectsStaleOptimizedKeyMetadata
 				out.Columns = out.Columns[:len(out.Columns)-1]
 				j.logicalBase.output = out
 			},
-			want: "physical output column count changed",
+			want: "output source count",
 		},
 		{
 			name: "output_column_name_changed",
@@ -772,7 +772,7 @@ func TestLogicalOptimizerBoundaryTDDPhysicalJoinRejectsStaleOptimizedKeyMetadata
 				out.Columns[0].Name = "renamed"
 				j.logicalBase.output = out
 			},
-			want: "physical output column 0 changed",
+			want: "output source 0 changed",
 		},
 	}
 

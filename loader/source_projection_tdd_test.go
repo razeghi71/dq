@@ -141,8 +141,8 @@ func TestSourceProjectionTDDPreparedLoadSpecFiltersDuringSourceLoad(t *testing.T
 		t.Fatalf("prepare csv: %v", err)
 	}
 	tbl, err := prepared.LoadSpec(SourceLoadSpec{
-		ReadColumns:   []string{"id", "status"},
-		OutputColumns: []string{"id"},
+		ReadColumns:   table.SelectedColumns("id", "status"),
+		OutputColumns: table.SelectedColumns("id"),
 		Predicate: func(row []table.Value) (bool, error) {
 			if len(row) != 2 {
 				t.Fatalf("predicate row: got %d values, want 2", len(row))
@@ -174,8 +174,8 @@ func TestSourceProjectionTDDPreparedLoadSpecValidatesPredicateReadColumns(t *tes
 		t.Fatalf("prepare csv: %v", err)
 	}
 	_, err = prepared.LoadSpec(SourceLoadSpec{
-		ReadColumns:   []string{"id", "flag"},
-		OutputColumns: []string{"id"},
+		ReadColumns:   table.SelectedColumns("id", "flag"),
+		OutputColumns: table.SelectedColumns("id"),
 		Predicate: func(row []table.Value) (bool, error) {
 			return row[1].Type == table.TypeInt && row[1].Int == 10, nil
 		},
@@ -198,8 +198,8 @@ func TestSourceProjectionTDDPreparedLoadSpecValidatesOutputColumnsBeforePredicat
 		t.Fatalf("prepare csv: %v", err)
 	}
 	_, err = prepared.LoadSpec(SourceLoadSpec{
-		ReadColumns:   []string{"amount", "id"},
-		OutputColumns: []string{"amount"},
+		ReadColumns:   table.SelectedColumns("amount", "id"),
+		OutputColumns: table.SelectedColumns("amount"),
 		Predicate: func(row []table.Value) (bool, error) {
 			return row[1].Type == table.TypeInt && row[1].Int == 1, nil
 		},

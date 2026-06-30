@@ -26,7 +26,7 @@ func TestCLIJSONLInferenceBadRecordsEndToEnd(t *testing.T) {
 			"{\"id\":2,\"amount\":\"bad\"}\n"+
 			"{\"id\":3,\"amount\":30}\n")
 
-	out := runCLIQueryExpectError(t, bin, path+" with infer_rows=1 | count")
+	out := runCLIQueryExpectError(t, bin, path+" with infer_rows=1 | filter { amount > 0 } | count")
 	for _, part := range []string{"line 2", "amount", "int", "string"} {
 		if !strings.Contains(strings.ToLower(string(out)), strings.ToLower(part)) {
 			t.Fatalf("expected error containing %q, got:\n%s", part, out)
@@ -48,20 +48,20 @@ func TestCLIJSONInferenceLateFieldsEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	path := writeCLIJSONInferenceFile(t, dir, "events.json", `[{"id":1},{"id":2,"email":"bob@example.com"},{"id":3}]`)
 
-	out := runCLIQueryExpectError(t, bin, path+" with infer_rows=1 | count")
+	out := runCLIQueryExpectError(t, bin, path+" with infer_rows=1 | json")
 	for _, part := range []string{"row 2", "email", "unknown"} {
 		if !strings.Contains(strings.ToLower(string(out)), strings.ToLower(part)) {
 			t.Fatalf("expected error containing %q, got:\n%s", part, out)
 		}
 	}
 
-	out = runCLIQuery(t, bin, path+" with infer_rows=1, max_bad_records=1 | count | json")
+	out = runCLIQuery(t, bin, path+" with infer_rows=1, max_bad_records=1 | json")
 	var rows []map[string]int64
 	if err := json.Unmarshal(out, &rows); err != nil {
 		t.Fatalf("json output: %v\n%s", err, out)
 	}
-	if len(rows) != 1 || rows[0]["count"] != 2 {
-		t.Fatalf("count after skipped late-field row: got %#v, want count=2", rows)
+	if len(rows) != 2 || rows[0]["id"] != 1 || rows[1]["id"] != 3 {
+		t.Fatalf("rows after skipped late-field row: got %#v, want ids 1 and 3", rows)
 	}
 }
 
@@ -228,7 +228,7 @@ func TestCLIJSONLInferenceCompressedAndGlobEndToEnd(t *testing.T) {
 		if err := os.WriteFile(path, gzipCLIBytes(t, data), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		out := runCLIQuery(t, bin, path+" with infer_rows=1, max_bad_records=1 | count | json")
+		out := runCLIQuery(t, bin, path+" with infer_rows=1, max_bad_records=1 | filter { amount > 0 } | count | json")
 		var rows []map[string]int64
 		if err := json.Unmarshal(out, &rows); err != nil {
 			t.Fatalf("json output: %v\n%s", err, out)

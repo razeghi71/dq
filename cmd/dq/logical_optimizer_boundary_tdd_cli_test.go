@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -57,6 +56,13 @@ func TestCLILogicalOptimizerBoundaryTDDPipelineSemanticsAcrossFlatFormats(t *tes
 
 func TestCLILogicalOptimizerBoundaryTDDPreservesRuntimeErrorOrderAcrossFlatFormats(t *testing.T) {
 	bin := buildCLI(t)
+	wantCounts := map[string]float64{
+		"csv":     6,
+		"json":    3,
+		"jsonl":   3,
+		"avro":    6,
+		"parquet": 6,
+	}
 
 	for _, input := range cliFlatUserInputFiles() {
 		t.Run(input.name+"_filter_before_erroring_transform", func(t *testing.T) {
@@ -68,18 +74,22 @@ func TestCLILogicalOptimizerBoundaryTDDPreservesRuntimeErrorOrderAcrossFlatForma
 			}
 		})
 
-		t.Run(input.name+"_transform_before_filter_still_errors", func(t *testing.T) {
-			out := runCLIQueryExpectError(t, bin,
+		t.Run(input.name+"_dead_transform_before_filter_is_eliminated", func(t *testing.T) {
+			rows := readCLIJSONMaps(t, runCLIQuery(t, bin,
 				input.path+` | transform y = year("bad-date") | filter { false } | count | json`,
-			)
-			assertCLIExpressionErrorContains(t, out, "transform", "y", "year")
+			))
+			if len(rows) != 1 || rows[0]["count"] != float64(0) {
+				t.Fatalf("count rows: got %#v, want count=0", rows)
+			}
 		})
 
-		t.Run(input.name+"_unused_transform_still_errors", func(t *testing.T) {
-			out := runCLIQueryExpectError(t, bin,
-				input.path+` | transform unused = year("bad-date") | select name | json`,
-			)
-			assertCLIExpressionErrorContains(t, out, "transform", "unused", "year")
+		t.Run(input.name+"_unused_transform_is_eliminated", func(t *testing.T) {
+			rows := readCLIJSONMaps(t, runCLIQuery(t, bin,
+				input.path+` | transform unused = year("bad-date") | select name | count | json`,
+			))
+			if len(rows) != 1 || rows[0]["count"] != wantCounts[input.name] {
+				t.Fatalf("count rows: got %#v, want count=%.0f", rows, wantCounts[input.name])
+			}
 		})
 	}
 }
@@ -201,12 +211,11 @@ func TestCLILogicalOptimizerBoundaryTDDSourceProjectionReadSetControlsUnusedBadR
 				t.Fatalf("projected source count rows: got %#v, want count=2", rows)
 			}
 
-			out := runCLIQueryExpectError(t, bin, input.path+` with infer_rows=1 | filter { id + 1 > 0 } | select id | count | json`)
-			msg := strings.ToLower(string(out))
-			for _, want := range []string{"unused", "int"} {
-				if !strings.Contains(msg, want) {
-					t.Fatalf("unsupported leading filter should read all columns and mention %q, got:\n%s", want, out)
-				}
+			rows = readCLIJSONMaps(t, runCLIQuery(t, bin,
+				input.path+` with infer_rows=1 | filter { id + 1 > 0 } | select id | count | json`,
+			))
+			if len(rows) != 1 || rows[0]["count"] != float64(2) {
+				t.Fatalf("unsupported leading filter count rows: got %#v, want count=2", rows)
 			}
 		})
 	}

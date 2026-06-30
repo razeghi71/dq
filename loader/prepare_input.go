@@ -1085,7 +1085,7 @@ func openProjectedGlobFileShardStream(path string, opts Options, plan preparedSo
 	if !plan.readAll {
 		readColumns = intersectColumns(plan.readColumns, shardColumns)
 	}
-	stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: readColumns})
+	stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns(readColumns...)})
 	if err != nil {
 		_ = prepared.Close()
 		return nil, err

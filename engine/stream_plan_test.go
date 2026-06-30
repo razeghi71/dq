@@ -28,7 +28,7 @@ func TestStreamingPlanRowWiseOpsShortCircuitBeforeLateRuntimeError(t *testing.T)
 }
 
 func TestStreamingPlanCountIsBlocking(t *testing.T) {
-	_, err := runStreamingPlanQueryErr(streamingPlanDatesTable(), `transform y = year(raw) | count`)
+	_, err := runStreamingPlanQueryErr(streamingPlanDatesTable(), `transform y = year(raw) | filter { y > 0 } | count`)
 	if err == nil {
 		t.Fatal("expected count to read the late invalid date")
 	}

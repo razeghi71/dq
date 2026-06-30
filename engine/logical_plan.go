@@ -137,11 +137,28 @@ type logicalDescribe struct {
 
 type logicalJoin struct {
 	logicalBase
-	kind      string
-	filename  string
-	right     *table.Table
-	leftKeys  []logicalPathBinding
-	rightKeys []logicalPathBinding
+	kind          string
+	filename      string
+	right         *table.Table
+	leftKeys      []logicalPathBinding
+	rightKeys     []logicalPathBinding
+	outputSources []logicalJoinOutputSource
+}
+
+type logicalJoinOutputKind int
+
+const (
+	logicalJoinOutputLeft logicalJoinOutputKind = iota
+	logicalJoinOutputKey
+	logicalJoinOutputRight
+)
+
+type logicalJoinOutputSource struct {
+	kind      logicalJoinOutputKind
+	name      string
+	leftName  string
+	rightName string
+	keyIndex  int
 }
 
 // optimizedLogicalPipeline is intentionally separate from logicalPipeline. When
@@ -468,19 +485,20 @@ func planLogicalJoin(o *ast.JoinOp, left schemaEnv, load LoadFunc) (logicalJoin,
 		return logicalJoin{}, err
 	}
 
-	outCols, leftKeyOutIdx, rightColMap := buildLogicalJoinSchema(left.columns, rightEnv.columns, leftKeys, rightKeys, o.Filename)
-	outSchemas, err := buildLogicalJoinOutputSchemas(left, rightEnv, leftKeys, rightKeys, leftKeyOutIdx, rightColMap, len(outCols), o.Kind)
+	outCols, outputSources := buildLogicalJoinLayout(left.columns, rightEnv.columns, leftKeys, rightKeys, o.Filename)
+	outSchemas, err := buildLogicalJoinOutputSchemas(left, rightEnv, leftKeys, rightKeys, outputSources, o.Kind)
 	if err != nil {
 		return logicalJoin{}, err
 	}
 
 	return logicalJoin{
-		logicalBase: logicalBaseFromEnv(schemaEnvFromOwnedColumns(outCols, outSchemas, false)),
-		kind:        o.Kind,
-		filename:    o.Filename,
-		right:       right,
-		leftKeys:    leftKeys,
-		rightKeys:   rightKeys,
+		logicalBase:   logicalBaseFromEnv(schemaEnvFromOwnedColumns(outCols, outSchemas, false)),
+		kind:          o.Kind,
+		filename:      o.Filename,
+		right:         right,
+		leftKeys:      leftKeys,
+		rightKeys:     rightKeys,
+		outputSources: outputSources,
 	}, nil
 }
 
@@ -517,7 +535,7 @@ func resolveLogicalJoinKeySide(path []string, env schemaEnv, side string) (logic
 	}, nil
 }
 
-func buildLogicalJoinSchema(leftCols, rightCols []string, leftKeys, rightKeys []logicalPathBinding, filename string) ([]string, []int, map[int]int) {
+func buildLogicalJoinLayout(leftCols, rightCols []string, leftKeys, rightKeys []logicalPathBinding, filename string) ([]string, []logicalJoinOutputSource) {
 	rightKeyDrop := make(map[string]bool)
 	for _, rk := range rightKeys {
 		if len(rk.path) == 1 {
@@ -525,26 +543,50 @@ func buildLogicalJoinSchema(leftCols, rightCols []string, leftKeys, rightKeys []
 		}
 	}
 
-	prefix := joinBasename(filename)
-	outCols := append([]string(nil), leftCols...)
-
-	leftKeyOutIdx := make([]int, len(leftKeys))
+	keyIndexByLeftCol := make(map[string]int)
 	for i, lk := range leftKeys {
 		if len(lk.path) == 1 {
-			leftKeyOutIdx[i] = indexOfColumn(leftCols, lk.path[0])
+			keyIndexByLeftCol[lk.path[0]] = i
+		}
+	}
+
+	prefix := joinBasename(filename)
+	outCols := append([]string(nil), leftCols...)
+	outputSources := make([]logicalJoinOutputSource, len(leftCols))
+	for i, col := range leftCols {
+		if keyIndex, ok := keyIndexByLeftCol[col]; ok {
+			outputSources[i] = logicalJoinOutputSource{
+				kind:     logicalJoinOutputKey,
+				name:     col,
+				keyIndex: keyIndex,
+			}
+			continue
+		}
+		outputSources[i] = logicalJoinOutputSource{
+			kind:     logicalJoinOutputLeft,
+			name:     col,
+			leftName: col,
+		}
+	}
+
+	for i, lk := range leftKeys {
+		if len(lk.path) == 1 {
 			continue
 		}
 		name := uniqueColumnName(lk.name, outCols)
-		leftKeyOutIdx[i] = len(outCols)
 		outCols = append(outCols, name)
+		outputSources = append(outputSources, logicalJoinOutputSource{
+			kind:     logicalJoinOutputKey,
+			name:     name,
+			keyIndex: i,
+		})
 	}
 
 	taken := make(map[string]bool, len(outCols)+len(rightCols))
 	for _, c := range outCols {
 		taken[c] = true
 	}
-	rightColMap := make(map[int]int)
-	for i, col := range rightCols {
+	for _, col := range rightCols {
 		if rightKeyDrop[col] {
 			continue
 		}
@@ -553,58 +595,77 @@ func buildLogicalJoinSchema(leftCols, rightCols []string, leftKeys, rightKeys []
 			name = uniqueColumnName(prefix+"_"+col, outCols)
 		}
 		taken[name] = true
-		rightColMap[len(outCols)] = i
 		outCols = append(outCols, name)
+		outputSources = append(outputSources, logicalJoinOutputSource{
+			kind:      logicalJoinOutputRight,
+			name:      name,
+			rightName: col,
+		})
 	}
-	return outCols, leftKeyOutIdx, rightColMap
+	return outCols, outputSources
 }
 
-func buildLogicalJoinOutputSchemas(left, right schemaEnv, leftKeys, rightKeys []logicalPathBinding, leftKeyOutIdx []int, rightColMap map[int]int, outLen int, joinKind string) ([]*table.TypeDescriptor, error) {
-	schemas := make([]*table.TypeDescriptor, outLen)
-
-	keyOutIdx := make(map[int]bool, len(leftKeyOutIdx))
-	for _, outIdx := range leftKeyOutIdx {
-		keyOutIdx[outIdx] = true
+func buildLogicalJoinOutputSchemas(left, right schemaEnv, leftKeys, rightKeys []logicalPathBinding, sources []logicalJoinOutputSource, joinKind string) ([]*table.TypeDescriptor, error) {
+	schemas := make([]*table.TypeDescriptor, len(sources))
+	keySchemas, err := logicalJoinKeyOutputSchemas(leftKeys, rightKeys)
+	if err != nil {
+		return nil, err
 	}
 
-	for i := range left.columns {
-		schema := left.rawSchema(i)
-		if (joinKind == "right" || joinKind == "full") && !keyOutIdx[i] {
-			schema = table.WithNullable(schema)
-		}
-		schemas[i] = schema
-	}
-
-	for i := range leftKeys {
-		outIdx := leftKeyOutIdx[i]
-		leftSchema := leftKeys[i].schema
-		rightSchema := rightKeys[i].schema
-		if err := validateLogicalJoinKeySchemas(leftKeys[i], rightKeys[i]); err != nil {
-			return nil, err
-		}
-		merged, err := table.UnifyStrict(leftSchema, rightSchema)
-		if err != nil {
-			return nil, logicalJoinKeyTypeError(leftKeys[i], rightKeys[i])
-		}
-		if outIdx >= 0 && outIdx < len(schemas) {
-			schemas[outIdx] = merged
-		}
-	}
-
-	for outIdx, rightIdx := range rightColMap {
-		if outIdx >= 0 && outIdx < len(schemas) {
-			schema := right.rawSchema(rightIdx)
+	for outIdx, source := range sources {
+		var schema *table.TypeDescriptor
+		switch source.kind {
+		case logicalJoinOutputLeft:
+			leftIdx := left.colIndex(source.leftName)
+			if leftIdx < 0 {
+				return nil, fmt.Errorf("join: left output column %q not found", source.leftName)
+			}
+			schema = left.rawSchema(leftIdx)
+			if joinKind == "right" || joinKind == "full" {
+				schema = table.WithNullable(schema)
+			}
+		case logicalJoinOutputKey:
+			if source.keyIndex < 0 || source.keyIndex >= len(keySchemas) {
+				return nil, fmt.Errorf("join: output key index %d out of range", source.keyIndex)
+			}
+			schema = keySchemas[source.keyIndex]
+		case logicalJoinOutputRight:
+			rightIdx := right.colIndex(source.rightName)
+			if rightIdx < 0 {
+				return nil, fmt.Errorf("join: right output column %q not found", source.rightName)
+			}
+			schema = right.rawSchema(rightIdx)
 			if joinKind == "left" || joinKind == "full" {
 				schema = table.WithNullable(schema)
 			}
-			schemas[outIdx] = schema
+		default:
+			return nil, fmt.Errorf("join: unknown output source kind %d", source.kind)
 		}
+		schemas[outIdx] = schema
 	}
 
 	for _, schema := range schemas {
 		if schema == nil {
 			return nil, fmt.Errorf("join: planned output schema is incomplete")
 		}
+	}
+	return schemas, nil
+}
+
+func logicalJoinKeyOutputSchemas(leftKeys, rightKeys []logicalPathBinding) ([]*table.TypeDescriptor, error) {
+	if len(leftKeys) != len(rightKeys) {
+		return nil, fmt.Errorf("join: mismatched key count")
+	}
+	schemas := make([]*table.TypeDescriptor, len(leftKeys))
+	for i := range leftKeys {
+		if err := validateLogicalJoinKeySchemas(leftKeys[i], rightKeys[i]); err != nil {
+			return nil, err
+		}
+		merged, err := table.UnifyStrict(leftKeys[i].schema, rightKeys[i].schema)
+		if err != nil {
+			return nil, logicalJoinKeyTypeError(leftKeys[i], rightKeys[i])
+		}
+		schemas[i] = merged
 	}
 	return schemas, nil
 }
@@ -647,6 +708,9 @@ func optimizeLogicalPipelineInto(plan *logicalPipeline, out *optimizedLogicalPip
 		OutputSchema: plan.OutputSchema,
 	}
 	optimizeSourcePushdown(out)
+	if err := optimizeDemandDrivenPruning(out); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -856,34 +920,53 @@ func planPhysicalJoin(input schemaEnv, o logicalJoin) (plannedJoin, error) {
 	if err != nil {
 		return plannedJoin{}, err
 	}
-	// Recompute the output map from the chosen physical input schemas instead
-	// of trusting cached logical metadata. Joins are not a hot planning path, and
-	// this keeps physical executor indexes derived after the optimizer boundary.
-	outCols, leftKeyOutIdx, rightColMap := buildLogicalJoinSchema(input.columns, rightEnv.columns, o.leftKeys, o.rightKeys, o.filename)
-	if err := validatePhysicalJoinOutputColumns(o.OutputSchema(), outCols); err != nil {
+	outputs, err := physicalJoinOutputs(input, rightEnv, o)
+	if err != nil {
 		return plannedJoin{}, err
 	}
 	return plannedJoin{
-		plannedBase:   plannedBase{output: o.OutputSchema()},
-		kind:          o.kind,
-		right:         o.right,
-		leftKeys:      leftKeys,
-		rightKeys:     rightKeys,
-		leftKeyOutIdx: leftKeyOutIdx,
-		rightColMap:   rightColMap,
+		plannedBase: plannedBase{output: o.OutputSchema()},
+		kind:        o.kind,
+		right:       o.right,
+		leftKeys:    leftKeys,
+		rightKeys:   rightKeys,
+		outputs:     outputs,
 	}, nil
 }
 
-func validatePhysicalJoinOutputColumns(schema table.Schema, cols []string) error {
-	if len(schema.Columns) != len(cols) {
-		return fmt.Errorf("join: physical output column count changed from %d to %d", len(schema.Columns), len(cols))
+func physicalJoinOutputs(left, right schemaEnv, o logicalJoin) ([]plannedJoinOutput, error) {
+	schema := o.OutputSchema()
+	if len(o.outputSources) != len(schema.Columns) {
+		return nil, fmt.Errorf("join: output source count %d does not match schema column count %d", len(o.outputSources), len(schema.Columns))
 	}
-	for i, col := range cols {
-		if schema.Columns[i].Name != col {
-			return fmt.Errorf("join: physical output column %d changed from %q to %q", i, schema.Columns[i].Name, col)
+	outputs := make([]plannedJoinOutput, len(o.outputSources))
+	for i, source := range o.outputSources {
+		if schema.Columns[i].Name != source.name {
+			return nil, fmt.Errorf("join: output source %d changed from %q to %q", i, schema.Columns[i].Name, source.name)
+		}
+		switch source.kind {
+		case logicalJoinOutputLeft:
+			idx := left.colIndex(source.leftName)
+			if idx < 0 {
+				return nil, fmt.Errorf("join: left output column %q not found after optimization", source.leftName)
+			}
+			outputs[i] = plannedJoinOutput{kind: plannedJoinOutputLeft, leftIndex: idx}
+		case logicalJoinOutputKey:
+			if source.keyIndex < 0 || source.keyIndex >= len(o.leftKeys) {
+				return nil, fmt.Errorf("join: key output %q has invalid key index %d", source.name, source.keyIndex)
+			}
+			outputs[i] = plannedJoinOutput{kind: plannedJoinOutputKey, keyIndex: source.keyIndex}
+		case logicalJoinOutputRight:
+			idx := right.colIndex(source.rightName)
+			if idx < 0 {
+				return nil, fmt.Errorf("join: right output column %q not found", source.rightName)
+			}
+			outputs[i] = plannedJoinOutput{kind: plannedJoinOutputRight, rightIndex: idx}
+		default:
+			return nil, fmt.Errorf("join: output %q has unknown source kind", source.name)
 		}
 	}
-	return nil
+	return outputs, nil
 }
 
 func physicalizeJoinKeys(left, right schemaEnv, leftKeys, rightKeys []logicalPathBinding) ([]resolvedJoinKey, []resolvedJoinKey, error) {

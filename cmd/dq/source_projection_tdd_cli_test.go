@@ -168,7 +168,7 @@ func TestCLISourcePlanningTDDJSONLikeLateBadRowsRemainRuntimeErrors(t *testing.T
 		t.Run(tc.name, func(t *testing.T) {
 			input := writeCLISourceProjectionTDDFile(t, dir, tc.file, tc.content)
 			out := runCLIQueryExpectError(t, bin,
-				input+` with infer_rows=1 | select id | count | json`,
+				input+` with infer_rows=1 | select id | json`,
 			)
 			msg := strings.ToLower(string(out))
 			for _, want := range []string{"load error", "id", "int", "string"} {
@@ -299,7 +299,7 @@ func TestCLISourceProjectionTDDCSVFilterReadBadRecordsRemainObservable(t *testin
 		},
 		{
 			name:  "output_column_before_predicate_drop",
-			query: input + ` with infer_rows=1 | filter { id == 1 } | select amount | count | json`,
+			query: input + ` with infer_rows=1 | filter { id == 1 } | select amount | json`,
 			want:  []string{"amount", "int", "bad"},
 		},
 	}
@@ -317,19 +317,16 @@ func TestCLISourceProjectionTDDCSVFilterReadBadRecordsRemainObservable(t *testin
 	}
 }
 
-func TestCLISourceProjectionTDDUnsupportedFilterBeforeSelectReadsAllBadRecords(t *testing.T) {
+func TestCLISourceProjectionTDDUnsupportedFilterBeforeSelectSkipsUnusedBadRecords(t *testing.T) {
 	bin := buildCLI(t)
 	dir := t.TempDir()
 	input := writeCLISourceProjectionTDDFile(t, dir, "bad.csv", "id,unused\n1,10\n2,bad\n")
 
-	out := runCLIQueryExpectError(t, bin,
+	rows := readCLIJSONMaps(t, runCLIQuery(t, bin,
 		input+` with infer_rows=1 | filter { id + 1 > 0 } | select id | count | json`,
-	)
-	msg := strings.ToLower(string(out))
-	for _, want := range []string{"unused", "int", "bad"} {
-		if !strings.Contains(msg, want) {
-			t.Fatalf("unsupported filter should preserve read-all bad record %q, got:\n%s", want, out)
-		}
+	))
+	if len(rows) != 1 || rows[0]["count"] != float64(2) {
+		t.Fatalf("count rows: got %#v, want count=2", rows)
 	}
 }
 
@@ -355,7 +352,7 @@ func TestCLISourceProjectionTDDCSVReferencedTypeBadRecordsRemainObservable(t *te
 	input := writeCLISourceProjectionTDDFile(t, dir, "bad.csv", "id,unused\n1,10\n2,bad\n")
 
 	out := runCLIQueryExpectError(t, bin,
-		input+` with infer_rows=1 | select unused | count | json`,
+		input+` with infer_rows=1 | select unused | json`,
 	)
 	msg := strings.ToLower(string(out))
 	for _, want := range []string{"unused", "int", "bad"} {

@@ -110,12 +110,26 @@ type plannedDescribe struct {
 
 type plannedJoin struct {
 	plannedBase
-	kind          string
-	right         *table.Table
-	leftKeys      []resolvedJoinKey
-	rightKeys     []resolvedJoinKey
-	leftKeyOutIdx []int
-	rightColMap   map[int]int
+	kind      string
+	right     *table.Table
+	leftKeys  []resolvedJoinKey
+	rightKeys []resolvedJoinKey
+	outputs   []plannedJoinOutput
+}
+
+type plannedJoinOutputKind int
+
+const (
+	plannedJoinOutputLeft plannedJoinOutputKind = iota
+	plannedJoinOutputKey
+	plannedJoinOutputRight
+)
+
+type plannedJoinOutput struct {
+	kind       plannedJoinOutputKind
+	leftIndex  int
+	keyIndex   int
+	rightIndex int
 }
 
 func isSchemaPlannedOp(op ast.Op) bool {

@@ -18,8 +18,8 @@ type SourceInfo struct {
 type SourcePredicate func(row []table.Value) (bool, error)
 
 type SourceLoadSpec struct {
-	ReadColumns   []string
-	OutputColumns []string
+	ReadColumns   table.ColumnSelection
+	OutputColumns table.ColumnSelection
 	Predicate     SourcePredicate
 }
 
@@ -36,7 +36,7 @@ type logicalSource struct {
 
 type optimizedSource struct {
 	source        logicalSource
-	outputColumns []string
+	outputColumns table.ColumnSelection
 	predicates    []logicalTypedExpr
 }
 
@@ -215,7 +215,7 @@ func optimizeSourcePushdown(plan *optimizedLogicalPipeline) {
 	if len(plan.Ops) == 0 {
 		return
 	}
-	var outputColumns []string
+	outputColumns := table.AllColumns()
 	var predicates []logicalTypedExpr
 	consumed := 0
 
@@ -226,7 +226,7 @@ func optimizeSourcePushdown(plan *optimizedLogicalPipeline) {
 			if !ok {
 				goto done
 			}
-			outputColumns = cols
+			outputColumns = table.SelectedColumns(cols...)
 			consumed++
 		case logicalFilter:
 			if !op.sourcePushable {
@@ -247,7 +247,7 @@ done:
 	if !ok {
 		return
 	}
-	plan.Source.outputColumns = append([]string(nil), outputColumns...)
+	plan.Source.outputColumns = outputColumns
 	plan.Source.predicates = append([]logicalTypedExpr(nil), predicates...)
 	plan.Ops = append([]logicalOp(nil), plan.Ops[consumed:]...)
 	plan.InputEnv = sourceEnv
@@ -275,8 +275,8 @@ func physicalSourceFromOptimized(source *optimizedSource) (*physicalSource, erro
 		filename: source.source.filename,
 		load:     source.source.load,
 		spec: SourceLoadSpec{
-			ReadColumns:   append([]string(nil), readColumns...),
-			OutputColumns: append([]string(nil), source.outputColumns...),
+			ReadColumns:   readColumns,
+			OutputColumns: source.outputColumns,
 			Predicate:     compileSourcePredicates(predicates),
 		},
 	}, nil
@@ -365,11 +365,12 @@ func sourceFilterASTCanPush(expr ast.Expr) bool {
 	}
 }
 
-func sourceOutputEnv(source logicalSource, columns []string) (schemaEnv, bool) {
+func sourceOutputEnv(source logicalSource, selection table.ColumnSelection) (schemaEnv, bool) {
 	env := schemaEnvFromSchema(source.schema)
-	if columns == nil {
+	if selection.IsAll() {
 		return env, true
 	}
+	columns := selection.Names()
 	schemas := make([]*table.TypeDescriptor, len(columns))
 	for i, col := range columns {
 		idx := env.colIndex(col)
@@ -384,11 +385,11 @@ func sourceOutputEnv(source logicalSource, columns []string) (schemaEnv, bool) {
 	return schemaEnvFromOwnedColumns(append([]string(nil), columns...), schemas, false), true
 }
 
-func derivePhysicalSourceReadColumns(source *optimizedSource) []string {
-	if source == nil || source.outputColumns == nil {
-		return nil
+func derivePhysicalSourceReadColumns(source *optimizedSource) table.ColumnSelection {
+	if source == nil || source.outputColumns.IsAll() {
+		return table.AllColumns()
 	}
-	read := append([]string(nil), source.outputColumns...)
+	read := source.outputColumns.Names()
 	needed := make(map[string]bool)
 	for _, predicate := range source.predicates {
 		collectLogicalTypedExprColumns(predicate, needed)
@@ -399,34 +400,7 @@ func derivePhysicalSourceReadColumns(source *optimizedSource) []string {
 			read = append(read, col)
 		}
 	}
-	return read
-}
-
-func collectLogicalTypedExprColumns(expr logicalTypedExpr, out map[string]bool) {
-	switch b := expr.bound.(type) {
-	case *logicalBoundColumn:
-		if len(b.rawPath) > 0 {
-			out[b.rawPath[0]] = true
-		}
-	}
-	if expr.left != nil {
-		collectLogicalTypedExprColumns(*expr.left, out)
-	}
-	if expr.right != nil {
-		collectLogicalTypedExprColumns(*expr.right, out)
-	}
-	if expr.operand != nil {
-		collectLogicalTypedExprColumns(*expr.operand, out)
-	}
-	for i := range expr.args {
-		collectLogicalTypedExprColumns(expr.args[i], out)
-	}
-	for i := range expr.fields {
-		collectLogicalTypedExprColumns(expr.fields[i].expr, out)
-	}
-	for i := range expr.elements {
-		collectLogicalTypedExprColumns(expr.elements[i], out)
-	}
+	return table.SelectedColumns(read...)
 }
 
 func compileSourcePredicates(predicates []typedExpr) SourcePredicate {

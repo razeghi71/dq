@@ -18,8 +18,8 @@ func TestPrepareStreamTDDCSVPredicateProjectionAndEOF(t *testing.T) {
 		t.Fatalf("prepare csv: %v", err)
 	}
 	stream, err := prepared.StreamSpec(SourceLoadSpec{
-		ReadColumns:   []string{"id", "name"},
-		OutputColumns: []string{"name", "id"},
+		ReadColumns:   table.SelectedColumns("id", "name"),
+		OutputColumns: table.SelectedColumns("name", "id"),
 		Predicate: func(row []table.Value) (bool, error) {
 			return row[0].Type == table.TypeInt && row[0].Int >= 2, nil
 		},
@@ -51,7 +51,7 @@ func TestPrepareStreamTDDCSVCloseStopsBeforeLateBadRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare csv: %v", err)
 	}
-	stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"id"}})
+	stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("id")})
 	if err != nil {
 		t.Fatalf("stream projected id: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestPrepareStreamTDDCSVCloseStopsBeforeLateBadRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare csv again: %v", err)
 	}
-	stream, err = prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"unused"}})
+	stream, err = prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("unused")})
 	if err != nil {
 		t.Fatalf("stream projected unused: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestPrepareStreamTDDStdinCSVCloseStopsBeforeLateBadRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare stdin csv: %v", err)
 	}
-	stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"amount"}})
+	stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("amount")})
 	if err != nil {
 		t.Fatalf("stream stdin amount: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestPrepareStreamTDDStdinCSVCloseStopsBeforeLateBadRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare stdin csv again: %v", err)
 	}
-	stream, err = prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"amount"}})
+	stream, err = prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("amount")})
 	if err != nil {
 		t.Fatalf("stream stdin amount again: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestPrepareStreamTDDStdinJSONStreamsLiveReader(t *testing.T) {
 			if err != nil {
 				t.Fatalf("prepare stdin %s: %v", tc.format, err)
 			}
-			stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"id"}})
+			stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("id")})
 			if err != nil {
 				t.Fatalf("stream stdin %s: %v", tc.format, err)
 			}
@@ -162,7 +162,7 @@ func TestPrepareStreamTDDStdinJSONLoadSpecMaterializesLiveReader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare stdin jsonl: %v", err)
 	}
-	tbl, err := prepared.LoadSpec(SourceLoadSpec{OutputColumns: []string{"id"}})
+	tbl, err := prepared.LoadSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("id")})
 	if err != nil {
 		t.Fatalf("load stdin jsonl: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestPrepareStreamTDDPrepareInputErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare stdin jsonl: %v", err)
 	}
-	if _, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"missing"}}); err == nil || !strings.Contains(err.Error(), "missing") {
+	if _, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("missing")}); err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("stdin missing projection error: got %v", err)
 	}
 	if _, err := prepared.StreamSpec(SourceLoadSpec{}); err == nil || !strings.Contains(err.Error(), "already loaded") {
@@ -208,7 +208,7 @@ func TestPrepareStreamTDDPrepareInputDelegatesReplayableFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare input file: %v", err)
 	}
-	tbl, err := prepared.LoadSpec(SourceLoadSpec{OutputColumns: []string{"id"}})
+	tbl, err := prepared.LoadSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("id")})
 	if err != nil {
 		t.Fatalf("load prepared input file: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestPrepareStreamTDDStdinJSONLoadSpecErrorBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare stdin jsonl: %v", err)
 	}
-	if _, err := prepared.LoadSpec(SourceLoadSpec{OutputColumns: []string{"missing"}}); err == nil || !strings.Contains(err.Error(), "missing") {
+	if _, err := prepared.LoadSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("missing")}); err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("stdin jsonl missing load projection error: got %v", err)
 	}
 	if _, err := prepared.LoadSpec(SourceLoadSpec{}); err == nil || !strings.Contains(err.Error(), "already loaded") {
@@ -233,7 +233,7 @@ func TestPrepareStreamTDDStdinJSONLoadSpecErrorBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare stdin jsonl with late bad line: %v", err)
 	}
-	if _, err := prepared.LoadSpec(SourceLoadSpec{OutputColumns: []string{"id"}}); err == nil || !strings.Contains(strings.ToLower(err.Error()), "invalid json") {
+	if _, err := prepared.LoadSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("id")}); err == nil || !strings.Contains(strings.ToLower(err.Error()), "invalid json") {
 		t.Fatalf("stdin jsonl load materialize error: got %v", err)
 	}
 }
@@ -252,7 +252,7 @@ func TestPrepareStreamTDDGlobCSVCloseStopsBeforeLateShardBadRecord(t *testing.T)
 	if err != nil {
 		t.Fatalf("prepare glob csv: %v", err)
 	}
-	stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"amount"}})
+	stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("amount")})
 	if err != nil {
 		t.Fatalf("stream glob amount: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestPrepareStreamTDDGlobCSVCloseStopsBeforeLateShardBadRecord(t *testing.T)
 	if err != nil {
 		t.Fatalf("prepare glob csv again: %v", err)
 	}
-	stream, err = prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"amount"}})
+	stream, err = prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("amount")})
 	if err != nil {
 		t.Fatalf("stream glob amount again: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestPrepareStreamTDDGlobCSVInferenceEdges(t *testing.T) {
 		if err != nil {
 			t.Fatalf("prepare infer zero glob: %v", err)
 		}
-		stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"id"}})
+		stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("id")})
 		if err != nil {
 			t.Fatalf("stream infer zero glob: %v", err)
 		}
@@ -335,7 +335,7 @@ func TestPrepareStreamTDDGlobCSVInferenceEdges(t *testing.T) {
 		if err != nil {
 			t.Fatalf("prepare infer all glob: %v", err)
 		}
-		stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"amount"}})
+		stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("amount")})
 		if err != nil {
 			t.Fatalf("stream infer all glob: %v", err)
 		}
@@ -363,7 +363,7 @@ func TestPrepareStreamTDDGlobCSVHeaderlessLoadSpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare headerless glob: %v", err)
 	}
-	tbl, err := prepared.LoadSpec(SourceLoadSpec{OutputColumns: []string{"col2", "col1"}})
+	tbl, err := prepared.LoadSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("col2", "col1")})
 	if err != nil {
 		t.Fatalf("load headerless glob: %v", err)
 	}
@@ -391,7 +391,7 @@ func TestPrepareStreamTDDGlobJSONBadRecordBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare glob jsonl with bad record budget: %v", err)
 	}
-	tbl, err := prepared.LoadSpec(SourceLoadSpec{OutputColumns: []string{"id"}})
+	tbl, err := prepared.LoadSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("id")})
 	if err != nil {
 		t.Fatalf("load glob jsonl with bad record budget: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestPrepareStreamTDDGlobJSONRuntimeBadRecordErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare glob jsonl: %v", err)
 	}
-	stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"id"}})
+	stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("id")})
 	if err != nil {
 		t.Fatalf("stream glob jsonl: %v", err)
 	}
@@ -456,8 +456,8 @@ func TestPrepareStreamTDDGlobStreamPredicates(t *testing.T) {
 			t.Fatalf("prepare csv glob: %v", err)
 		}
 		stream, err := prepared.StreamSpec(SourceLoadSpec{
-			ReadColumns:   []string{"id"},
-			OutputColumns: []string{"id"},
+			ReadColumns:   table.SelectedColumns("id"),
+			OutputColumns: table.SelectedColumns("id"),
 			Predicate: func(row []table.Value) (bool, error) {
 				return row[0].Int == 2, nil
 			},
@@ -477,8 +477,8 @@ func TestPrepareStreamTDDGlobStreamPredicates(t *testing.T) {
 			t.Fatalf("prepare csv glob again: %v", err)
 		}
 		stream, err = prepared.StreamSpec(SourceLoadSpec{
-			ReadColumns:   []string{"id"},
-			OutputColumns: []string{"id"},
+			ReadColumns:   table.SelectedColumns("id"),
+			OutputColumns: table.SelectedColumns("id"),
 			Predicate: func(row []table.Value) (bool, error) {
 				return false, errPrepareTDDPredicate
 			},
@@ -503,8 +503,8 @@ func TestPrepareStreamTDDGlobStreamPredicates(t *testing.T) {
 			t.Fatalf("prepare json glob: %v", err)
 		}
 		stream, err := prepared.StreamSpec(SourceLoadSpec{
-			ReadColumns:   []string{"id"},
-			OutputColumns: []string{"id"},
+			ReadColumns:   table.SelectedColumns("id"),
+			OutputColumns: table.SelectedColumns("id"),
 			Predicate: func(row []table.Value) (bool, error) {
 				return row[0].Int == 2, nil
 			},
@@ -570,7 +570,7 @@ func TestPrepareStreamTDDGlobMissingProjectionErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare csv glob: %v", err)
 	}
-	if _, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"missing"}}); err == nil || !strings.Contains(err.Error(), "missing") {
+	if _, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("missing")}); err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("glob csv missing projection error: got %v", err)
 	}
 
@@ -585,7 +585,7 @@ func TestPrepareStreamTDDGlobMissingProjectionErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare jsonl glob: %v", err)
 	}
-	if _, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"missing"}}); err == nil || !strings.Contains(err.Error(), "missing") {
+	if _, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("missing")}); err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("glob json missing projection error: got %v", err)
 	}
 
@@ -604,7 +604,7 @@ func TestPrepareStreamTDDGlobMissingProjectionErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare parquet glob: %v", err)
 	}
-	if _, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"missing"}}); err == nil || !strings.Contains(err.Error(), "missing") {
+	if _, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("missing")}); err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("glob parquet missing projection error: got %v", err)
 	}
 	if _, err := prepared.StreamSpec(SourceLoadSpec{}); err == nil || !strings.Contains(err.Error(), "already loaded") {
@@ -622,7 +622,7 @@ func TestPrepareStreamTDDGlobLoadSpecErrorBranches(t *testing.T) {
 		if err != nil {
 			t.Fatalf("prepare csv glob: %v", err)
 		}
-		if _, err := prepared.LoadSpec(SourceLoadSpec{OutputColumns: []string{"missing"}}); err == nil || !strings.Contains(err.Error(), "missing") {
+		if _, err := prepared.LoadSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("missing")}); err == nil || !strings.Contains(err.Error(), "missing") {
 			t.Fatalf("glob load missing projection error: got %v", err)
 		}
 		if _, err := prepared.LoadSpec(SourceLoadSpec{}); err == nil || !strings.Contains(err.Error(), "already loaded") {
@@ -642,7 +642,7 @@ func TestPrepareStreamTDDGlobLoadSpecErrorBranches(t *testing.T) {
 		if err != nil {
 			t.Fatalf("prepare jsonl glob: %v", err)
 		}
-		if _, err := prepared.LoadSpec(SourceLoadSpec{OutputColumns: []string{"id"}}); err == nil || !strings.Contains(strings.ToLower(err.Error()), "invalid json") {
+		if _, err := prepared.LoadSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("id")}); err == nil || !strings.Contains(strings.ToLower(err.Error()), "invalid json") {
 			t.Fatalf("glob load lazy json error: got %v", err)
 		}
 	})
@@ -881,7 +881,7 @@ func TestPrepareStreamTDDGlobLazySourceMutationErrors(t *testing.T) {
 		if err := os.Remove(second); err != nil {
 			t.Fatal(err)
 		}
-		stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"id"}})
+		stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("id")})
 		if err != nil {
 			t.Fatalf("stream json glob: %v", err)
 		}
@@ -910,7 +910,7 @@ func TestPrepareStreamTDDGlobLazySourceMutationErrors(t *testing.T) {
 		if err := os.Remove(path); err != nil {
 			t.Fatal(err)
 		}
-		stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"name"}})
+		stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("name")})
 		if err != nil {
 			t.Fatalf("stream parquet glob: %v", err)
 		}
@@ -947,7 +947,7 @@ func TestPrepareStreamTDDGlobJSONStreamsAndLoads(t *testing.T) {
 			if err != nil {
 				t.Fatalf("prepare glob %s: %v", tc.format, err)
 			}
-			stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"id"}})
+			stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("id")})
 			if err != nil {
 				t.Fatalf("stream glob %s: %v", tc.format, err)
 			}
@@ -965,7 +965,7 @@ func TestPrepareStreamTDDGlobJSONStreamsAndLoads(t *testing.T) {
 			if err != nil {
 				t.Fatalf("prepare glob %s for load: %v", tc.format, err)
 			}
-			tbl, err := prepared.LoadSpec(SourceLoadSpec{OutputColumns: []string{"id"}})
+			tbl, err := prepared.LoadSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("id")})
 			if err != nil {
 				t.Fatalf("load glob %s: %v", tc.format, err)
 			}
@@ -1001,7 +1001,7 @@ func TestPrepareStreamTDDGlobMetadataStreams(t *testing.T) {
 			if err != nil {
 				t.Fatalf("prepare glob %s: %v", tc.name, err)
 			}
-			stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"name"}})
+			stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("name")})
 			if err != nil {
 				t.Fatalf("stream glob %s: %v", tc.name, err)
 			}
@@ -1029,7 +1029,7 @@ func TestPrepareStreamTDDGlobMetadataStreams(t *testing.T) {
 			if err != nil {
 				t.Fatalf("prepare glob %s for load: %v", tc.name, err)
 			}
-			tbl, err := prepared.LoadSpec(SourceLoadSpec{OutputColumns: []string{"name"}})
+			tbl, err := prepared.LoadSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("name")})
 			if err != nil {
 				t.Fatalf("load glob %s: %v", tc.name, err)
 			}
@@ -1071,7 +1071,7 @@ func TestPrepareStreamTDDJSONArrayReopensRestAfterBoundedInference(t *testing.T)
 	if err != nil {
 		t.Fatalf("prepare json: %v", err)
 	}
-	stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"id"}})
+	stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("id")})
 	if err != nil {
 		t.Fatalf("stream json: %v", err)
 	}
@@ -1093,7 +1093,7 @@ func TestPrepareStreamTDDJSONLReopensRestAndReachesEOF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare jsonl: %v", err)
 	}
-	stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"id"}})
+	stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("id")})
 	if err != nil {
 		t.Fatalf("stream jsonl: %v", err)
 	}
@@ -1114,7 +1114,7 @@ func TestPrepareStreamTDDJSONLCompleteInspectionUsesBufferedRecords(t *testing.T
 	if err != nil {
 		t.Fatalf("prepare jsonl: %v", err)
 	}
-	stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"id"}})
+	stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("id")})
 	if err != nil {
 		t.Fatalf("stream jsonl: %v", err)
 	}
@@ -1135,7 +1135,7 @@ func TestPrepareStreamTDDJSONLCloseStopsBeforeLateMalformedLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare jsonl: %v", err)
 	}
-	stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"id"}})
+	stream, err := prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("id")})
 	if err != nil {
 		t.Fatalf("stream jsonl: %v", err)
 	}
@@ -1151,7 +1151,7 @@ func TestPrepareStreamTDDJSONLCloseStopsBeforeLateMalformedLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare jsonl again: %v", err)
 	}
-	stream, err = prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"id"}})
+	stream, err = prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("id")})
 	if err != nil {
 		t.Fatalf("stream jsonl again: %v", err)
 	}
@@ -1170,8 +1170,8 @@ func TestPrepareStreamTDDJSONPredicateFalseAndError(t *testing.T) {
 		t.Fatalf("prepare jsonl: %v", err)
 	}
 	stream, err := prepared.StreamSpec(SourceLoadSpec{
-		ReadColumns:   []string{"id"},
-		OutputColumns: []string{"id"},
+		ReadColumns:   table.SelectedColumns("id"),
+		OutputColumns: table.SelectedColumns("id"),
 		Predicate: func(row []table.Value) (bool, error) {
 			return false, nil
 		},
@@ -1186,8 +1186,8 @@ func TestPrepareStreamTDDJSONPredicateFalseAndError(t *testing.T) {
 		t.Fatalf("prepare jsonl again: %v", err)
 	}
 	stream, err = prepared.StreamSpec(SourceLoadSpec{
-		ReadColumns:   []string{"id"},
-		OutputColumns: []string{"id"},
+		ReadColumns:   table.SelectedColumns("id"),
+		OutputColumns: table.SelectedColumns("id"),
 		Predicate: func(row []table.Value) (bool, error) {
 			return false, errPrepareTDDPredicate
 		},
@@ -1217,8 +1217,8 @@ func TestPrepareStreamTDDMetadataSourcesStreamRows(t *testing.T) {
 				t.Fatalf("prepare %s: %v", tc.name, err)
 			}
 			stream, err := prepared.StreamSpec(SourceLoadSpec{
-				ReadColumns:   []string{"name", "age"},
-				OutputColumns: []string{"age"},
+				ReadColumns:   table.SelectedColumns("name", "age"),
+				OutputColumns: table.SelectedColumns("age"),
 				Predicate: func(row []table.Value) (bool, error) {
 					return row[1].Type == table.TypeInt && row[1].Int >= 30, nil
 				},
@@ -1256,7 +1256,7 @@ func TestPrepareStreamTDDErrorBranches(t *testing.T) {
 		if err != nil {
 			t.Fatalf("prepare csv: %v", err)
 		}
-		_, err = prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"missing"}})
+		_, err = prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("missing")})
 		if err == nil || !strings.Contains(err.Error(), "missing") {
 			t.Fatalf("missing csv projection error: got %v", err)
 		}
@@ -1268,7 +1268,7 @@ func TestPrepareStreamTDDErrorBranches(t *testing.T) {
 		if err != nil {
 			t.Fatalf("prepare json: %v", err)
 		}
-		_, err = prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"missing"}})
+		_, err = prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("missing")})
 		if err == nil || !strings.Contains(err.Error(), "missing") {
 			t.Fatalf("missing json projection error: got %v", err)
 		}
@@ -1279,7 +1279,7 @@ func TestPrepareStreamTDDErrorBranches(t *testing.T) {
 		if err != nil {
 			t.Fatalf("prepare avro: %v", err)
 		}
-		_, err = prepared.StreamSpec(SourceLoadSpec{OutputColumns: []string{"missing"}})
+		_, err = prepared.StreamSpec(SourceLoadSpec{OutputColumns: table.SelectedColumns("missing")})
 		if err == nil || !strings.Contains(err.Error(), "missing") {
 			t.Fatalf("missing metadata projection error: got %v", err)
 		}
@@ -1379,7 +1379,7 @@ func TestPrepareStreamTDDErrorBranches(t *testing.T) {
 			[]string{"id", "name"},
 			[]table.ValueType{table.TypeInt, table.TypeString},
 			[]*table.TypeDescriptor{{Kind: table.TypeInt}, {Kind: table.TypeString}},
-			SourceLoadSpec{ReadColumns: []string{"id"}, OutputColumns: []string{"name"}},
+			SourceLoadSpec{ReadColumns: table.SelectedColumns("id"), OutputColumns: table.SelectedColumns("name")},
 			"users.csv",
 		)
 		if err == nil || !strings.Contains(err.Error(), "read set") {

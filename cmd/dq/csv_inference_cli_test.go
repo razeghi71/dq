@@ -39,14 +39,14 @@ func TestCLICSVInferenceBadRecordsEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	path := writeCLICSVInferenceFile(t, dir, "late-bad.csv", cliCSVInferenceRows("id,amount\n", 52, map[int]string{51: "51,abc"}))
 
-	out := runCLIQueryExpectError(t, bin, path+" with infer_rows=50 | count")
+	out := runCLIQueryExpectError(t, bin, path+" with infer_rows=50 | filter { amount >= 0 } | count")
 	for _, part := range []string{"load error", "row 52", "amount", "int", "abc"} {
 		if !strings.Contains(strings.ToLower(string(out)), strings.ToLower(part)) {
 			t.Fatalf("expected error containing %q, got:\n%s", part, out)
 		}
 	}
 
-	out = runCLIQuery(t, bin, path+" with infer_rows=50, max_bad_records=1 | count | json")
+	out = runCLIQuery(t, bin, path+" with infer_rows=50, max_bad_records=1 | filter { amount >= 0 } | count | json")
 	var rows []map[string]int64
 	if err := json.Unmarshal(out, &rows); err != nil {
 		t.Fatalf("json output: %v\n%s", err, out)
@@ -122,7 +122,7 @@ func TestCLICSVInferenceCompressedInputsEndToEnd(t *testing.T) {
 			if err := os.WriteFile(path, tc.data, 0o644); err != nil {
 				t.Fatal(err)
 			}
-			out := runCLIQuery(t, bin, path+" with infer_rows=50, max_bad_records=1 | count | json")
+			out := runCLIQuery(t, bin, path+" with infer_rows=50, max_bad_records=1 | filter { amount >= 0 } | count | json")
 			var rows []map[string]int64
 			if err := json.Unmarshal(out, &rows); err != nil {
 				t.Fatalf("json output: %v\n%s", err, out)

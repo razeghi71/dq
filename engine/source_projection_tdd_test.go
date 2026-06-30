@@ -33,7 +33,7 @@ func TestSourceProjectionTDDImmediateTopLevelSelectPushesColumnsIntoSource(t *te
 	if err != nil {
 		t.Fatalf("optimize source query: %v", err)
 	}
-	if optimized.Source == nil || !reflect.DeepEqual(optimized.Source.outputColumns, []string{"status", "id"}) {
+	if optimized.Source == nil || !reflect.DeepEqual(optimized.Source.outputColumns.Names(), []string{"status", "id"}) {
 		t.Fatalf("optimized source output columns: got %#v, want [status id]", optimized.Source)
 	}
 	if len(optimized.Ops) != 0 {
@@ -45,7 +45,7 @@ func TestSourceProjectionTDDImmediateTopLevelSelectPushesColumnsIntoSource(t *te
 	if err != nil {
 		t.Fatalf("physical source query: %v", err)
 	}
-	if physical.Source == nil || !reflect.DeepEqual(physical.Source.spec.ReadColumns, []string{"status", "id"}) || !reflect.DeepEqual(physical.Source.spec.OutputColumns, []string{"status", "id"}) {
+	if physical.Source == nil || !reflect.DeepEqual(physical.Source.spec.ReadColumns.Names(), []string{"status", "id"}) || !reflect.DeepEqual(physical.Source.spec.OutputColumns.Names(), []string{"status", "id"}) {
 		t.Fatalf("physical source spec: got %#v, want read/output [status id]", physical.Source)
 	}
 	if len(physical.Ops) != 0 {
@@ -71,7 +71,7 @@ func TestSourceProjectionTDDExecuteUsesOptimizerProjectedSourceLoad(t *testing.T
 	if err != nil {
 		t.Fatalf("execute source query: %v", err)
 	}
-	if !reflect.DeepEqual(loadedSpec.ReadColumns, []string{"status", "id"}) || !reflect.DeepEqual(loadedSpec.OutputColumns, []string{"status", "id"}) {
+	if !reflect.DeepEqual(loadedSpec.ReadColumns.Names(), []string{"status", "id"}) || !reflect.DeepEqual(loadedSpec.OutputColumns.Names(), []string{"status", "id"}) {
 		t.Fatalf("source loader spec: got %#v, want read/output [status id]", loadedSpec)
 	}
 	requireSourceProjectionTDDTableColumns(t, result, "status", "id")
@@ -111,8 +111,8 @@ func TestSourceProjectionTDDExecuteAppliesSourcePredicateBeforeOutput(t *testing
 	if err != nil {
 		t.Fatalf("execute source query: %v", err)
 	}
-	if !reflect.DeepEqual(loadedSpec.ReadColumns, []string{"id", "status"}) ||
-		!reflect.DeepEqual(loadedSpec.OutputColumns, []string{"id"}) ||
+	if !reflect.DeepEqual(loadedSpec.ReadColumns.Names(), []string{"id", "status"}) ||
+		!reflect.DeepEqual(loadedSpec.OutputColumns.Names(), []string{"id"}) ||
 		loadedSpec.Predicate == nil {
 		t.Fatalf("source loader spec: got %#v, want read [id status], output [id], predicate", loadedSpec)
 	}
@@ -186,7 +186,7 @@ func TestSourceProjectionTDDExecuteReturnsRuntimeErrorAfterFullSourceLoad(t *tes
 		Load:     q.Source.Load,
 		Schema:   sourceProjectionTDDWideSchema(),
 	}, func(filename string, opts ast.LoadOptions, spec SourceLoadSpec) (*table.Table, error) {
-		if spec.ReadColumns != nil || spec.OutputColumns != nil || spec.Predicate != nil {
+		if !spec.ReadColumns.IsAll() || !spec.OutputColumns.IsAll() || spec.Predicate != nil {
 			t.Fatalf("transform-first query should not push source requirements, got %#v", spec)
 		}
 		return tbl, nil
@@ -332,15 +332,15 @@ func TestSourceProjectionTDDLogicalSelectPushdownRejectsNestedProjectionMetadata
 	}
 }
 
-func TestSourceProjectionTDDDuplicateSelectFallsBackToReadAllAndKeepsSelect(t *testing.T) {
+func TestSourceProjectionTDDDuplicateSelectPrunesSourceButKeepsSelect(t *testing.T) {
 	q := parseSourceProjectionTDDQuery(t, "users.csv | select id, id | json")
 	optimized := optimizeSourcePushdownTDDQuery(t, q, sourceProjectionTDDWideSchema())
 
 	if optimized.Source == nil {
 		t.Fatal("optimized source missing")
 	}
-	if optimized.Source.outputColumns != nil || len(optimized.Source.predicates) != 0 {
-		t.Fatalf("duplicate select should not push source requirements in v1, got %#v", optimized.Source)
+	if !reflect.DeepEqual(optimized.Source.outputColumns.Names(), []string{"id"}) || len(optimized.Source.predicates) != 0 {
+		t.Fatalf("duplicate select source requirements: got %#v, want output [id]", optimized.Source)
 	}
 	if len(optimized.Ops) != 1 {
 		t.Fatalf("duplicate select must keep select op for id/id_2 output naming, got %d ops", len(optimized.Ops))
@@ -348,7 +348,7 @@ func TestSourceProjectionTDDDuplicateSelectFallsBackToReadAllAndKeepsSelect(t *t
 	requireSourceProjectionTDDSchemaColumns(t, optimized.OutputSchema, "id", "id_2")
 }
 
-func TestSourceProjectionTDDNestedSelectFallsBackToReadAllAndKeepsSelect(t *testing.T) {
+func TestSourceProjectionTDDNestedSelectPrunesToTopLevelRootAndKeepsSelect(t *testing.T) {
 	schema := table.Schema{Columns: []table.SchemaColumn{
 		{Name: "id", Type: &table.TypeDescriptor{Kind: table.TypeInt}},
 		{Name: "address", Type: &table.TypeDescriptor{
@@ -364,8 +364,8 @@ func TestSourceProjectionTDDNestedSelectFallsBackToReadAllAndKeepsSelect(t *test
 	if optimized.Source == nil {
 		t.Fatal("optimized source missing")
 	}
-	if optimized.Source.outputColumns != nil || len(optimized.Source.predicates) != 0 {
-		t.Fatalf("nested projection should not be pushed in v1, got %#v", optimized.Source)
+	if !reflect.DeepEqual(optimized.Source.outputColumns.Names(), []string{"address"}) || len(optimized.Source.predicates) != 0 {
+		t.Fatalf("nested projection source requirements: got %#v, want output [address]", optimized.Source)
 	}
 	if len(optimized.Ops) != 1 {
 		t.Fatalf("nested select must keep select op, got %d ops", len(optimized.Ops))
@@ -380,8 +380,8 @@ func TestSourceProjectionTDDFilterBeforeSelectPushesPredicateAndProjection(t *te
 	if optimized.Source == nil {
 		t.Fatal("optimized source missing")
 	}
-	if !reflect.DeepEqual(optimized.Source.outputColumns, []string{"id"}) {
-		t.Fatalf("optimized source output columns: got %v, want [id]", optimized.Source.outputColumns)
+	if !reflect.DeepEqual(optimized.Source.outputColumns.Names(), []string{"id"}) {
+		t.Fatalf("optimized source output columns: got %v, want [id]", optimized.Source.outputColumns.Names())
 	}
 	if len(optimized.Source.predicates) != 1 {
 		t.Fatalf("optimized source predicates: got %d, want 1", len(optimized.Source.predicates))
@@ -393,11 +393,11 @@ func TestSourceProjectionTDDFilterBeforeSelectPushesPredicateAndProjection(t *te
 	if err != nil {
 		t.Fatalf("physical source query: %v", err)
 	}
-	if !reflect.DeepEqual(physical.Source.spec.OutputColumns, []string{"id"}) {
-		t.Fatalf("physical output columns: got %v, want [id]", physical.Source.spec.OutputColumns)
+	if !reflect.DeepEqual(physical.Source.spec.OutputColumns.Names(), []string{"id"}) {
+		t.Fatalf("physical output columns: got %v, want [id]", physical.Source.spec.OutputColumns.Names())
 	}
-	if !reflect.DeepEqual(physical.Source.spec.ReadColumns, []string{"id", "status"}) {
-		t.Fatalf("physical read columns: got %v, want [id status]", physical.Source.spec.ReadColumns)
+	if !reflect.DeepEqual(physical.Source.spec.ReadColumns.Names(), []string{"id", "status"}) {
+		t.Fatalf("physical read columns: got %v, want [id status]", physical.Source.spec.ReadColumns.Names())
 	}
 }
 
@@ -408,7 +408,7 @@ func TestSourceProjectionTDDFilterOnlyPushesPredicateToSourceLoad(t *testing.T) 
 	if optimized.Source == nil {
 		t.Fatal("optimized source missing")
 	}
-	if optimized.Source.outputColumns != nil {
+	if !optimized.Source.outputColumns.IsAll() {
 		t.Fatalf("filter-only source output columns: got %v, want read/output all", optimized.Source.outputColumns)
 	}
 	if len(optimized.Source.predicates) != 1 {
@@ -421,7 +421,7 @@ func TestSourceProjectionTDDFilterOnlyPushesPredicateToSourceLoad(t *testing.T) 
 	if err != nil {
 		t.Fatalf("physical source query: %v", err)
 	}
-	if physical.Source.spec.ReadColumns != nil || physical.Source.spec.OutputColumns != nil || physical.Source.spec.Predicate == nil {
+	if !physical.Source.spec.ReadColumns.IsAll() || !physical.Source.spec.OutputColumns.IsAll() || physical.Source.spec.Predicate == nil {
 		t.Fatalf("physical source spec: got %#v, want read/output all with predicate", physical.Source.spec)
 	}
 }
@@ -433,8 +433,8 @@ func TestSourceProjectionTDDSelectBeforeFilterPushesPredicateAndProjection(t *te
 	if optimized.Source == nil {
 		t.Fatal("optimized source missing")
 	}
-	if !reflect.DeepEqual(optimized.Source.outputColumns, []string{"id", "status"}) {
-		t.Fatalf("optimized source output columns: got %v, want [id status]", optimized.Source.outputColumns)
+	if !reflect.DeepEqual(optimized.Source.outputColumns.Names(), []string{"id", "status"}) {
+		t.Fatalf("optimized source output columns: got %v, want [id status]", optimized.Source.outputColumns.Names())
 	}
 	if len(optimized.Source.predicates) != 1 {
 		t.Fatalf("optimized source predicates: got %d, want 1", len(optimized.Source.predicates))
@@ -446,8 +446,8 @@ func TestSourceProjectionTDDSelectBeforeFilterPushesPredicateAndProjection(t *te
 	if err != nil {
 		t.Fatalf("physical source query: %v", err)
 	}
-	if !reflect.DeepEqual(physical.Source.spec.ReadColumns, []string{"id", "status"}) {
-		t.Fatalf("physical read columns: got %v, want [id status]", physical.Source.spec.ReadColumns)
+	if !reflect.DeepEqual(physical.Source.spec.ReadColumns.Names(), []string{"id", "status"}) {
+		t.Fatalf("physical read columns: got %v, want [id status]", physical.Source.spec.ReadColumns.Names())
 	}
 }
 
@@ -458,8 +458,8 @@ func TestSourceProjectionTDDMultipleAdjacentSelectsAndFiltersPushDeterministicRe
 	if optimized.Source == nil {
 		t.Fatal("optimized source missing")
 	}
-	if !reflect.DeepEqual(optimized.Source.outputColumns, []string{"name"}) {
-		t.Fatalf("optimized source output columns: got %v, want [name]", optimized.Source.outputColumns)
+	if !reflect.DeepEqual(optimized.Source.outputColumns.Names(), []string{"name"}) {
+		t.Fatalf("optimized source output columns: got %v, want [name]", optimized.Source.outputColumns.Names())
 	}
 	if len(optimized.Source.predicates) != 2 {
 		t.Fatalf("optimized source predicates: got %d, want 2", len(optimized.Source.predicates))
@@ -471,11 +471,11 @@ func TestSourceProjectionTDDMultipleAdjacentSelectsAndFiltersPushDeterministicRe
 	if err != nil {
 		t.Fatalf("physical source query: %v", err)
 	}
-	if !reflect.DeepEqual(physical.Source.spec.OutputColumns, []string{"name"}) {
-		t.Fatalf("physical output columns: got %v, want [name]", physical.Source.spec.OutputColumns)
+	if !reflect.DeepEqual(physical.Source.spec.OutputColumns.Names(), []string{"name"}) {
+		t.Fatalf("physical output columns: got %v, want [name]", physical.Source.spec.OutputColumns.Names())
 	}
-	if !reflect.DeepEqual(physical.Source.spec.ReadColumns, []string{"name", "id", "status"}) {
-		t.Fatalf("physical read columns: got %v, want [name id status]", physical.Source.spec.ReadColumns)
+	if !reflect.DeepEqual(physical.Source.spec.ReadColumns.Names(), []string{"name", "id", "status"}) {
+		t.Fatalf("physical read columns: got %v, want [name id status]", physical.Source.spec.ReadColumns.Names())
 	}
 }
 
@@ -486,8 +486,8 @@ func TestSourceProjectionTDDUnsupportedFilterAfterSelectKeepsFilterButPushesSele
 	if optimized.Source == nil {
 		t.Fatal("optimized source missing")
 	}
-	if !reflect.DeepEqual(optimized.Source.outputColumns, []string{"id", "status"}) {
-		t.Fatalf("optimized source output columns: got %v, want [id status]", optimized.Source.outputColumns)
+	if !reflect.DeepEqual(optimized.Source.outputColumns.Names(), []string{"id", "status"}) {
+		t.Fatalf("optimized source output columns: got %v, want [id status]", optimized.Source.outputColumns.Names())
 	}
 	if len(optimized.Source.predicates) != 0 {
 		t.Fatalf("unsupported filter should not be pushed, got %d predicates", len(optimized.Source.predicates))
@@ -502,46 +502,45 @@ func TestSourceProjectionTDDUnsupportedFilterAfterSelectKeepsFilterButPushesSele
 	if err != nil {
 		t.Fatalf("physical source query: %v", err)
 	}
-	if !reflect.DeepEqual(physical.Source.spec.ReadColumns, []string{"id", "status"}) {
-		t.Fatalf("physical read columns: got %v, want [id status]", physical.Source.spec.ReadColumns)
+	if !reflect.DeepEqual(physical.Source.spec.ReadColumns.Names(), []string{"id", "status"}) {
+		t.Fatalf("physical read columns: got %v, want [id status]", physical.Source.spec.ReadColumns.Names())
 	}
 	if physical.Source.spec.Predicate != nil {
 		t.Fatalf("unsupported filter should not compile as source predicate")
 	}
 }
 
-func TestSourceProjectionTDDSelectAfterUnsupportedFilterReadsAllSourceColumns(t *testing.T) {
+func TestSourceProjectionTDDSelectAfterUnsupportedFilterPrunesToDemandedColumns(t *testing.T) {
 	q := parseSourceProjectionTDDQuery(t, `users.csv | filter { id + 1 > 10 } | select id | json`)
 	optimized := optimizeSourcePushdownTDDQuery(t, q, sourceProjectionTDDWideSchema())
 
 	if optimized.Source == nil {
 		t.Fatal("optimized source missing")
 	}
-	if optimized.Source.outputColumns != nil {
-		t.Fatalf("optimized source output columns: got %v, want read-all nil", optimized.Source.outputColumns)
+	if !reflect.DeepEqual(optimized.Source.outputColumns.Names(), []string{"id"}) {
+		t.Fatalf("optimized source output columns: got %v, want [id]", optimized.Source.outputColumns.Names())
 	}
 	if len(optimized.Source.predicates) != 0 {
 		t.Fatalf("unsupported filter should not be pushed, got %d predicates", len(optimized.Source.predicates))
 	}
-	if len(optimized.Ops) != 2 {
-		t.Fatalf("unsupported filter plus final select should remain, got %d ops", len(optimized.Ops))
+	if len(optimized.Ops) != 1 {
+		t.Fatalf("unsupported filter should remain and identity select should be removed, got %d ops", len(optimized.Ops))
 	}
 	if _, ok := optimized.Ops[0].(logicalFilter); !ok {
 		t.Fatalf("first remaining op: got %T, want logicalFilter", optimized.Ops[0])
-	}
-	if _, ok := optimized.Ops[1].(logicalSelect); !ok {
-		t.Fatalf("second remaining op: got %T, want logicalSelect", optimized.Ops[1])
 	}
 	physical, err := planPhysicalPipeline(optimized)
 	if err != nil {
 		t.Fatalf("physical source query: %v", err)
 	}
-	if physical.Source.spec.ReadColumns != nil || physical.Source.spec.OutputColumns != nil || physical.Source.spec.Predicate != nil {
-		t.Fatalf("physical source spec: got %#v, want read-all with no predicate", physical.Source.spec)
+	if !reflect.DeepEqual(physical.Source.spec.ReadColumns.Names(), []string{"id"}) ||
+		!reflect.DeepEqual(physical.Source.spec.OutputColumns.Names(), []string{"id"}) ||
+		physical.Source.spec.Predicate != nil {
+		t.Fatalf("physical source spec: got %#v, want read/output [id] with no predicate", physical.Source.spec)
 	}
 }
 
-func TestSourceProjectionTDDUnsupportedFilterBeforeSelectRebindsAgainstReadAllSource(t *testing.T) {
+func TestSourceProjectionTDDUnsupportedFilterBeforeSelectRebindsAgainstPrunedSource(t *testing.T) {
 	q := parseSourceProjectionTDDQuery(t, `wrong.csv | filter { d + 1 > 0 } | select id | json`)
 	var loadedSpec SourceLoadSpec
 
@@ -555,16 +554,18 @@ func TestSourceProjectionTDDUnsupportedFilterBeforeSelectRebindsAgainstReadAllSo
 		}},
 	}, func(filename string, opts ast.LoadOptions, spec SourceLoadSpec) (*table.Table, error) {
 		loadedSpec = spec
-		tbl := table.NewTableWithTypes([]string{"d", "id", "unused"}, []table.ValueType{table.TypeInt, table.TypeInt, table.TypeString})
-		tbl.AddRow([]table.Value{table.IntVal(10), table.IntVal(1), table.StrVal("x")})
-		tbl.AddRow([]table.Value{table.IntVal(20), table.IntVal(2), table.StrVal("y")})
+		tbl := table.NewTableWithTypes([]string{"d", "id"}, []table.ValueType{table.TypeInt, table.TypeInt})
+		tbl.AddRow([]table.Value{table.IntVal(10), table.IntVal(1)})
+		tbl.AddRow([]table.Value{table.IntVal(20), table.IntVal(2)})
 		return tbl, nil
 	}, nil)
 	if err != nil {
 		t.Fatalf("execute source query: %v", err)
 	}
-	if loadedSpec.ReadColumns != nil || loadedSpec.OutputColumns != nil || loadedSpec.Predicate != nil {
-		t.Fatalf("source loader spec: got %#v, want read-all", loadedSpec)
+	if !reflect.DeepEqual(loadedSpec.ReadColumns.Names(), []string{"d", "id"}) ||
+		!reflect.DeepEqual(loadedSpec.OutputColumns.Names(), []string{"d", "id"}) ||
+		loadedSpec.Predicate != nil {
+		t.Fatalf("source loader spec: got %#v, want read/output [d id]", loadedSpec)
 	}
 	requireSourceProjectionTDDTableColumns(t, result, "id")
 	if result.NumRows != 2 {
@@ -578,15 +579,15 @@ func TestSourceProjectionTDDUnsupportedFilterBeforeSelectRebindsAgainstReadAllSo
 	}
 }
 
-func TestSourceProjectionTDDUnsupportedFilterBeforeSelectKeepsReadAllBarrier(t *testing.T) {
+func TestSourceProjectionTDDUnsupportedFilterBeforeSelectDemandsPredicateColumns(t *testing.T) {
 	q := parseSourceProjectionTDDQuery(t, `users.csv | filter { status == "active" or unused + 1 > 10 } | select id | json`)
 	optimized := optimizeSourcePushdownTDDQuery(t, q, sourceProjectionTDDWideSchema())
 
 	if optimized.Source == nil {
 		t.Fatal("optimized source missing")
 	}
-	if optimized.Source.outputColumns != nil {
-		t.Fatalf("optimized source output columns: got %v, want read-all nil", optimized.Source.outputColumns)
+	if !reflect.DeepEqual(optimized.Source.outputColumns.Names(), []string{"id", "status", "unused"}) {
+		t.Fatalf("optimized source output columns: got %v, want [id status unused]", optimized.Source.outputColumns.Names())
 	}
 	if len(optimized.Source.predicates) != 0 {
 		t.Fatalf("unsupported filter should not be pushed, got %d predicates", len(optimized.Source.predicates))
@@ -604,20 +605,22 @@ func TestSourceProjectionTDDUnsupportedFilterBeforeSelectKeepsReadAllBarrier(t *
 	if err != nil {
 		t.Fatalf("physical source query: %v", err)
 	}
-	if physical.Source.spec.ReadColumns != nil || physical.Source.spec.OutputColumns != nil || physical.Source.spec.Predicate != nil {
-		t.Fatalf("physical source spec: got %#v, want read-all with no predicate", physical.Source.spec)
+	if !reflect.DeepEqual(physical.Source.spec.ReadColumns.Names(), []string{"id", "status", "unused"}) ||
+		!reflect.DeepEqual(physical.Source.spec.OutputColumns.Names(), []string{"id", "status", "unused"}) ||
+		physical.Source.spec.Predicate != nil {
+		t.Fatalf("physical source spec: got %#v, want read/output [id status unused] with no predicate", physical.Source.spec)
 	}
 }
 
-func TestSourceProjectionTDDRetainedFilterBlocksLaterPredicateAndProjectionPushdown(t *testing.T) {
+func TestSourceProjectionTDDRetainedFilterBlocksLaterPredicatePushdownButStillPrunesColumns(t *testing.T) {
 	q := parseSourceProjectionTDDQuery(t, `users.csv | filter { starts_with(status, "a") } | filter { id > 1 } | select id | json`)
 	optimized := optimizeSourcePushdownTDDQuery(t, q, sourceProjectionTDDWideSchema())
 
 	if optimized.Source == nil {
 		t.Fatal("optimized source missing")
 	}
-	if optimized.Source.outputColumns != nil {
-		t.Fatalf("optimized source output columns: got %v, want read-all nil", optimized.Source.outputColumns)
+	if !reflect.DeepEqual(optimized.Source.outputColumns.Names(), []string{"id", "status"}) {
+		t.Fatalf("optimized source output columns: got %v, want [id status]", optimized.Source.outputColumns.Names())
 	}
 	if len(optimized.Source.predicates) != 0 {
 		t.Fatalf("later filter must not be pushed across retained filter, got %d predicates", len(optimized.Source.predicates))
@@ -638,8 +641,10 @@ func TestSourceProjectionTDDRetainedFilterBlocksLaterPredicateAndProjectionPushd
 	if err != nil {
 		t.Fatalf("physical source query: %v", err)
 	}
-	if physical.Source.spec.ReadColumns != nil || physical.Source.spec.OutputColumns != nil || physical.Source.spec.Predicate != nil {
-		t.Fatalf("physical source spec: got %#v, want read-all with no predicate", physical.Source.spec)
+	if !reflect.DeepEqual(physical.Source.spec.ReadColumns.Names(), []string{"id", "status"}) ||
+		!reflect.DeepEqual(physical.Source.spec.OutputColumns.Names(), []string{"id", "status"}) ||
+		physical.Source.spec.Predicate != nil {
+		t.Fatalf("physical source spec: got %#v, want read/output [id status] with no predicate", physical.Source.spec)
 	}
 }
 
@@ -667,8 +672,8 @@ func TestSourceProjectionTDDSourcePushdownIsFormatAgnostic(t *testing.T) {
 	if physical.Source == nil {
 		t.Fatal("physical source missing")
 	}
-	if !reflect.DeepEqual(physical.Source.spec.ReadColumns, []string{"id", "status"}) ||
-		!reflect.DeepEqual(physical.Source.spec.OutputColumns, []string{"id", "status"}) ||
+	if !reflect.DeepEqual(physical.Source.spec.ReadColumns.Names(), []string{"id", "status"}) ||
+		!reflect.DeepEqual(physical.Source.spec.OutputColumns.Names(), []string{"id", "status"}) ||
 		physical.Source.spec.Predicate != nil {
 		t.Fatalf("jsonl source spec: got %#v, want read/output [id status]", physical.Source.spec)
 	}
@@ -726,14 +731,14 @@ func TestSourceProjectionTDDSourceFilterPushdownEligibility(t *testing.T) {
 }
 
 func TestSourceProjectionTDDSourceOutputEnvRejectsMissingColumn(t *testing.T) {
-	_, ok := sourceOutputEnv(logicalSource{schema: sourceProjectionTDDWideSchema()}, []string{"missing"})
+	_, ok := sourceOutputEnv(logicalSource{schema: sourceProjectionTDDWideSchema()}, table.SelectedColumns("missing"))
 	if ok {
 		t.Fatal("missing source output column should be rejected")
 	}
 }
 
 func TestSourceProjectionTDDSourceOutputEnvFallsBackToFinalSchema(t *testing.T) {
-	env, ok := sourceOutputEnv(logicalSource{schema: table.Schema{Columns: []table.SchemaColumn{{Name: "id"}}}}, []string{"id"})
+	env, ok := sourceOutputEnv(logicalSource{schema: table.Schema{Columns: []table.SchemaColumn{{Name: "id"}}}}, table.SelectedColumns("id"))
 	if !ok {
 		t.Fatal("expected source output env for nil raw schema")
 	}
@@ -745,7 +750,7 @@ func TestSourceProjectionTDDSourceOutputEnvFallsBackToFinalSchema(t *testing.T) 
 func TestSourceProjectionTDDPhysicalSourceRejectsInvalidReadSet(t *testing.T) {
 	_, err := physicalSourceFromOptimized(&optimizedSource{
 		source:        logicalSource{filename: "users.csv", schema: sourceProjectionTDDWideSchema()},
-		outputColumns: []string{"missing"},
+		outputColumns: table.SelectedColumns("missing"),
 	})
 	if err == nil || !strings.Contains(err.Error(), "read schema") {
 		t.Fatalf("expected physical source read schema error, got %v", err)

@@ -17,8 +17,7 @@ func execPlannedJoin(p plannedJoin, left *table.Table) (*table.Table, error) {
 	right := p.right
 	leftKeys := p.leftKeys
 	rightKeys := p.rightKeys
-	leftKeyOutIdx := p.leftKeyOutIdx
-	rightColMap := p.rightColMap
+	outputs := p.outputs
 
 	outCols, outSchemas := outputSchemaColumns(p.OutputSchema())
 	result := table.NewTableWithSchemas(outCols, outSchemas)
@@ -33,41 +32,39 @@ func execPlannedJoin(p plannedJoin, left *table.Table) (*table.Table, error) {
 	// A negative index means "no row on that side" (filled with nulls).
 	emit := func(leftRow, rightRow int) error {
 		vals := make([]table.Value, len(outCols))
-		for i := range left.Columns {
-			if leftRow >= 0 {
-				vals[i] = left.Col(i).Get(leftRow)
-			} else {
-				vals[i] = table.Null()
-			}
-		}
-		for i := range leftKeys {
-			outIdx := leftKeyOutIdx[i]
-			switch {
-			case leftRow >= 0:
-				// Real left columns are already copied above; only synthetic
-				// (dot-path) key columns appended past the left schema need filling.
-				if outIdx >= len(left.Columns) {
-					v, err := resolveBoundColumn(leftKeys[i].column, left, leftRow)
+		for outIdx, output := range outputs {
+			switch output.kind {
+			case plannedJoinOutputLeft:
+				if leftRow >= 0 {
+					vals[outIdx] = left.Col(output.leftIndex).Get(leftRow)
+				} else {
+					vals[outIdx] = table.Null()
+				}
+			case plannedJoinOutputKey:
+				switch {
+				case leftRow >= 0:
+					v, err := resolveBoundColumn(leftKeys[output.keyIndex].column, left, leftRow)
 					if err != nil {
 						return err
 					}
 					vals[outIdx] = v
+				case rightRow >= 0:
+					v, err := resolveBoundColumn(rightKeys[output.keyIndex].column, right, rightRow)
+					if err != nil {
+						return err
+					}
+					vals[outIdx] = v
+				default:
+					vals[outIdx] = table.Null()
 				}
-			case rightRow >= 0:
-				v, err := resolveBoundColumn(rightKeys[i].column, right, rightRow)
-				if err != nil {
-					return err
+			case plannedJoinOutputRight:
+				if rightRow >= 0 {
+					vals[outIdx] = right.Col(output.rightIndex).Get(rightRow)
+				} else {
+					vals[outIdx] = table.Null()
 				}
-				vals[outIdx] = v
 			default:
-				vals[outIdx] = table.Null()
-			}
-		}
-		for outIdx, ri := range rightColMap {
-			if rightRow >= 0 {
-				vals[outIdx] = right.Col(ri).Get(rightRow)
-			} else {
-				vals[outIdx] = table.Null()
+				return fmt.Errorf("join: output column %d has unknown source kind", outIdx)
 			}
 		}
 		if err := result.AddRowTyped(vals); err != nil {

@@ -58,7 +58,7 @@ func TestCLIStreamingExecutionTDDCountIsBlockingEvenThoughBoundedMemory(t *testi
 	for _, input := range writeCLIStreamingTDDDateInputs(t, bin) {
 		t.Run(input.name, func(t *testing.T) {
 			out := runCLIQueryExpectError(t, bin,
-				input.path+` | transform y = year(raw) | count | json`,
+				input.path+` | transform y = year(raw) | filter { y > 0 } | count | json`,
 			)
 			requireCLIStreamingTDDDateError(t, out)
 		})

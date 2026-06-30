@@ -33,8 +33,8 @@ type PreparedSource struct {
 type RowPredicate func(row []table.Value) (bool, error)
 
 type SourceLoadSpec struct {
-	ReadColumns   []string
-	OutputColumns []string
+	ReadColumns   table.ColumnSelection
+	OutputColumns table.ColumnSelection
 	Predicate     RowPredicate
 }
 
@@ -311,11 +311,15 @@ func csvNullableColumns(columns []string, groups []csvRowGroup) []bool {
 }
 
 // Load materializes the prepared source once with the same columns used for
-// physical reads and output.
+// physical reads and output. It is a legacy convenience wrapper for tests and
+// benchmarks; production planning should prefer LoadSpec so all-vs-selected
+// column intent is explicit. A nil projectColumns slice means all columns, and
+// a non-nil slice means exactly those columns, including an empty selection.
 func (p *PreparedSource) Load(projectColumns []string) (*table.Table, error) {
+	selection := table.ColumnSelectionFromNames(projectColumns)
 	return p.LoadSpec(SourceLoadSpec{
-		ReadColumns:   append([]string(nil), projectColumns...),
-		OutputColumns: append([]string(nil), projectColumns...),
+		ReadColumns:   selection,
+		OutputColumns: selection,
 	})
 }
 
@@ -375,15 +379,15 @@ func (p *PreparedSource) Close() error {
 }
 
 func preparedSourceLoadPlanFor(schema table.Schema, spec SourceLoadSpec, source string) (preparedSourceLoadPlan, error) {
-	readColumns := append([]string(nil), spec.ReadColumns...)
-	outputColumns := append([]string(nil), spec.OutputColumns...)
-	if outputColumns == nil {
-		readColumns = nil
-	} else if readColumns == nil {
-		readColumns = append([]string(nil), outputColumns...)
+	readColumns := spec.ReadColumns
+	outputColumns := spec.OutputColumns
+	if outputColumns.IsAll() {
+		readColumns = table.AllColumns()
+	} else if readColumns.IsAll() {
+		readColumns = outputColumns
 	}
 
-	readAll := readColumns == nil
+	readAll := readColumns.IsAll()
 	readCols, readSchemas, readSourceIndexes, err := sourceColumnProjection(schema, readColumns, source)
 	if err != nil {
 		return preparedSourceLoadPlan{}, err
@@ -426,8 +430,8 @@ func preparedSourceLoadPlanFor(schema table.Schema, spec SourceLoadSpec, source 
 	}, nil
 }
 
-func sourceColumnProjection(schema table.Schema, columns []string, source string) ([]string, []*table.TypeDescriptor, []int, error) {
-	if columns == nil {
+func sourceColumnProjection(schema table.Schema, selection table.ColumnSelection, source string) ([]string, []*table.TypeDescriptor, []int, error) {
+	if selection.IsAll() {
 		outCols := make([]string, len(schema.Columns))
 		outSchemas := make([]*table.TypeDescriptor, len(schema.Columns))
 		sourceIndexes := make([]int, len(schema.Columns))
@@ -439,6 +443,7 @@ func sourceColumnProjection(schema table.Schema, columns []string, source string
 		return outCols, outSchemas, sourceIndexes, nil
 	}
 
+	columns := selection.Names()
 	index := make(map[string]int, len(schema.Columns))
 	for i, col := range schema.Columns {
 		index[col.Name] = i
@@ -496,12 +501,12 @@ type csvPreparedLoadPlan struct {
 }
 
 func csvPreparedLoadPlanFor(columns []string, types []table.ValueType, schemas []*table.TypeDescriptor, spec SourceLoadSpec, source string) (csvPreparedLoadPlan, error) {
-	readColumns := append([]string(nil), spec.ReadColumns...)
-	outputColumns := append([]string(nil), spec.OutputColumns...)
-	if outputColumns == nil {
-		readColumns = nil
-	} else if readColumns == nil {
-		readColumns = append([]string(nil), outputColumns...)
+	readColumns := spec.ReadColumns
+	outputColumns := spec.OutputColumns
+	if outputColumns.IsAll() {
+		readColumns = table.AllColumns()
+	} else if readColumns.IsAll() {
+		readColumns = outputColumns
 	}
 
 	read, err := csvMaterializationFor(columns, types, schemas, readColumns, source)

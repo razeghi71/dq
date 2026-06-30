@@ -14,7 +14,7 @@ func TestGroupReducePipelinePlanningTDDPlansGroupReduceInsideOneSchemaPipeline(t
 	if err != nil {
 		t.Fatalf("planPhysicalPipelineForTest with group/reduce pipeline: %v", err)
 	}
-	if got, want := len(plan.Ops), len(parseSimplePlannerOps(t, `filter { age > 20 } | transform bucket = if(active, "active", "inactive") | group bucket | reduce total = sum(age), avg_age = avg(age), n = count(), first_name = first(name) | remove grouped | sort bucket | select bucket, total, avg_age, n, first_name`)); got != want {
+	if got, want := len(plan.Ops), len(parseSimplePlannerOps(t, `filter { age > 20 } | transform bucket = if(active, "active", "inactive") | group bucket | reduce total = sum(age), avg_age = avg(age), n = count(), first_name = first(name) | remove grouped | sort bucket | select bucket, total, avg_age, n, first_name`))-1; got != want {
 		t.Fatalf("planned op count: got %d, want %d", got, want)
 	}
 	requireSimplePlannerSchema(t, plan.OutputSchema,

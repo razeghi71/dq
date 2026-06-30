@@ -285,8 +285,8 @@ func TestPrepareTDDCSVLoadSpecUsesStrictFixedSchemaAppend(t *testing.T) {
 	defer prepared.Close()
 
 	_, err = prepared.LoadSpec(SourceLoadSpec{
-		ReadColumns:   []string{"id"},
-		OutputColumns: []string{"id"},
+		ReadColumns:   table.SelectedColumns("id"),
+		OutputColumns: table.SelectedColumns("id"),
 		Predicate: func(row []table.Value) (bool, error) {
 			row[0] = table.StrVal("not-an-int")
 			return true, nil
@@ -339,8 +339,8 @@ func TestPrepareTDDSourceLoadPlanValidation(t *testing.T) {
 	)
 
 	plan, err := preparedSourceLoadPlanFor(schema, SourceLoadSpec{
-		ReadColumns:   []string{"id", "name"},
-		OutputColumns: []string{"name"},
+		ReadColumns:   table.SelectedColumns("id", "name"),
+		OutputColumns: table.SelectedColumns("name"),
 	}, "users.jsonl")
 	if err != nil {
 		t.Fatalf("load plan: %v", err)
@@ -360,9 +360,9 @@ func TestPrepareTDDSourceLoadPlanValidation(t *testing.T) {
 		spec SourceLoadSpec
 		want string
 	}{
-		{name: "duplicate_read", spec: SourceLoadSpec{ReadColumns: []string{"id", "id"}, OutputColumns: []string{"id"}}, want: "more than once"},
-		{name: "missing_output", spec: SourceLoadSpec{OutputColumns: []string{"missing"}}, want: "not found"},
-		{name: "output_not_in_read", spec: SourceLoadSpec{ReadColumns: []string{"id"}, OutputColumns: []string{"name"}}, want: "read set"},
+		{name: "duplicate_read", spec: SourceLoadSpec{ReadColumns: table.SelectedColumns("id", "id"), OutputColumns: table.SelectedColumns("id")}, want: "more than once"},
+		{name: "missing_output", spec: SourceLoadSpec{OutputColumns: table.SelectedColumns("missing")}, want: "not found"},
+		{name: "output_not_in_read", spec: SourceLoadSpec{ReadColumns: table.SelectedColumns("id"), OutputColumns: table.SelectedColumns("name")}, want: "read set"},
 	}
 	for _, tc := range errorCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -633,8 +633,8 @@ func TestPrepareTDDJSONLikeLoadSpecProjectsAndFilters(t *testing.T) {
 		t.Fatalf("prepare jsonl: %v", err)
 	}
 	tbl, err := prepared.LoadSpec(SourceLoadSpec{
-		ReadColumns:   []string{"id", "status"},
-		OutputColumns: []string{"id"},
+		ReadColumns:   table.SelectedColumns("id", "status"),
+		OutputColumns: table.SelectedColumns("id"),
 		Predicate: func(row []table.Value) (bool, error) {
 			return row[1].Type == table.TypeString && row[1].Str == "active", nil
 		},
@@ -674,8 +674,8 @@ func TestPrepareTDDMetadataFormatsAcquireSchemaWithoutPushdown(t *testing.T) {
 			}
 			requireSourceProjectionTDDSchema(t, prepared.Schema, tc.want...)
 			tbl, err := prepared.LoadSpec(SourceLoadSpec{
-				ReadColumns:   []string{"id", "name"},
-				OutputColumns: []string{"name"},
+				ReadColumns:   table.SelectedColumns("id", "name"),
+				OutputColumns: table.SelectedColumns("name"),
 				Predicate: func(row []table.Value) (bool, error) {
 					return row[0].Type == table.TypeInt && row[0].Int == 1, nil
 				},
