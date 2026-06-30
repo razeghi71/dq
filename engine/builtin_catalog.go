@@ -3,7 +3,6 @@ package engine
 import (
 	"strings"
 
-	"github.com/razeghi71/dq/ast"
 	"github.com/razeghi71/dq/table"
 )
 
@@ -24,8 +23,8 @@ type builtinSpec struct {
 }
 
 type aggregateSpec struct {
-	Arity int
-	Eval  func(e *ast.FuncCallExpr, nested *table.Table) (table.Value, error)
+	Arity          int
+	NewAccumulator func(args []rowValueEvaluator) (aggregateAccumulator, error)
 }
 
 var builtinCatalog = map[string]builtinSpec{
@@ -45,13 +44,13 @@ var builtinCatalog = map[string]builtinSpec{
 	"list_contains": scalarBuiltin("list_contains", checkListContainsSignature, typedListContainsEval),
 	"coalesce":      specialFormBuiltin("coalesce", checkCoalesceSignature, typedCoalesceEval),
 	"if":            specialFormBuiltin("if", checkIfSignature, typedIfEval),
-	"count":         aggregateBuiltin("count", 0, aggregateSignature("count"), aggCount),
-	"sum":           aggregateBuiltin("sum", 1, aggregateSignature("sum"), aggSum),
-	"avg":           aggregateBuiltin("avg", 1, aggregateSignature("avg"), aggAvg),
-	"min":           aggregateBuiltin("min", 1, aggregateSignature("min"), aggMin),
-	"max":           aggregateBuiltin("max", 1, aggregateSignature("max"), aggMax),
-	"first":         aggregateBuiltin("first", 1, aggregateSignature("first"), aggFirst),
-	"last":          aggregateBuiltin("last", 1, aggregateSignature("last"), aggLast),
+	"count":         aggregateBuiltin("count", 0, aggregateSignature("count"), newCountAccumulator),
+	"sum":           aggregateBuiltin("sum", 1, aggregateSignature("sum"), newSumAccumulator),
+	"avg":           aggregateBuiltin("avg", 1, aggregateSignature("avg"), newAvgAccumulator),
+	"min":           aggregateBuiltin("min", 1, aggregateSignature("min"), newMinAccumulator),
+	"max":           aggregateBuiltin("max", 1, aggregateSignature("max"), newMaxAccumulator),
+	"first":         aggregateBuiltin("first", 1, aggregateSignature("first"), newFirstAccumulator),
+	"last":          aggregateBuiltin("last", 1, aggregateSignature("last"), newLastAccumulator),
 }
 
 func scalarBuiltin(name string, check func([]typedExpr) (*table.TypeDescriptor, error), typedEval typedCallEvaluator) builtinSpec {
@@ -62,8 +61,13 @@ func specialFormBuiltin(name string, check func([]typedExpr) (*table.TypeDescrip
 	return builtinSpec{Name: name, Category: builtinSpecialForm, Check: check, TypedEval: typedEval}
 }
 
-func aggregateBuiltin(name string, arity int, check func([]typedExpr) (*table.TypeDescriptor, error), eval func(*ast.FuncCallExpr, *table.Table) (table.Value, error)) builtinSpec {
-	return builtinSpec{Name: name, Category: builtinAggregate, Check: check, Aggregate: &aggregateSpec{Arity: arity, Eval: eval}}
+func aggregateBuiltin(name string, arity int, check func([]typedExpr) (*table.TypeDescriptor, error), newAccumulator func([]rowValueEvaluator) (aggregateAccumulator, error)) builtinSpec {
+	return builtinSpec{
+		Name:      name,
+		Category:  builtinAggregate,
+		Check:     check,
+		Aggregate: &aggregateSpec{Arity: arity, NewAccumulator: newAccumulator},
+	}
 }
 
 func aggregateSignature(name string) func([]typedExpr) (*table.TypeDescriptor, error) {

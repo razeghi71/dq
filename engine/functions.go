@@ -383,10 +383,10 @@ func evalAggregateCall(e *ast.FuncCallExpr, nested *table.Table) (table.Value, e
 		return table.Null(), err
 	}
 	spec, ok := builtinCatalog[e.Name]
-	if !ok || spec.Category != builtinAggregate || spec.Aggregate == nil || spec.Aggregate.Eval == nil {
+	if !ok || spec.Category != builtinAggregate || spec.Aggregate == nil {
 		return table.Null(), nonAggregateReduceFunctionError(e.Name)
 	}
-	return spec.Aggregate.Eval(e, nested)
+	return evalAggregateWithSpec(e, nested, spec.Aggregate)
 }
 
 func validateAggregateFunctionArity(e *ast.FuncCallExpr) error {
@@ -395,13 +395,7 @@ func validateAggregateFunctionArity(e *ast.FuncCallExpr) error {
 		return nonAggregateReduceFunctionError(e.Name)
 	}
 	if len(e.Args) != spec.Aggregate.Arity {
-		if spec.Aggregate.Arity == 0 {
-			return fmt.Errorf("%s() takes no arguments, got %d", e.Name, len(e.Args))
-		}
-		if spec.Aggregate.Arity == 1 {
-			return fmt.Errorf("%s() takes 1 argument, got %d", e.Name, len(e.Args))
-		}
-		return fmt.Errorf("%s() takes %d arguments, got %d", e.Name, spec.Aggregate.Arity, len(e.Args))
+		return aggregateArityError(e.Name, spec.Aggregate.Arity, len(e.Args))
 	}
 	return nil
 }
@@ -412,162 +406,4 @@ func nonAggregateReduceFunctionError(name string) error {
 
 func aggregateOutsideReduceError(name string) error {
 	return fmt.Errorf("aggregate function %q can only be used inside 'reduce'", name)
-}
-
-func getColValues(e *ast.FuncCallExpr, nested *table.Table) ([]table.Value, error) {
-	if len(e.Args) != 1 {
-		return nil, fmt.Errorf("%s() takes 1 argument, got %d", e.Name, len(e.Args))
-	}
-	colExpr, ok := e.Args[0].(*ast.ColumnExpr)
-	if !ok {
-		return nil, fmt.Errorf("%s() argument must be a column reference", e.Name)
-	}
-	if nested.NumRows == 0 {
-		return nil, nil
-	}
-	vals := make([]table.Value, nested.NumRows)
-	for i := range vals {
-		v, err := resolveColumnPath(colExpr.Path, nested, i)
-		if err != nil {
-			return nil, fmt.Errorf("%s(%s): %w", e.Name, strings.Join(colExpr.Path, "."), err)
-		}
-		vals[i] = v
-	}
-	return vals, nil
-}
-
-func aggCount(e *ast.FuncCallExpr, nested *table.Table) (table.Value, error) {
-	return table.IntVal(int64(nested.NumRows)), nil
-}
-
-func aggSum(e *ast.FuncCallExpr, nested *table.Table) (table.Value, error) {
-	vals, err := getColValues(e, nested)
-	if err != nil {
-		return table.Null(), err
-	}
-	var sum float64
-	hasInt := true
-	var intSum int64
-	var intOverflow error
-	any := false
-	for _, v := range vals {
-		if v.IsNull() {
-			continue
-		}
-		f, ok := v.AsFloat()
-		if !ok {
-			return table.Null(), fmt.Errorf("sum: non-numeric value %v", v.AsString())
-		}
-		sum += f
-		any = true
-		if v.Type == table.TypeInt {
-			if hasInt && intOverflow == nil {
-				next, err := evalIntArith("+", intSum, v.Int)
-				if err != nil {
-					intOverflow = fmt.Errorf("sum: %w", err)
-				} else {
-					intSum = next
-				}
-			}
-		} else {
-			hasInt = false
-		}
-	}
-	if !any {
-		return table.Null(), nil
-	}
-	if hasInt {
-		if intOverflow != nil {
-			return table.Null(), intOverflow
-		}
-		return table.IntVal(intSum), nil
-	}
-	return table.FloatVal(sum), nil
-}
-
-func aggAvg(e *ast.FuncCallExpr, nested *table.Table) (table.Value, error) {
-	vals, err := getColValues(e, nested)
-	if err != nil {
-		return table.Null(), err
-	}
-	var sum float64
-	count := 0
-	for _, v := range vals {
-		if v.IsNull() {
-			continue
-		}
-		f, ok := v.AsFloat()
-		if !ok {
-			return table.Null(), fmt.Errorf("avg: non-numeric value %v", v.AsString())
-		}
-		sum += f
-		count++
-	}
-	if count == 0 {
-		return table.Null(), nil
-	}
-	return table.FloatVal(sum / float64(count)), nil
-}
-
-func aggMin(e *ast.FuncCallExpr, nested *table.Table) (table.Value, error) {
-	return aggOrderableExtremum(e, nested, "min", func(cmp int) bool { return cmp < 0 })
-}
-
-func aggMax(e *ast.FuncCallExpr, nested *table.Table) (table.Value, error) {
-	return aggOrderableExtremum(e, nested, "max", func(cmp int) bool { return cmp > 0 })
-}
-
-func aggOrderableExtremum(e *ast.FuncCallExpr, nested *table.Table, name string, better func(cmp int) bool) (table.Value, error) {
-	vals, err := getColValues(e, nested)
-	if err != nil {
-		return table.Null(), err
-	}
-	var best table.Value
-	any := false
-	for _, v := range vals {
-		if v.IsNull() {
-			continue
-		}
-		if !any {
-			best = v
-			any = true
-			continue
-		}
-		cmp, unordered, err := expressionValuesCompare(v, best)
-		if err != nil {
-			return table.Null(), fmt.Errorf("%s: %s", name, err)
-		}
-		if unordered {
-			continue
-		}
-		if better(cmp) {
-			best = v
-		}
-	}
-	if !any {
-		return table.Null(), nil
-	}
-	return best, nil
-}
-
-func aggFirst(e *ast.FuncCallExpr, nested *table.Table) (table.Value, error) {
-	vals, err := getColValues(e, nested)
-	if err != nil {
-		return table.Null(), err
-	}
-	if len(vals) == 0 {
-		return table.Null(), nil
-	}
-	return vals[0], nil
-}
-
-func aggLast(e *ast.FuncCallExpr, nested *table.Table) (table.Value, error) {
-	vals, err := getColValues(e, nested)
-	if err != nil {
-		return table.Null(), err
-	}
-	if len(vals) == 0 {
-		return table.Null(), nil
-	}
-	return vals[len(vals)-1], nil
 }

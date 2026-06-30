@@ -79,7 +79,8 @@ type logicalAssignment struct {
 
 type logicalGroup struct {
 	logicalBase
-	keys []logicalPathBinding
+	keys       []logicalPathBinding
+	nestedName string
 }
 
 type logicalPathBinding struct {
@@ -93,6 +94,14 @@ type logicalReduce struct {
 	nestedName   string
 	nestedSchema *table.TypeDescriptor
 	assignments  []logicalAssignment
+}
+
+type logicalGroupReduce struct {
+	logicalBase
+	keys              []logicalPathBinding
+	nestedName        string
+	assignments       []logicalAssignment
+	materializeNested bool
 }
 
 type logicalSort struct {
@@ -336,6 +345,7 @@ func planLogicalGroup(o *ast.GroupOp, input schemaEnv) (logicalGroup, error) {
 	return logicalGroup{
 		logicalBase: logicalBaseFromEnv(schemaEnvFromOwnedColumns(cols, schemas, false)),
 		keys:        keys,
+		nestedName:  o.NestedName,
 	}, nil
 }
 
@@ -708,10 +718,49 @@ func optimizeLogicalPipelineInto(plan *logicalPipeline, out *optimizedLogicalPip
 		OutputSchema: plan.OutputSchema,
 	}
 	optimizeSourcePushdown(out)
+	optimizeFusedGroupReduce(out)
 	if err := optimizeDemandDrivenPruning(out); err != nil {
 		return err
 	}
 	return nil
+}
+
+func optimizeFusedGroupReduce(plan *optimizedLogicalPipeline) {
+	if plan == nil || len(plan.Ops) < 2 {
+		return
+	}
+	var rewritten []logicalOp
+	for i := 0; i < len(plan.Ops); i++ {
+		group, ok := plan.Ops[i].(logicalGroup)
+		if !ok || i+1 >= len(plan.Ops) {
+			if rewritten != nil {
+				rewritten = append(rewritten, plan.Ops[i])
+			}
+			continue
+		}
+		reduce, ok := plan.Ops[i+1].(logicalReduce)
+		if !ok || reduce.nestedName != group.nestedName {
+			if rewritten != nil {
+				rewritten = append(rewritten, plan.Ops[i])
+			}
+			continue
+		}
+		if rewritten == nil {
+			rewritten = make([]logicalOp, 0, len(plan.Ops)-1)
+			rewritten = append(rewritten, plan.Ops[:i]...)
+		}
+		rewritten = append(rewritten, logicalGroupReduce{
+			logicalBase:       reduce.logicalBase,
+			keys:              group.keys,
+			nestedName:        reduce.nestedName,
+			assignments:       reduce.assignments,
+			materializeNested: true,
+		})
+		i++
+	}
+	if rewritten != nil {
+		plan.Ops = rewritten
+	}
 }
 
 func planPhysicalPipelineInto(plan *optimizedLogicalPipeline, out *physicalPipeline) error {
@@ -772,6 +821,8 @@ func planPhysicalOp(input schemaEnv, op logicalOp) (plannedOp, error) {
 		return planPhysicalGroup(input, o)
 	case logicalReduce:
 		return planPhysicalReduce(input, o)
+	case logicalGroupReduce:
+		return planPhysicalGroupReduce(input, o)
 	case logicalSort:
 		return planPhysicalSort(input, o)
 	case logicalSelect:
@@ -863,6 +914,44 @@ func planPhysicalReduce(input schemaEnv, o logicalReduce) (plannedReduce, error)
 		nestedIndex:  nestedIdx,
 		nestedSchema: o.nestedSchema,
 		assignments:  assignments,
+	}, nil
+}
+
+func planPhysicalGroupReduce(input schemaEnv, o logicalGroupReduce) (plannedGroupReduce, error) {
+	keys := make([]plannedGroupReduceKey, len(o.keys))
+	for i, key := range o.keys {
+		bound, err := bindColumnPathInEnv(input, key.path)
+		if err != nil {
+			return plannedGroupReduce{}, fmt.Errorf("group %q: %w", strings.Join(key.path, "."), err)
+		}
+		keys[i] = plannedGroupReduceKey{name: key.name, column: *bound}
+	}
+
+	assignments := make([]plannedGroupReduceAssignment, len(o.assignments))
+	var slots []plannedAggregateSlot
+	for i, assignment := range o.assignments {
+		target := schemaColumnIndex(o.OutputSchema(), assignment.name)
+		if target < 0 {
+			return plannedGroupReduce{}, fmt.Errorf("reduce: target %q missing from output schema", assignment.name)
+		}
+		expr, err := physicalizeTypedExpr(assignment.expr, input)
+		if err != nil {
+			return plannedGroupReduce{}, fmt.Errorf("reduce %q: %w", assignment.name, err)
+		}
+		finalExpr, err := compileAggregateFinalExpr(expr, &slots)
+		if err != nil {
+			return plannedGroupReduce{}, fmt.Errorf("reduce %q: %w", assignment.name, err)
+		}
+		assignments[i] = plannedGroupReduceAssignment{name: assignment.name, target: target, expr: finalExpr}
+	}
+
+	return plannedGroupReduce{
+		plannedBase:       plannedBase{output: o.OutputSchema()},
+		keys:              keys,
+		nestedName:        o.nestedName,
+		materializeNested: o.materializeNested,
+		assignments:       assignments,
+		slots:             slots,
 	}, nil
 }
 

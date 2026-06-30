@@ -142,7 +142,6 @@ func TestDemandPruningTDDDescribeAndFullRowDistinctRemainReadAllBarriers(t *test
 	}{
 		{name: "describe", query: `wide.csv | describe | select column | json`},
 		{name: "full_row_distinct", query: `wide.csv | distinct | select id | json`},
-		{name: "group_reduce", query: `wide.csv | group status | reduce total = sum(amount) | remove grouped | select status, total | json`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			physical := planDemandPruningTDDSourceQuery(t, tc.query, demandPruningTDDWideSchema(), nil)
@@ -371,6 +370,8 @@ func demandPruningTDDOpTypes(ops []plannedOp) []string {
 			got[i] = "group"
 		case plannedReduce:
 			got[i] = "reduce"
+		case plannedGroupReduce:
+			got[i] = "group_reduce"
 		default:
 			got[i] = "unknown"
 		}

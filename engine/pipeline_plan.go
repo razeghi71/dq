@@ -71,6 +71,32 @@ type plannedReduceAssignment struct {
 	expr   typedExpr
 }
 
+type plannedGroupReduce struct {
+	plannedBase
+	keys              []plannedGroupReduceKey
+	nestedName        string
+	materializeNested bool
+	assignments       []plannedGroupReduceAssignment
+	slots             []plannedAggregateSlot
+}
+
+type plannedGroupReduceKey struct {
+	name   string
+	column boundColumn
+}
+
+type plannedGroupReduceAssignment struct {
+	name   string
+	target int
+	expr   aggregateFinalExpr
+}
+
+type plannedAggregateSlot struct {
+	name      string
+	aggregate *aggregateSpec
+	args      []boundColumn
+}
+
 type plannedSort struct {
 	plannedBase
 	keys []plannedSortKey
@@ -243,6 +269,8 @@ func execPlannedOp(op plannedOp, input *table.Table) (*table.Table, error) {
 		return execPlannedGroup(p, input)
 	case plannedReduce:
 		return execPlannedReduce(p, input)
+	case plannedGroupReduce:
+		return execPlannedGroupReduce(p, input)
 	case plannedSort:
 		return execPlannedSort(p, input)
 	case plannedSelect:

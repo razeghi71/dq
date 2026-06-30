@@ -139,7 +139,7 @@ func rowSpanCanDropRows(span []plannedOp) bool {
 
 func isMaterializedStreamingBoundary(op plannedOp) bool {
 	switch op.(type) {
-	case plannedTail, plannedGroup, plannedReduce, plannedSort, plannedDistinct, plannedJoin:
+	case plannedTail, plannedGroup, plannedReduce, plannedGroupReduce, plannedSort, plannedDistinct, plannedJoin:
 		return true
 	default:
 		return false

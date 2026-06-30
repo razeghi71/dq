@@ -105,7 +105,7 @@ func demandPruningMayRewrite(plan *optimizedLogicalPipeline) bool {
 	}
 	for _, op := range plan.Ops {
 		switch op.(type) {
-		case logicalTransform, logicalSelect, logicalRename, logicalRemove:
+		case logicalTransform, logicalSelect, logicalRename, logicalRemove, logicalGroupReduce:
 			return true
 		}
 	}
@@ -134,6 +134,8 @@ func requiredInputDemandForLogicalOp(op logicalOp, input, output schemaEnv, out 
 		return in
 	case logicalTransform:
 		return demandForTransformInput(o, input, out)
+	case logicalGroupReduce:
+		return demandForGroupReduceInput(o, out)
 	case logicalGroup, logicalReduce:
 		return demandAllColumns()
 	case logicalSort:
@@ -207,6 +209,29 @@ func demandForTransformInput(op logicalTransform, input schemaEnv, out columnDem
 		}
 	}
 	return in
+}
+
+func demandForGroupReduceInput(op logicalGroupReduce, out columnDemand) columnDemand {
+	if groupReducePayloadDemanded(op, out) {
+		return demandAllColumns()
+	}
+	in := demandNoColumns()
+	for _, key := range op.keys {
+		in.addPath(key.path)
+	}
+	for _, assignment := range op.assignments {
+		if out.all || out.has(assignment.name) {
+			in.addExpr(assignment.expr)
+		}
+	}
+	return in
+}
+
+func groupReducePayloadDemanded(op logicalGroupReduce, out columnDemand) bool {
+	if logicalAssignmentTargetExists(op.assignments, op.nestedName) {
+		return false
+	}
+	return out.all || out.has(op.nestedName)
 }
 
 func demandForRenameInput(input, output schemaEnv, out columnDemand) columnDemand {
@@ -296,6 +321,8 @@ func rewriteLogicalOpForDemand(op logicalOp, originalInput, currentInput schemaE
 		return logicalFilter{logicalBase: base, expr: o.expr, sourcePushable: o.sourcePushable}, currentInput, true, nil
 	case logicalTransform:
 		return rewriteLogicalTransformForDemand(o, currentInput, out)
+	case logicalGroupReduce:
+		return rewriteLogicalGroupReduceForDemand(o, out)
 	case logicalGroup:
 		return o, logicalOutputEnv(o), true, nil
 	case logicalReduce:
@@ -351,6 +378,34 @@ func rewriteLogicalTransformForDemand(op logicalTransform, input schemaEnv, out 
 	return logicalTransform{
 		logicalBase: logicalBaseFromEnv(env),
 		assignments: assignments,
+	}, env, true, nil
+}
+
+func rewriteLogicalGroupReduceForDemand(op logicalGroupReduce, out columnDemand) (logicalOp, schemaEnv, bool, error) {
+	materializeNested := groupReducePayloadDemanded(op, out)
+	assignments := make([]logicalAssignment, 0, len(op.assignments))
+	for _, assignment := range op.assignments {
+		if out.all || out.has(assignment.name) {
+			assignments = append(assignments, assignment)
+		}
+	}
+
+	original := logicalOutputEnv(op)
+	cols := make([]string, 0, len(original.columns))
+	schemas := make([]*table.TypeDescriptor, 0, len(original.columns))
+	for i, col := range original.columns {
+		if out.all || out.has(col) {
+			cols = append(cols, col)
+			schemas = append(schemas, original.rawSchema(i))
+		}
+	}
+	env := schemaEnvFromOwnedColumns(cols, schemas, false)
+	return logicalGroupReduce{
+		logicalBase:       logicalBaseFromEnv(env),
+		keys:              op.keys,
+		nestedName:        op.nestedName,
+		assignments:       assignments,
+		materializeNested: materializeNested,
 	}, env, true, nil
 }
 
@@ -481,4 +536,13 @@ func logicalAssignmentsByName(assignments []logicalAssignment) map[string]logica
 		out[assignment.name] = assignment
 	}
 	return out
+}
+
+func logicalAssignmentTargetExists(assignments []logicalAssignment, name string) bool {
+	for _, assignment := range assignments {
+		if assignment.name == name {
+			return true
+		}
+	}
+	return false
 }

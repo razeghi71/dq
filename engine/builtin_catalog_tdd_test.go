@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -79,7 +80,10 @@ func TestBuiltinCatalogCategoryHookInvariants(t *testing.T) {
 				}
 			case builtinAggregate:
 				if spec.Aggregate == nil {
-					t.Fatal("aggregate builtin must have Aggregate metadata or reduce hook")
+					t.Fatal("aggregate builtin must have Aggregate metadata")
+				}
+				if spec.Aggregate.NewAccumulator == nil {
+					t.Fatal("aggregate builtin must have accumulator hook")
 				}
 				if spec.TypedEval != nil {
 					t.Fatal("aggregate builtin must not have TypedEval")
@@ -88,6 +92,64 @@ func TestBuiltinCatalogCategoryHookInvariants(t *testing.T) {
 				t.Fatalf("unknown category %v", spec.Category)
 			}
 		})
+	}
+}
+
+func TestBuiltinCatalogAggregateAccumulatorsMatchFusedAndMaterializedReduce(t *testing.T) {
+	input := table.NewTableWithSchemas(
+		[]string{"city", "age", "amount", "name"},
+		[]*table.TypeDescriptor{
+			{Kind: table.TypeString},
+			{Kind: table.TypeInt},
+			{Kind: table.TypeFloat},
+			{Kind: table.TypeString, Nullable: true},
+		},
+	)
+	mustAddFusedGroupReduceTDDRow(t, input, table.StrVal("A"), table.IntVal(10), table.FloatVal(1.5), table.StrVal("ann"))
+	mustAddFusedGroupReduceTDDRow(t, input, table.StrVal("A"), table.IntVal(20), table.FloatVal(2.5), table.Null())
+	mustAddFusedGroupReduceTDDRow(t, input, table.StrVal("B"), table.IntVal(8), table.FloatVal(4), table.StrVal("bee"))
+
+	assignments := map[string]string{
+		"count": "v = count()",
+		"sum":   "v = sum(age)",
+		"avg":   "v = avg(amount)",
+		"min":   "v = min(age)",
+		"max":   "v = max(age)",
+		"first": "v = first(name)",
+		"last":  "v = last(name)",
+	}
+	for name, spec := range builtinCatalog {
+		if spec.Category != builtinAggregate {
+			continue
+		}
+		assignment, ok := assignments[name]
+		if !ok {
+			t.Fatalf("missing fused/materialized equivalence case for aggregate %q", name)
+		}
+		t.Run(name, func(t *testing.T) {
+			fused := runQuery(t, input, `group city | reduce `+assignment+` | remove grouped | sort city`)
+			materialized := runQuery(t, input, `group city | filter { city is not null } | reduce `+assignment+` | remove grouped | sort city`)
+			requireBuiltinCatalogTDDTablesEqual(t, fused, materialized)
+		})
+	}
+}
+
+func requireBuiltinCatalogTDDTablesEqual(t *testing.T, left, right *table.Table) {
+	t.Helper()
+	if !reflect.DeepEqual(left.Columns, right.Columns) {
+		t.Fatalf("columns: got %v, want %v", left.Columns, right.Columns)
+	}
+	if left.NumRows != right.NumRows {
+		t.Fatalf("row count: got %d, want %d", left.NumRows, right.NumRows)
+	}
+	for row := 0; row < left.NumRows; row++ {
+		for col := range left.Columns {
+			lv := left.GetAt(row, col)
+			rv := right.GetAt(row, col)
+			if !reflect.DeepEqual(lv, rv) {
+				t.Fatalf("row %d col %s: got %v, want %v", row, left.Columns[col], lv, rv)
+			}
+		}
 	}
 }
 

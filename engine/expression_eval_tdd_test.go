@@ -47,6 +47,54 @@ func TestEvalTypedAggregateExpressionInternalBranches(t *testing.T) {
 			want: table.IntVal(6),
 		},
 		{
+			name: "aggregate_count",
+			expr: typedExpr{
+				bound: &boundCall{raw: call("count")},
+				typ:   &table.TypeDescriptor{Kind: table.TypeInt},
+			},
+			want: table.IntVal(2),
+		},
+		{
+			name: "aggregate_avg",
+			expr: typedExpr{
+				bound: &boundCall{raw: call("avg", col("x"))},
+				typ:   &table.TypeDescriptor{Kind: table.TypeFloat, Nullable: true},
+			},
+			want: table.FloatVal(3),
+		},
+		{
+			name: "aggregate_min",
+			expr: typedExpr{
+				bound: &boundCall{raw: call("min", col("x"))},
+				typ:   &table.TypeDescriptor{Kind: table.TypeInt, Nullable: true},
+			},
+			want: table.IntVal(2),
+		},
+		{
+			name: "aggregate_max",
+			expr: typedExpr{
+				bound: &boundCall{raw: call("max", col("x"))},
+				typ:   &table.TypeDescriptor{Kind: table.TypeInt, Nullable: true},
+			},
+			want: table.IntVal(4),
+		},
+		{
+			name: "aggregate_first_including_nullability",
+			expr: typedExpr{
+				bound: &boundCall{raw: call("first", col("flag"))},
+				typ:   &table.TypeDescriptor{Kind: table.TypeBool, Nullable: true},
+			},
+			want: table.BoolVal(true),
+		},
+		{
+			name: "aggregate_last",
+			expr: typedExpr{
+				bound: &boundCall{raw: call("last", col("x"))},
+				typ:   &table.TypeDescriptor{Kind: table.TypeInt, Nullable: true},
+			},
+			want: table.IntVal(2),
+		},
+		{
 			name: "explicit_coerce",
 			expr: typedExpr{
 				bound:    &boundCoerce{},
@@ -80,9 +128,24 @@ func TestEvalTypedAggregateExpressionInternalBranches(t *testing.T) {
 func TestEvalTypedAggregateExpressionDefensiveErrors(t *testing.T) {
 	nested := table.NewTable([]string{"x"})
 	nested.AddRow([]table.Value{table.IntVal(1)})
+	overflow := table.NewTable([]string{"x"})
+	overflow.AddRow([]table.Value{table.IntVal(9223372036854775807)})
+	overflow.AddRow([]table.Value{table.IntVal(1)})
+	stringsTable := table.NewTable([]string{"x"})
+	stringsTable.AddRow([]table.Value{table.StrVal("bad")})
+	nullsTable := table.NewTableWithSchemas([]string{"x"}, []*table.TypeDescriptor{{Kind: table.TypeInt, Nullable: true}})
+	if err := nullsTable.AddRowTyped([]table.Value{table.Null()}); err != nil {
+		t.Fatalf("add null row: %v", err)
+	}
+	if err := nullsTable.AddRowTyped([]table.Value{table.IntVal(5)}); err != nil {
+		t.Fatalf("add int row: %v", err)
+	}
 	lit := func(v int64) typedExpr {
 		raw := &ast.LiteralExpr{Kind: "int", Int: v}
 		return typedExpr{bound: &boundLiteral{raw: raw}, raw: raw, typ: &table.TypeDescriptor{Kind: table.TypeInt}}
+	}
+	call := func(name string, args ...ast.Expr) typedExpr {
+		return typedExpr{bound: &boundCall{raw: &ast.FuncCallExpr{Name: name, Args: args}}}
 	}
 	badColumn := typedExpr{bound: &boundColumn{rawPath: []string{"x"}, topIndex: -1}}
 
@@ -157,6 +220,87 @@ func TestEvalTypedAggregateExpressionDefensiveErrors(t *testing.T) {
 
 	if _, err := evalTypedAggregateChild(nil, nested); err == nil || !strings.Contains(err.Error(), "missing typed aggregate expression child") {
 		t.Fatalf("expected missing child error, got %v", err)
+	}
+
+	aggregateErrors := []struct {
+		name   string
+		input  *table.Table
+		expr   typedExpr
+		wanted string
+	}{
+		{name: "count_rejects_arg", input: nested, expr: call("count", &ast.ColumnExpr{Path: []string{"x"}}), wanted: "takes no arguments"},
+		{name: "sum_requires_arg", input: nested, expr: call("sum"), wanted: "takes 1 argument"},
+		{name: "sum_arg_must_be_column", input: nested, expr: call("sum", &ast.LiteralExpr{Kind: "int", Int: 1}), wanted: "column reference"},
+		{name: "sum_missing_column", input: nested, expr: call("sum", &ast.ColumnExpr{Path: []string{"missing"}}), wanted: "not found"},
+		{name: "avg_missing_column", input: nested, expr: call("avg", &ast.ColumnExpr{Path: []string{"missing"}}), wanted: "not found"},
+		{name: "min_missing_column", input: nested, expr: call("min", &ast.ColumnExpr{Path: []string{"missing"}}), wanted: "not found"},
+		{name: "first_missing_column", input: nested, expr: call("first", &ast.ColumnExpr{Path: []string{"missing"}}), wanted: "not found"},
+		{name: "last_missing_column", input: nested, expr: call("last", &ast.ColumnExpr{Path: []string{"missing"}}), wanted: "not found"},
+		{name: "sum_non_numeric_runtime", input: stringsTable, expr: call("sum", &ast.ColumnExpr{Path: []string{"x"}}), wanted: "non-numeric"},
+		{name: "avg_non_numeric_runtime", input: stringsTable, expr: call("avg", &ast.ColumnExpr{Path: []string{"x"}}), wanted: "non-numeric"},
+		{name: "sum_overflow", input: overflow, expr: call("sum", &ast.ColumnExpr{Path: []string{"x"}}), wanted: "overflow"},
+	}
+	for _, tc := range aggregateErrors {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := evalTypedAggregateExpression(tc.expr, tc.input); err == nil || !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tc.wanted)) {
+				t.Fatalf("aggregate error: got %v, want %q", err, tc.wanted)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		expr typedExpr
+		want table.Value
+	}{
+		{name: "avg_skips_null", expr: call("avg", &ast.ColumnExpr{Path: []string{"x"}}), want: table.FloatVal(5)},
+		{name: "min_skips_null", expr: call("min", &ast.ColumnExpr{Path: []string{"x"}}), want: table.IntVal(5)},
+		{name: "max_skips_null", expr: call("max", &ast.ColumnExpr{Path: []string{"x"}}), want: table.IntVal(5)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := evalTypedAggregateExpression(tc.expr, nullsTable)
+			if err != nil {
+				t.Fatalf("aggregate null-skip error: %v", err)
+			}
+			assertPrimitiveValue(t, got, tc.want)
+		})
+	}
+}
+
+func TestEvalTypedAggregateExpressionEmptyAggregateResults(t *testing.T) {
+	nested := table.NewTableWithSchemas(
+		[]string{"x", "flag"},
+		[]*table.TypeDescriptor{{Kind: table.TypeInt}, {Kind: table.TypeBool}},
+	)
+	col := func(name string) ast.Expr {
+		return &ast.ColumnExpr{Path: []string{name}}
+	}
+	call := func(name string, args ...ast.Expr) typedExpr {
+		return typedExpr{bound: &boundCall{raw: &ast.FuncCallExpr{Name: name, Args: args}}}
+	}
+
+	cases := []struct {
+		name string
+		expr typedExpr
+		want table.Value
+	}{
+		{name: "count", expr: call("count"), want: table.IntVal(0)},
+		{name: "sum", expr: call("sum", col("x")), want: table.Null()},
+		{name: "avg", expr: call("avg", col("x")), want: table.Null()},
+		{name: "min", expr: call("min", col("x")), want: table.Null()},
+		{name: "max", expr: call("max", col("x")), want: table.Null()},
+		{name: "first", expr: call("first", col("flag")), want: table.Null()},
+		{name: "last", expr: call("last", col("flag")), want: table.Null()},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := evalTypedAggregateExpression(tc.expr, nested)
+			if err != nil {
+				t.Fatalf("empty aggregate error: %v", err)
+			}
+			assertPrimitiveValue(t, got, tc.want)
+		})
 	}
 }
 
