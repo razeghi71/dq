@@ -12,8 +12,8 @@ func TestPlannedExecutionTraitsClassifyEveryPlannedOp(t *testing.T) {
 		[]*table.TypeDescriptor{{Kind: table.TypeInt}, {Kind: table.TypeString}},
 	)
 	rowSpan := mustSourceStreamPlanTDDRowSpan(t,
-		plannedSelect{plannedBase: plannedBase{output: schema}},
-		plannedRename{plannedBase: plannedBase{output: schema}},
+		plannedSelect{plannedBase: plannedBaseFromTestSchema(schema)},
+		plannedRename{plannedBase: plannedBaseFromTestSchema(schema)},
 	)
 
 	cases := []struct {
@@ -24,23 +24,23 @@ func TestPlannedExecutionTraitsClassifyEveryPlannedOp(t *testing.T) {
 		wantDrops  bool
 		wantParRun bool
 	}{
-		{name: "head", op: plannedHead{plannedBase: plannedBase{output: schema}}, wantClass: plannedExecutionEarlyStop},
-		{name: "tail", op: plannedTail{plannedBase: plannedBase{output: schema}}, wantClass: plannedExecutionMaterializedBoundary},
-		{name: "filter", op: plannedFilter{plannedBase: plannedBase{output: schema}}, wantClass: plannedExecutionRowLocal, wantLocal: true, wantDrops: true},
-		{name: "transform_empty", op: plannedTransform{plannedBase: plannedBase{output: schema}}, wantClass: plannedExecutionRowLocal, wantLocal: true},
-		{name: "transform_assignments", op: plannedTransform{plannedBase: plannedBase{output: schema}, assignments: []plannedTransformAssignment{{name: "id"}}}, wantClass: plannedExecutionRowLocal, wantLocal: true, wantParRun: true},
+		{name: "head", op: plannedHead{plannedBase: plannedBaseFromTestSchema(schema)}, wantClass: plannedExecutionEarlyStop},
+		{name: "tail", op: plannedTail{plannedBase: plannedBaseFromTestSchema(schema)}, wantClass: plannedExecutionMaterializedBoundary},
+		{name: "filter", op: plannedFilter{plannedBase: plannedBaseFromTestSchema(schema)}, wantClass: plannedExecutionRowLocal, wantLocal: true, wantDrops: true},
+		{name: "transform_empty", op: plannedTransform{plannedBase: plannedBaseFromTestSchema(schema)}, wantClass: plannedExecutionRowLocal, wantLocal: true},
+		{name: "transform_assignments", op: plannedTransform{plannedBase: plannedBaseFromTestSchema(schema), assignments: []plannedTransformAssignment{{name: "id"}}}, wantClass: plannedExecutionRowLocal, wantLocal: true, wantParRun: true},
 		{name: "row_span", op: rowSpan, wantClass: plannedExecutionRowSpan},
-		{name: "group", op: plannedGroup{plannedBase: plannedBase{output: schema}}, wantClass: plannedExecutionMaterializedBoundary},
-		{name: "reduce", op: plannedReduce{plannedBase: plannedBase{output: schema}}, wantClass: plannedExecutionMaterializedBoundary},
-		{name: "group_reduce", op: plannedGroupReduce{plannedBase: plannedBase{output: schema}}, wantClass: plannedExecutionMaterializedBoundary},
-		{name: "sort", op: plannedSort{plannedBase: plannedBase{output: schema}}, wantClass: plannedExecutionMaterializedBoundary},
-		{name: "select", op: plannedSelect{plannedBase: plannedBase{output: schema}}, wantClass: plannedExecutionRowLocal, wantLocal: true},
-		{name: "rename", op: plannedRename{plannedBase: plannedBase{output: schema}}, wantClass: plannedExecutionRowLocal, wantLocal: true},
-		{name: "remove", op: plannedRemove{plannedBase: plannedBase{output: schema}}, wantClass: plannedExecutionRowLocal, wantLocal: true},
-		{name: "distinct", op: plannedDistinct{plannedBase: plannedBase{output: schema}}, wantClass: plannedExecutionMaterializedBoundary},
-		{name: "count", op: plannedCount{plannedBase: plannedBase{output: schema}}, wantClass: plannedExecutionStreamingFold},
-		{name: "describe", op: plannedDescribe{plannedBase: plannedBase{output: schema}}, wantClass: plannedExecutionStreamingFold},
-		{name: "join", op: plannedJoin{plannedBase: plannedBase{output: schema}}, wantClass: plannedExecutionMaterializedBoundary},
+		{name: "group", op: plannedGroup{plannedBase: plannedBaseFromTestSchema(schema)}, wantClass: plannedExecutionMaterializedBoundary},
+		{name: "reduce", op: plannedReduce{plannedBase: plannedBaseFromTestSchema(schema)}, wantClass: plannedExecutionMaterializedBoundary},
+		{name: "group_reduce", op: plannedGroupReduce{plannedBase: plannedBaseFromTestSchema(schema)}, wantClass: plannedExecutionMaterializedBoundary},
+		{name: "sort", op: plannedSort{plannedBase: plannedBaseFromTestSchema(schema)}, wantClass: plannedExecutionMaterializedBoundary},
+		{name: "select", op: plannedSelect{plannedBase: plannedBaseFromTestSchema(schema)}, wantClass: plannedExecutionRowLocal, wantLocal: true},
+		{name: "rename", op: plannedRename{plannedBase: plannedBaseFromTestSchema(schema)}, wantClass: plannedExecutionRowLocal, wantLocal: true},
+		{name: "remove", op: plannedRemove{plannedBase: plannedBaseFromTestSchema(schema)}, wantClass: plannedExecutionRowLocal, wantLocal: true},
+		{name: "distinct", op: plannedDistinct{plannedBase: plannedBaseFromTestSchema(schema)}, wantClass: plannedExecutionMaterializedBoundary},
+		{name: "count", op: plannedCount{plannedBase: plannedBaseFromTestSchema(schema)}, wantClass: plannedExecutionStreamingFold},
+		{name: "describe", op: plannedDescribe{plannedBase: plannedBaseFromTestSchema(schema)}, wantClass: plannedExecutionStreamingFold},
+		{name: "join", op: plannedJoin{plannedBase: plannedBaseFromTestSchema(schema)}, wantClass: plannedExecutionMaterializedBoundary},
 	}
 
 	for _, tc := range cases {

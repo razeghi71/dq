@@ -117,7 +117,7 @@ func logicalOpEnvs(input schemaEnv, ops []logicalOp) ([]schemaEnv, []schemaEnv) 
 	current := input
 	for i, op := range ops {
 		inputs[i] = current
-		outputs[i] = logicalOutputEnv(op)
+		outputs[i] = op.OutputEnv()
 		current = outputs[i]
 	}
 	return inputs, outputs
@@ -195,7 +195,7 @@ func demandForTransformInput(op logicalTransform, input schemaEnv, out columnDem
 	}
 	assignments := logicalAssignmentsByName(op.assignments)
 	in := demandNoColumns()
-	for _, col := range logicalOutputEnv(op).columns {
+	for _, col := range op.OutputEnv().columns {
 		if !out.has(col.name) {
 			continue
 		}
@@ -323,9 +323,9 @@ func rewriteLogicalOpForDemand(op logicalOp, originalInput, currentInput schemaE
 	case logicalGroupReduce:
 		return rewriteLogicalGroupReduceForDemand(o, out)
 	case logicalGroup:
-		return o, logicalOutputEnv(o), true, nil
+		return o, o.OutputEnv(), true, nil
 	case logicalReduce:
-		return o, logicalOutputEnv(o), true, nil
+		return o, o.OutputEnv(), true, nil
 	case logicalSort:
 		base := logicalBaseFromEnv(currentInput)
 		return logicalSort{logicalBase: base, keys: o.keys}, currentInput, true, nil
@@ -346,7 +346,7 @@ func rewriteLogicalOpForDemand(op logicalOp, originalInput, currentInput schemaE
 	case logicalJoin:
 		return rewriteLogicalJoinForDemand(o, out)
 	default:
-		return op, logicalOutputEnv(op), true, nil
+		return op, op.OutputEnv(), true, nil
 	}
 }
 
@@ -385,7 +385,7 @@ func rewriteLogicalGroupReduceForDemand(op logicalGroupReduce, out columnDemand)
 		}
 	}
 
-	original := logicalOutputEnv(op)
+	original := op.OutputEnv()
 	columns := make([]schemaEnvColumn, 0, len(original.columns))
 	for _, col := range original.columns {
 		if out.all || out.has(col.name) {
@@ -428,7 +428,7 @@ func rewriteLogicalSelectForDemand(op logicalSelect, input schemaEnv, out column
 }
 
 func rewriteLogicalRenameForDemand(op logicalRename, originalInput, currentInput schemaEnv) (logicalOp, schemaEnv, bool, error) {
-	originalOutput := logicalOutputEnv(op)
+	originalOutput := op.OutputEnv()
 	renamedByInput := make(map[string]string, len(originalInput.columns))
 	for i, col := range originalInput.columns {
 		if outCol, ok := originalOutput.columnAt(i); ok {
@@ -482,7 +482,7 @@ func rewriteLogicalDistinctForDemand(op logicalDistinct, input schemaEnv) (logic
 }
 
 func rewriteLogicalJoinForDemand(op logicalJoin, out columnDemand) (logicalOp, schemaEnv, bool, error) {
-	original := logicalOutputEnv(op)
+	original := op.OutputEnv()
 	if len(op.outputSources) != len(original.columns) {
 		return nil, schemaEnv{}, false, fmt.Errorf("demand pruning: join output source count mismatch")
 	}

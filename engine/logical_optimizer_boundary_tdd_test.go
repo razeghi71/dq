@@ -286,14 +286,6 @@ type unknownLogicalOpForBoundaryTDD struct {
 	logicalBase
 }
 
-type schemaOnlyLogicalOpForBoundaryTDD struct {
-	output table.Schema
-}
-
-func (op schemaOnlyLogicalOpForBoundaryTDD) OutputSchema() table.Schema {
-	return op.output
-}
-
 type unknownLogicalBoundExprForBoundaryTDD struct{}
 
 func (*unknownLogicalBoundExprForBoundaryTDD) logicalBoundExprNode() {}
@@ -339,23 +331,16 @@ func TestLogicalOptimizerBoundaryTDDPhaseDefensiveErrors(t *testing.T) {
 	_, err = planPhysicalPipeline(&optimizedLogicalPipeline{
 		InputSchema:  usersTable().Schema(),
 		OutputSchema: usersTable().Schema(),
-		Ops:          []logicalOp{unknownLogicalOpForBoundaryTDD{logicalBase: logicalBase{output: usersTable().Schema()}}},
+		Ops:          []logicalOp{unknownLogicalOpForBoundaryTDD{logicalBase: logicalBaseFromTestSchema(usersTable().Schema())}},
 	})
 	if err == nil || !strings.Contains(err.Error(), "unknown optimized logical operation") {
 		t.Fatalf("unknown physical op error: got %v", err)
 	}
 
 	inputSchema := usersTable().Schema()
-	envFromBase := (logicalBase{output: inputSchema}).OutputEnv()
+	envFromBase := logicalBaseFromTestSchema(inputSchema).OutputEnv()
 	if len(envFromBase.columns) != len(inputSchema.Columns) || envFromBase.columns[0].name != "name" {
-		t.Fatalf("logical base fallback env: got %#v", envFromBase.columnNames())
-	}
-	envFromSchemaOnly := logicalOutputEnv(schemaOnlyLogicalOpForBoundaryTDD{output: inputSchema})
-	if len(envFromSchemaOnly.columns) != len(inputSchema.Columns) || envFromSchemaOnly.columns[1].name != "age" {
-		t.Fatalf("logical output env fallback: got %#v", envFromSchemaOnly.columnNames())
-	}
-	if schema := envFromSchemaOnly.columns[1].finalSchema(); schema == nil || schema.Kind != table.TypeInt {
-		t.Fatalf("lazy final schema: got %v, want int", schema)
+		t.Fatalf("logical base env: got %#v", envFromBase.columnNames())
 	}
 }
 
@@ -372,7 +357,7 @@ func TestLogicalOptimizerBoundaryTDDPlannerDefensiveBranches(t *testing.T) {
 	_, err := planPhysicalPipeline(&optimizedLogicalPipeline{
 		InputSchema: input,
 		Ops: []logicalOp{logicalTransform{
-			logicalBase: logicalBase{output: input},
+			logicalBase: logicalBaseFromTestSchema(input),
 			assignments: []logicalAssignment{{
 				name: "missing",
 				expr: logicalTypedExpr{bound: &logicalBoundLiteral{raw: &ast.LiteralExpr{Kind: "int", Int: 1}}, typ: &table.TypeDescriptor{Kind: table.TypeInt}},
@@ -395,7 +380,7 @@ func TestLogicalOptimizerBoundaryTDDPlannerDefensiveBranches(t *testing.T) {
 	_, err = planPhysicalPipeline(&optimizedLogicalPipeline{
 		InputSchema: groupedSchema,
 		Ops: []logicalOp{logicalReduce{
-			logicalBase:  logicalBase{output: groupedSchema},
+			logicalBase:  logicalBaseFromTestSchema(groupedSchema),
 			nestedName:   "grouped",
 			nestedSchema: groupedSchema.Columns[0].Type.Elem,
 			assignments: []logicalAssignment{{
@@ -411,7 +396,7 @@ func TestLogicalOptimizerBoundaryTDDPlannerDefensiveBranches(t *testing.T) {
 	_, err = planPhysicalPipeline(&optimizedLogicalPipeline{
 		InputSchema: input,
 		Ops: []logicalOp{logicalReduce{
-			logicalBase:  logicalBase{output: input},
+			logicalBase:  logicalBaseFromTestSchema(input),
 			nestedName:   "missing",
 			nestedSchema: groupedSchema.Columns[0].Type.Elem,
 		}},
@@ -423,7 +408,7 @@ func TestLogicalOptimizerBoundaryTDDPlannerDefensiveBranches(t *testing.T) {
 	_, err = planPhysicalPipeline(&optimizedLogicalPipeline{
 		InputSchema: groupedSchema,
 		Ops: []logicalOp{logicalReduce{
-			logicalBase:  logicalBase{output: groupedSchema},
+			logicalBase:  logicalBaseFromTestSchema(groupedSchema),
 			nestedName:   "grouped",
 			nestedSchema: nil,
 		}},
@@ -435,7 +420,7 @@ func TestLogicalOptimizerBoundaryTDDPlannerDefensiveBranches(t *testing.T) {
 	_, err = planPhysicalPipeline(&optimizedLogicalPipeline{
 		InputSchema: input,
 		Ops: []logicalOp{logicalRemove{
-			logicalBase: logicalBase{output: input},
+			logicalBase: logicalBaseFromTestSchema(input),
 			kept:        []string{"missing"},
 		}},
 	})
@@ -446,7 +431,7 @@ func TestLogicalOptimizerBoundaryTDDPlannerDefensiveBranches(t *testing.T) {
 	_, err = planPhysicalPipeline(&optimizedLogicalPipeline{
 		InputSchema: input,
 		Ops: []logicalOp{logicalGroup{
-			logicalBase: logicalBase{output: input},
+			logicalBase: logicalBaseFromTestSchema(input),
 			keys:        []logicalPathBinding{{name: "missing", path: []string{"missing"}, schema: &table.TypeDescriptor{Kind: table.TypeInt}}},
 		}},
 	})
@@ -457,7 +442,7 @@ func TestLogicalOptimizerBoundaryTDDPlannerDefensiveBranches(t *testing.T) {
 	_, err = planPhysicalPipeline(&optimizedLogicalPipeline{
 		InputSchema: input,
 		Ops: []logicalOp{logicalSort{
-			logicalBase: logicalBase{output: input},
+			logicalBase: logicalBaseFromTestSchema(input),
 			keys:        []logicalSortKey{{path: []string{"missing"}}},
 		}},
 	})
@@ -468,7 +453,7 @@ func TestLogicalOptimizerBoundaryTDDPlannerDefensiveBranches(t *testing.T) {
 	_, err = planPhysicalPipeline(&optimizedLogicalPipeline{
 		InputSchema: input,
 		Ops: []logicalOp{logicalSelect{
-			logicalBase:  logicalBase{output: input},
+			logicalBase:  logicalBaseFromTestSchema(input),
 			projections:  []logicalPathBinding{{name: "missing", path: []string{"missing"}, schema: &table.TypeDescriptor{Kind: table.TypeInt}}},
 			topLevelOnly: true,
 		}},
@@ -480,7 +465,7 @@ func TestLogicalOptimizerBoundaryTDDPlannerDefensiveBranches(t *testing.T) {
 	_, err = planPhysicalPipeline(&optimizedLogicalPipeline{
 		InputSchema: input,
 		Ops: []logicalOp{logicalFilter{
-			logicalBase: logicalBase{output: input},
+			logicalBase: logicalBaseFromTestSchema(input),
 			expr: logicalTypedExpr{
 				bound: &logicalBoundBinary{raw: &ast.BinaryExpr{Op: "+"}},
 				typ:   &table.TypeDescriptor{Kind: table.TypeInt},
@@ -495,23 +480,6 @@ func TestLogicalOptimizerBoundaryTDDPlannerDefensiveBranches(t *testing.T) {
 	_, err = physicalizeTypedExpr(logicalTypedExpr{bound: &unknownLogicalBoundExprForBoundaryTDD{}}, mustSchemaEnvFromSchema(input))
 	if err == nil || !strings.Contains(err.Error(), "unknown logical typed expression binding") {
 		t.Fatalf("unknown physicalize binding error: got %v", err)
-	}
-}
-
-func TestLogicalOptimizerBoundaryTDDSchemaColumnIndexIsExplicitlyOptional(t *testing.T) {
-	schema := table.NewSchema(
-		[]string{"a", "b"},
-		[]*table.TypeDescriptor{
-			{Kind: table.TypeInt},
-			{Kind: table.TypeString},
-		},
-	)
-
-	if got, ok := schemaColumnIndex(schema, "b"); !ok || got != 1 {
-		t.Fatalf("schemaColumnIndex(b): got (%d, %v), want (1, true)", got, ok)
-	}
-	if got, ok := schemaColumnIndex(schema, "missing"); ok || got != 0 {
-		t.Fatalf("schemaColumnIndex(missing): got (%d, %v), want (0, false)", got, ok)
 	}
 }
 
@@ -778,7 +746,7 @@ func TestLogicalOptimizerBoundaryTDDPhysicalJoinRejectsStaleOptimizedKeyMetadata
 			edit: func(j *logicalJoin) {
 				out := j.OutputSchema()
 				out.Columns = out.Columns[:len(out.Columns)-1]
-				j.logicalBase.output = out
+				j.logicalBase.output = mustSchemaEnvFromSchema(out)
 			},
 			want: "output source count",
 		},
@@ -788,7 +756,7 @@ func TestLogicalOptimizerBoundaryTDDPhysicalJoinRejectsStaleOptimizedKeyMetadata
 				out := j.OutputSchema()
 				out.Columns = append([]table.SchemaColumn(nil), out.Columns...)
 				out.Columns[0].Name = "renamed"
-				j.logicalBase.output = out
+				j.logicalBase.output = mustSchemaEnvFromSchema(out)
 			},
 			want: "output source 0 changed",
 		},

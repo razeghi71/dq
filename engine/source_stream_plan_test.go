@@ -320,37 +320,37 @@ func TestExecuteSourceAdaptiveQueryInstrumentationFilteredBoundaryRetainsOnlyKep
 
 func TestShouldLoadSourceMaterializedForStreamingBranches(t *testing.T) {
 	schema := sourceStreamPlanInfo().Schema
-	rowSpan := mustSourceStreamPlanTDDRowSpan(t, plannedTransform{plannedBase: plannedBase{output: schema}})
-	droppingSpan := mustSourceStreamPlanTDDRowSpan(t, plannedFilter{plannedBase: plannedBase{output: schema}})
+	rowSpan := mustSourceStreamPlanTDDRowSpan(t, plannedTransform{plannedBase: plannedBaseFromTestSchema(schema)})
+	droppingSpan := mustSourceStreamPlanTDDRowSpan(t, plannedFilter{plannedBase: plannedBaseFromTestSchema(schema)})
 	cases := []struct {
 		name string
 		ops  []plannedOp
 		want bool
 	}{
 		{name: "empty", ops: nil, want: false},
-		{name: "head", ops: []plannedOp{plannedHead{plannedBase: plannedBase{output: schema}, n: 1}}, want: false},
-		{name: "count", ops: []plannedOp{plannedCount{plannedBase: plannedBase{output: schema}}}, want: false},
-		{name: "describe", ops: []plannedOp{plannedDescribe{plannedBase: plannedBase{output: schema}}}, want: false},
-		{name: "tail", ops: []plannedOp{plannedTail{plannedBase: plannedBase{output: schema}, n: 1}}, want: true},
-		{name: "group", ops: []plannedOp{plannedGroup{plannedBase: plannedBase{output: schema}}}, want: true},
-		{name: "reduce", ops: []plannedOp{plannedReduce{plannedBase: plannedBase{output: schema}}}, want: true},
-		{name: "group_reduce", ops: []plannedOp{plannedGroupReduce{plannedBase: plannedBase{output: schema}}}, want: true},
-		{name: "sort", ops: []plannedOp{plannedSort{plannedBase: plannedBase{output: schema}}}, want: true},
-		{name: "distinct", ops: []plannedOp{plannedDistinct{plannedBase: plannedBase{output: schema}}}, want: true},
-		{name: "join", ops: []plannedOp{plannedJoin{plannedBase: plannedBase{output: schema}}}, want: true},
-		{name: "filter_before_join", ops: []plannedOp{plannedFilter{plannedBase: plannedBase{output: schema}}, plannedJoin{plannedBase: plannedBase{output: schema}}}, want: false},
-		{name: "transform_before_join", ops: []plannedOp{plannedTransform{plannedBase: plannedBase{output: schema}}, plannedJoin{plannedBase: plannedBase{output: schema}}}, want: true},
-		{name: "select_before_join", ops: []plannedOp{plannedSelect{plannedBase: plannedBase{output: schema}}, plannedJoin{plannedBase: plannedBase{output: schema}}}, want: true},
-		{name: "rename_before_join", ops: []plannedOp{plannedRename{plannedBase: plannedBase{output: schema}}, plannedJoin{plannedBase: plannedBase{output: schema}}}, want: true},
-		{name: "remove_before_join", ops: []plannedOp{plannedRemove{plannedBase: plannedBase{output: schema}}, plannedJoin{plannedBase: plannedBase{output: schema}}}, want: true},
+		{name: "head", ops: []plannedOp{plannedHead{plannedBase: plannedBaseFromTestSchema(schema), n: 1}}, want: false},
+		{name: "count", ops: []plannedOp{plannedCount{plannedBase: plannedBaseFromTestSchema(schema)}}, want: false},
+		{name: "describe", ops: []plannedOp{plannedDescribe{plannedBase: plannedBaseFromTestSchema(schema)}}, want: false},
+		{name: "tail", ops: []plannedOp{plannedTail{plannedBase: plannedBaseFromTestSchema(schema), n: 1}}, want: true},
+		{name: "group", ops: []plannedOp{plannedGroup{plannedBase: plannedBaseFromTestSchema(schema)}}, want: true},
+		{name: "reduce", ops: []plannedOp{plannedReduce{plannedBase: plannedBaseFromTestSchema(schema)}}, want: true},
+		{name: "group_reduce", ops: []plannedOp{plannedGroupReduce{plannedBase: plannedBaseFromTestSchema(schema)}}, want: true},
+		{name: "sort", ops: []plannedOp{plannedSort{plannedBase: plannedBaseFromTestSchema(schema)}}, want: true},
+		{name: "distinct", ops: []plannedOp{plannedDistinct{plannedBase: plannedBaseFromTestSchema(schema)}}, want: true},
+		{name: "join", ops: []plannedOp{plannedJoin{plannedBase: plannedBaseFromTestSchema(schema)}}, want: true},
+		{name: "filter_before_join", ops: []plannedOp{plannedFilter{plannedBase: plannedBaseFromTestSchema(schema)}, plannedJoin{plannedBase: plannedBaseFromTestSchema(schema)}}, want: false},
+		{name: "transform_before_join", ops: []plannedOp{plannedTransform{plannedBase: plannedBaseFromTestSchema(schema)}, plannedJoin{plannedBase: plannedBaseFromTestSchema(schema)}}, want: true},
+		{name: "select_before_join", ops: []plannedOp{plannedSelect{plannedBase: plannedBaseFromTestSchema(schema)}, plannedJoin{plannedBase: plannedBaseFromTestSchema(schema)}}, want: true},
+		{name: "rename_before_join", ops: []plannedOp{plannedRename{plannedBase: plannedBaseFromTestSchema(schema)}, plannedJoin{plannedBase: plannedBaseFromTestSchema(schema)}}, want: true},
+		{name: "remove_before_join", ops: []plannedOp{plannedRemove{plannedBase: plannedBaseFromTestSchema(schema)}, plannedJoin{plannedBase: plannedBaseFromTestSchema(schema)}}, want: true},
 		{name: "row_span_final", ops: []plannedOp{rowSpan}, want: false},
-		{name: "row_span_before_head", ops: []plannedOp{rowSpan, plannedHead{plannedBase: plannedBase{output: schema}, n: 1}}, want: false},
-		{name: "row_span_before_count", ops: []plannedOp{rowSpan, plannedCount{plannedBase: plannedBase{output: schema}}}, want: false},
-		{name: "row_span_before_describe", ops: []plannedOp{rowSpan, plannedDescribe{plannedBase: plannedBase{output: schema}}}, want: false},
-		{name: "row_span_before_join", ops: []plannedOp{rowSpan, plannedJoin{plannedBase: plannedBase{output: schema}}}, want: true},
-		{name: "row_span_before_group_reduce", ops: []plannedOp{rowSpan, plannedGroupReduce{plannedBase: plannedBase{output: schema}}}, want: true},
-		{name: "dropping_span_before_join", ops: []plannedOp{droppingSpan, plannedJoin{plannedBase: plannedBase{output: schema}}}, want: false},
-		{name: "dropping_span_before_group_reduce", ops: []plannedOp{droppingSpan, plannedGroupReduce{plannedBase: plannedBase{output: schema}}}, want: false},
+		{name: "row_span_before_head", ops: []plannedOp{rowSpan, plannedHead{plannedBase: plannedBaseFromTestSchema(schema), n: 1}}, want: false},
+		{name: "row_span_before_count", ops: []plannedOp{rowSpan, plannedCount{plannedBase: plannedBaseFromTestSchema(schema)}}, want: false},
+		{name: "row_span_before_describe", ops: []plannedOp{rowSpan, plannedDescribe{plannedBase: plannedBaseFromTestSchema(schema)}}, want: false},
+		{name: "row_span_before_join", ops: []plannedOp{rowSpan, plannedJoin{plannedBase: plannedBaseFromTestSchema(schema)}}, want: true},
+		{name: "row_span_before_group_reduce", ops: []plannedOp{rowSpan, plannedGroupReduce{plannedBase: plannedBaseFromTestSchema(schema)}}, want: true},
+		{name: "dropping_span_before_join", ops: []plannedOp{droppingSpan, plannedJoin{plannedBase: plannedBaseFromTestSchema(schema)}}, want: false},
+		{name: "dropping_span_before_group_reduce", ops: []plannedOp{droppingSpan, plannedGroupReduce{plannedBase: plannedBaseFromTestSchema(schema)}}, want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

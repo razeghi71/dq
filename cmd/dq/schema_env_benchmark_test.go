@@ -45,6 +45,40 @@ func BenchmarkRunQueryStringSchemaEnvWideCSV(b *testing.B) {
 	}
 }
 
+func BenchmarkRunQueryStringSchemaEnvPlannerProofCSV(b *testing.B) {
+	path := writeRunBenchmarkCSV(b, 32, 1000)
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{
+			name:  "short_filter",
+			query: path + ` | filter { c06 > 10 } | count | json`,
+		},
+		{
+			name:  "short_select",
+			query: path + ` | select c01, c06 | count | json`,
+		},
+		{
+			name:  "row_span_filter_select_transform",
+			query: path + ` | filter { c06 > 10 } | select c01, c06 | transform score = c06 + 1 | rename score=score2 | remove c06 | count | json`,
+		},
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			var stdout bytes.Buffer
+			for i := 0; i < b.N; i++ {
+				stdout.Reset()
+				if err := runQueryString(tc.query, &stdout); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func writeSchemaEnvBenchmarkWideCSV(b *testing.B, dir, name string, cols, rows int) string {
 	b.Helper()
 	var sb strings.Builder

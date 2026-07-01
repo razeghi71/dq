@@ -39,6 +39,14 @@ func planPhysicalPipeline(plan *optimizedLogicalPipeline) (*physicalPipeline, er
 	return &out, nil
 }
 
+func logicalBaseFromTestSchema(schema table.Schema) logicalBase {
+	return logicalBaseFromEnv(mustSchemaEnvFromSchema(schema))
+}
+
+func plannedBaseFromTestSchema(schema table.Schema) plannedBase {
+	return plannedBaseFromEnv(mustSchemaEnvFromSchema(schema))
+}
+
 func executePhysicalPipeline(plan *physicalPipeline, input *table.Table) (*table.Table, error) {
 	if plan == nil {
 		return nil, fmt.Errorf("execute physical pipeline: nil plan")

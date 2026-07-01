@@ -19,7 +19,7 @@ func execPlannedJoin(p plannedJoin, left *table.Table) (*table.Table, error) {
 	rightKeys := p.rightKeys
 	outputs := p.outputs
 
-	outCols, outSchemas := outputSchemaColumns(p.OutputSchema())
+	outCols, outSchemas := outputEnvColumns(p.OutputEnv())
 	result := table.NewTableWithSchemas(outCols, outSchemas)
 
 	rightIndex, err := buildJoinIndex(right, rightKeys)

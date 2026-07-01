@@ -261,8 +261,8 @@ func execPlannedGroupReduce(p plannedGroupReduce, input *table.Table) (*table.Ta
 		}
 	}
 
-	result := tableFromOutputSchema(p.OutputSchema())
-	cols, _ := outputSchemaColumns(p.OutputSchema())
+	result := tableFromOutputEnv(p.OutputEnv())
+	cols, _ := outputEnvColumns(p.OutputEnv())
 	keyByName := make(map[string]int, len(p.keys))
 	for i, key := range p.keys {
 		keyByName[key.name] = i

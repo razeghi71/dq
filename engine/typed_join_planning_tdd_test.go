@@ -311,7 +311,7 @@ func TestTypedJoinPlanningTDDDefensiveBoundJoinKeyBranches(t *testing.T) {
 	}
 
 	plan := plannedJoin{
-		plannedBase: plannedBase{output: rawSchemaFromColumns([]string{"id"}, []*table.TypeDescriptor{intSchema})},
+		plannedBase: plannedBaseFromTestSchema(rawSchemaFromColumns([]string{"id"}, []*table.TypeDescriptor{intSchema})),
 		kind:        "inner",
 		right:       left,
 		leftKeys:    []resolvedJoinKey{{column: boundColumn{topIndex: 0, rawPath: []string{"id"}, typ: intSchema}}},

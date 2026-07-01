@@ -12,6 +12,7 @@ import (
 // plannedOp is a schema-planned operation.
 type plannedOp interface {
 	OutputSchema() table.Schema
+	OutputEnv() schemaEnv
 	executionTraits() plannedExecutionTraits
 }
 
@@ -31,11 +32,19 @@ type plannedExecutionTraits struct {
 }
 
 type plannedBase struct {
-	output table.Schema
+	output schemaEnv
 }
 
 func (p plannedBase) OutputSchema() table.Schema {
+	return p.output.schema()
+}
+
+func (p plannedBase) OutputEnv() schemaEnv {
 	return p.output
+}
+
+func plannedBaseFromEnv(env schemaEnv) plannedBase {
+	return plannedBase{output: env}
 }
 
 func (plannedHead) executionTraits() plannedExecutionTraits {
@@ -314,13 +323,8 @@ func planRemoveColumns(o *ast.RemoveOp, input schemaEnv) ([]schemaEnvColumn, []i
 	return columns, indices, kept, nil
 }
 
-func tableFromOutputSchema(schema table.Schema) *table.Table {
-	cols := make([]string, len(schema.Columns))
-	types := make([]*table.TypeDescriptor, len(schema.Columns))
-	for i, col := range schema.Columns {
-		cols[i] = col.Name
-		types[i] = col.Type
-	}
+func tableFromOutputEnv(env schemaEnv) *table.Table {
+	cols, types := outputEnvColumns(env)
 	return table.NewTableWithSchemas(cols, types)
 }
 
@@ -380,7 +384,7 @@ func newPlannedRowSpan(ops []plannedOp) (plannedRowSpan, error) {
 		return plannedRowSpan{}, fmt.Errorf("row span: empty physical span")
 	}
 	return plannedRowSpan{
-		plannedBase:       plannedBase{output: ops[len(ops)-1].OutputSchema()},
+		plannedBase:       plannedBaseFromEnv(ops[len(ops)-1].OutputEnv()),
 		ops:               ops,
 		dropsRows:         plannedRowSpanDropsRows(ops),
 		parallelCandidate: plannedRowSpanParallelCandidate(ops),
@@ -469,7 +473,7 @@ func execPlannedTransform(p plannedTransform, input *table.Table) (*table.Table,
 		compiled[i] = compileTypedRowValue(assignment.expr, input)
 	}
 
-	cols, schemas := outputSchemaColumns(p.OutputSchema())
+	cols, schemas := outputEnvColumns(p.OutputEnv())
 	targets := transformAssignmentTargets(p.assignments)
 	if allSchemasKnown(schemas, targets) {
 		if result, ok, err := execAppendOnlyTypedTransform(input, cols, schemas, p.assignments, compiled); ok || err != nil {
@@ -517,12 +521,12 @@ func reduceAssignmentTargets(assignments []plannedReduceAssignment) []int {
 	return targets
 }
 
-func outputSchemaColumns(schema table.Schema) ([]string, []*table.TypeDescriptor) {
-	cols := make([]string, len(schema.Columns))
-	schemas := make([]*table.TypeDescriptor, len(schema.Columns))
-	for i, col := range schema.Columns {
-		cols[i] = col.Name
-		schemas[i] = col.Type
+func outputEnvColumns(env schemaEnv) ([]string, []*table.TypeDescriptor) {
+	cols := make([]string, len(env.columns))
+	schemas := make([]*table.TypeDescriptor, len(env.columns))
+	for i, col := range env.columns {
+		cols[i] = col.name
+		schemas[i] = col.planningSchema()
 	}
 	return cols, schemas
 }
@@ -562,7 +566,7 @@ func execPlannedGroup(p plannedGroup, input *table.Table) (*table.Table, error) 
 		groups[groupIdx].records = append(groups[groupIdx].records, table.RecordVal(fields))
 	}
 
-	result := tableFromOutputSchema(p.OutputSchema())
+	result := tableFromOutputEnv(p.OutputEnv())
 	for _, group := range groups {
 		vals := make([]table.Value, len(group.key)+1)
 		copy(vals, group.key)
@@ -579,7 +583,7 @@ func execPlannedReduce(p plannedReduce, input *table.Table) (*table.Table, error
 		return nil, fmt.Errorf("reduce: nested column %q not found (did you forget to group first?)", p.nestedName)
 	}
 
-	cols, schemas := outputSchemaColumns(p.OutputSchema())
+	cols, schemas := outputEnvColumns(p.OutputEnv())
 	targets := reduceAssignmentTargets(p.assignments)
 	result := table.NewTableWithSchemas(cols, schemas)
 
@@ -657,7 +661,7 @@ func execPlannedSelect(p plannedSelect, input *table.Table) (*table.Table, error
 	if p.projections.topLevelIdx != nil {
 		return input.SelectColsWithSchema(p.projections.topLevelIdx, p.OutputSchema())
 	}
-	result := tableFromOutputSchema(p.OutputSchema())
+	result := tableFromOutputEnv(p.OutputEnv())
 	for i := 0; i < input.NumRows; i++ {
 		vals := make([]table.Value, len(p.projections.projections))
 		for j, projection := range p.projections.projections {
@@ -683,7 +687,7 @@ func execPlannedRename(p plannedRename, input *table.Table) (*table.Table, error
 }
 
 func execPlannedCount(p plannedCount, input *table.Table) (*table.Table, error) {
-	result := tableFromOutputSchema(p.OutputSchema())
+	result := tableFromOutputEnv(p.OutputEnv())
 	if err := result.AddRowTyped([]table.Value{table.IntVal(int64(input.NumRows))}); err != nil {
 		return nil, fmt.Errorf("count: %w", err)
 	}
@@ -691,7 +695,7 @@ func execPlannedCount(p plannedCount, input *table.Table) (*table.Table, error) 
 }
 
 func execPlannedDescribe(p plannedDescribe, input *table.Table) (*table.Table, error) {
-	result := tableFromOutputSchema(p.OutputSchema())
+	result := tableFromOutputEnv(p.OutputEnv())
 	for i, name := range input.Columns {
 		if err := result.AddRowTyped([]table.Value{
 			table.StrVal(name),
@@ -715,7 +719,7 @@ func execPlannedDistinct(p plannedDistinct, input *table.Table) (*table.Table, e
 func execPlannedProjectedDistinct(p plannedDistinct, input *table.Table) (*table.Table, error) {
 	projections := p.projections
 	seen := make(map[string]bool)
-	result := tableFromOutputSchema(p.OutputSchema())
+	result := tableFromOutputEnv(p.OutputEnv())
 	if projections.topLevelIdx != nil {
 		for i := 0; i < input.NumRows; i++ {
 			var key string
@@ -778,7 +782,7 @@ func execPlannedProjectedDistinct(p plannedDistinct, input *table.Table) (*table
 
 func execPlannedFullRowDistinct(p plannedDistinct, input *table.Table) (*table.Table, error) {
 	seen := make(map[string]bool)
-	result := tableFromOutputSchema(p.OutputSchema())
+	result := tableFromOutputEnv(p.OutputEnv())
 	for i := 0; i < input.NumRows; i++ {
 		parts := make([]string, len(input.Columns))
 		for j := range input.Columns {

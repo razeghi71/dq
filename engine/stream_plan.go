@@ -208,7 +208,7 @@ func compileRowProgramStep(op plannedOp) rowstream.MapFunc {
 			return out, true, nil
 		}
 	case plannedTransform:
-		cols, schemas := outputSchemaColumns(p.OutputSchema())
+		cols, schemas := outputEnvColumns(p.OutputEnv())
 		return func(row rowstream.Row) (rowstream.Row, bool, error) {
 			out, err := transformStreamingRow(row, cols, schemas, p.assignments)
 			if err != nil {
@@ -345,7 +345,7 @@ func execStreamingCount(p plannedCount, input rowstream.Stream) (*table.Table, e
 			if err := input.Close(); err != nil {
 				return nil, err
 			}
-			result := tableFromOutputSchema(p.OutputSchema())
+			result := tableFromOutputEnv(p.OutputEnv())
 			if err := result.AddRowTyped([]table.Value{table.IntVal(count)}); err != nil {
 				return nil, fmt.Errorf("count: %w", err)
 			}
@@ -372,7 +372,7 @@ func execStreamingDescribe(p plannedDescribe, input rowstream.Stream) (*table.Ta
 		rowCount++
 	}
 
-	result := tableFromOutputSchema(p.OutputSchema())
+	result := tableFromOutputEnv(p.OutputEnv())
 	for _, col := range input.Schema().Columns {
 		if err := result.AddRowTyped([]table.Value{
 			table.StrVal(col.Name),

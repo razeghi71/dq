@@ -431,10 +431,11 @@ func TestSimplePlannerTDDExecutionUsesPlannedOutputSchemaAsAuthority(t *testing.
 	if err != nil {
 		t.Fatalf("physicalProjectionPlan: %v", err)
 	}
+	outputSchema := table.Schema{Columns: []table.SchemaColumn{
+		{Name: "years", Type: &table.TypeDescriptor{Kind: table.TypeInt}},
+	}}
 	selected, err := execPlannedSelect(plannedSelect{
-		plannedBase: plannedBase{output: table.Schema{Columns: []table.SchemaColumn{
-			{Name: "years", Type: &table.TypeDescriptor{Kind: table.TypeInt}},
-		}}},
+		plannedBase: plannedBaseFromTestSchema(outputSchema),
 		projections: projections,
 	}, input)
 	if err != nil {

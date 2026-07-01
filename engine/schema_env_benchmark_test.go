@@ -44,6 +44,46 @@ func BenchmarkSchemaEnvPlannerWideJoin(b *testing.B) {
 	benchmarkSchemaEnvPlanner(b, schemaEnvBenchmarkSchema(256), `filter { c199 > 10 } | join right.csv on c200 == r_key | select c003, r_status, r_amount | count`, load)
 }
 
+func BenchmarkSchemaEnvPlannerProofOutputStorage(b *testing.B) {
+	cases := []struct {
+		name     string
+		cols     int
+		pipeline string
+	}{
+		{
+			name:     "short_one_op_filter",
+			cols:     16,
+			pipeline: `filter { c006 > 10 }`,
+		},
+		{
+			name:     "short_select",
+			cols:     16,
+			pipeline: `select c001, c006`,
+		},
+		{
+			name:     "row_span_filter_select_transform",
+			cols:     16,
+			pipeline: `filter { c006 > 10 } | select c001, c006 | transform c007 = c006 + 1 | rename c007=score | remove c006`,
+		},
+		{
+			name:     "wide_multi_op",
+			cols:     256,
+			pipeline: `filter { c199 > 10 and c201 < 500 } | select c003, c128, c199, c201 | transform score = c199 + c201, flag = c199 > c003 | select c128, score, flag | count`,
+		},
+		{
+			name:     "group_reduce_boundary",
+			cols:     32,
+			pipeline: `group c000 | reduce n = count(), total = sum(c003) | remove grouped | sort c000`,
+		},
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			benchmarkSchemaEnvPlanner(b, schemaEnvBenchmarkSchema(tc.cols), tc.pipeline, nil)
+		})
+	}
+}
+
 func benchmarkSchemaEnvPlanner(b *testing.B, input table.Schema, pipeline string, load LoadFunc) {
 	b.Helper()
 	q, err := parser.Parse("bench.csv | " + pipeline)
