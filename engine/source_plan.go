@@ -193,7 +193,10 @@ func (s sourceErrorStream) Next() (rowstream.Row, bool, error) {
 }
 
 func planLogicalQueryWithSource(query *ast.Query, source logicalSource, load LoadFunc) (*logicalPipeline, error) {
-	input := schemaEnvFromSchema(source.schema)
+	input, err := schemaEnvFromSchema(source.schema)
+	if err != nil {
+		return nil, fmt.Errorf("source schema: %w", err)
+	}
 	pipeline, err := planLogicalPipelineInEnv(input, query.Ops, load)
 	if err != nil {
 		return nil, err
@@ -296,17 +299,21 @@ func validateSourceInputSchema(want table.Schema, got *table.Table) error {
 		}
 		return fmt.Errorf("execute source plan: input schema column count mismatch: planned %d columns, got 0", len(want.Columns))
 	}
-	env := schemaEnvFromTable(got)
+	env, err := schemaEnvFromTable(got)
+	if err != nil {
+		return err
+	}
 	if len(want.Columns) != len(env.columns) {
 		return fmt.Errorf("execute source plan: input schema column count mismatch: planned %d columns, got %d", len(want.Columns), len(env.columns))
 	}
 	for i := range want.Columns {
 		w := want.Columns[i]
-		if w.Name != env.columns[i] {
-			return fmt.Errorf("execute source plan: input schema column %d mismatch: planned %q, got %q", i, w.Name, env.columns[i])
+		gotCol := env.columns[i]
+		if w.Name != gotCol.name {
+			return fmt.Errorf("execute source plan: input schema column %d mismatch: planned %q, got %q", i, w.Name, gotCol.name)
 		}
-		if !table.SchemaAssignable(w.Type, env.rawSchema(i), table.AssignExactMode) {
-			return fmt.Errorf("execute source plan: input schema for column %q mismatch: planned %s, got %s", w.Name, table.Render(w.Type), table.Render(env.rawSchema(i)))
+		if !table.SchemaAssignable(w.Type, gotCol.raw, table.AssignExactMode) {
+			return fmt.Errorf("execute source plan: input schema for column %q mismatch: planned %s, got %s", w.Name, table.Render(w.Type), table.Render(gotCol.raw))
 		}
 	}
 	return nil
@@ -373,23 +380,27 @@ func sourceFilterASTCanPush(expr ast.Expr) bool {
 }
 
 func sourceOutputEnv(source logicalSource, selection table.ColumnSelection) (schemaEnv, bool) {
-	env := schemaEnvFromSchema(source.schema)
+	env, err := schemaEnvFromSchema(source.schema)
+	if err != nil {
+		return schemaEnv{}, false
+	}
 	if selection.IsAll() {
 		return env, true
 	}
-	columns := selection.Names()
-	schemas := make([]*table.TypeDescriptor, len(columns))
-	for i, col := range columns {
-		idx := env.colIndex(col)
-		if idx < 0 {
+	selected := selection.Names()
+	columns := make([]schemaEnvColumn, len(selected))
+	for i, name := range selected {
+		col, ok := env.lookupColumn(name)
+		if !ok {
 			return schemaEnv{}, false
 		}
-		schemas[i] = env.rawSchema(idx)
-		if schemas[i] == nil {
-			schemas[i] = env.finalSchema(idx)
-		}
+		columns[i] = schemaEnvColumn{name: name, raw: col.column.planningSchema()}
 	}
-	return schemaEnvFromOwnedColumns(append([]string(nil), columns...), schemas, false), true
+	out, err := newSchemaEnv(columns)
+	if err != nil {
+		return schemaEnv{}, false
+	}
+	return out, true
 }
 
 func derivePhysicalSourceReadColumns(source *optimizedSource) table.ColumnSelection {
@@ -401,10 +412,10 @@ func derivePhysicalSourceReadColumns(source *optimizedSource) table.ColumnSelect
 	for _, predicate := range source.predicates {
 		collectLogicalTypedExprColumns(predicate, needed)
 	}
-	sourceEnv := schemaEnvFromSchema(source.source.schema)
+	sourceEnv := mustSchemaEnvFromSchema(source.source.schema)
 	for _, col := range sourceEnv.columns {
-		if needed[col] && !containsColumnName(read, col) {
-			read = append(read, col)
+		if needed[col.name] && !containsColumnName(read, col.name) {
+			read = append(read, col.name)
 		}
 	}
 	return table.SelectedColumns(read...)

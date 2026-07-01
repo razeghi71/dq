@@ -105,7 +105,7 @@ func TestTypedPlannerAddsExplicitCoercionOnlyWhereNeeded(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			bound, err := bindLogicalExpressionInEnv(tc.expr, schemaEnvFromTable(tbl))
+			bound, err := bindLogicalExpressionInEnv(tc.expr, mustSchemaEnvFromTable(tbl))
 			if err != nil {
 				t.Fatalf("bind: %v", err)
 			}
@@ -384,7 +384,7 @@ func TestTypedPlannerRejectsUnionMisuseWithoutLegacySchemaInference(t *testing.T
 		unionSchema,
 		{Kind: table.TypeList, Elem: unionSchema},
 	})
-	nested := recordSchemaForEnv(schemaEnvFromTable(tbl))
+	nested := recordSchemaForEnv(mustSchemaEnvFromTable(tbl))
 
 	cases := []struct {
 		name    string

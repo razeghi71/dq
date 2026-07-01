@@ -423,7 +423,7 @@ func TestSimplePlannerTDDExecutionUsesPlannedOutputSchemaAsAuthority(t *testing.
 		t.Fatalf("AddRowTyped: %v", err)
 	}
 
-	projections, err := physicalProjectionPlan(schemaEnvFromTable(input), []logicalPathBinding{{
+	projections, err := physicalProjectionPlan(mustSchemaEnvFromTable(input), []logicalPathBinding{{
 		name:   "age",
 		path:   []string{"age"},
 		schema: &table.TypeDescriptor{Kind: table.TypeInt},

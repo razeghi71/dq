@@ -167,11 +167,11 @@ func unionBeforePathEndInEnv(env schemaEnv, path []string) *table.TypeDescriptor
 	if len(path) < 2 {
 		return nil
 	}
-	idx := env.colIndex(path[0])
-	if idx < 0 {
+	col, ok := env.lookupColumn(path[0])
+	if !ok {
 		return nil
 	}
-	return unionBeforePathEndInSchema(env.finalSchema(idx), path[1:])
+	return unionBeforePathEndInSchema(col.column.finalSchema(), path[1:])
 }
 
 func unionBeforePathEndInSchema(schema *table.TypeDescriptor, path []string) *table.TypeDescriptor {

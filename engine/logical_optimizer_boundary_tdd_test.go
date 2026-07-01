@@ -347,14 +347,14 @@ func TestLogicalOptimizerBoundaryTDDPhaseDefensiveErrors(t *testing.T) {
 
 	inputSchema := usersTable().Schema()
 	envFromBase := (logicalBase{output: inputSchema}).OutputEnv()
-	if len(envFromBase.columns) != len(inputSchema.Columns) || envFromBase.columns[0] != "name" {
-		t.Fatalf("logical base fallback env: got %#v", envFromBase.columns)
+	if len(envFromBase.columns) != len(inputSchema.Columns) || envFromBase.columns[0].name != "name" {
+		t.Fatalf("logical base fallback env: got %#v", envFromBase.columnNames())
 	}
 	envFromSchemaOnly := logicalOutputEnv(schemaOnlyLogicalOpForBoundaryTDD{output: inputSchema})
-	if len(envFromSchemaOnly.columns) != len(inputSchema.Columns) || envFromSchemaOnly.columns[1] != "age" {
-		t.Fatalf("logical output env fallback: got %#v", envFromSchemaOnly.columns)
+	if len(envFromSchemaOnly.columns) != len(inputSchema.Columns) || envFromSchemaOnly.columns[1].name != "age" {
+		t.Fatalf("logical output env fallback: got %#v", envFromSchemaOnly.columnNames())
 	}
-	if schema := envFromSchemaOnly.finalSchema(1); schema == nil || schema.Kind != table.TypeInt {
+	if schema := envFromSchemaOnly.columns[1].finalSchema(); schema == nil || schema.Kind != table.TypeInt {
 		t.Fatalf("lazy final schema: got %v, want int", schema)
 	}
 }
@@ -365,7 +365,7 @@ func TestLogicalOptimizerBoundaryTDDPlannerDefensiveBranches(t *testing.T) {
 	if _, err := planLogicalPipeline(input, []ast.Op{&ast.SourceOp{Filename: "bad.csv"}}, nil); err == nil || !strings.Contains(err.Error(), "cannot plan operation") {
 		t.Fatalf("unsupported logical op error: got %v", err)
 	}
-	if _, err := planLogicalOp(schemaEnvFromSchema(input), &ast.SourceOp{Filename: "bad.csv"}, nil); err == nil || !strings.Contains(err.Error(), "unknown logical operation") {
+	if _, err := planLogicalOp(mustSchemaEnvFromSchema(input), &ast.SourceOp{Filename: "bad.csv"}, nil); err == nil || !strings.Contains(err.Error(), "unknown logical operation") {
 		t.Fatalf("unknown logical op error: got %v", err)
 	}
 
@@ -492,9 +492,26 @@ func TestLogicalOptimizerBoundaryTDDPlannerDefensiveBranches(t *testing.T) {
 		t.Fatalf("missing physicalize child error: got %v", err)
 	}
 
-	_, err = physicalizeTypedExpr(logicalTypedExpr{bound: &unknownLogicalBoundExprForBoundaryTDD{}}, schemaEnvFromSchema(input))
+	_, err = physicalizeTypedExpr(logicalTypedExpr{bound: &unknownLogicalBoundExprForBoundaryTDD{}}, mustSchemaEnvFromSchema(input))
 	if err == nil || !strings.Contains(err.Error(), "unknown logical typed expression binding") {
 		t.Fatalf("unknown physicalize binding error: got %v", err)
+	}
+}
+
+func TestLogicalOptimizerBoundaryTDDSchemaColumnIndexIsExplicitlyOptional(t *testing.T) {
+	schema := table.NewSchema(
+		[]string{"a", "b"},
+		[]*table.TypeDescriptor{
+			{Kind: table.TypeInt},
+			{Kind: table.TypeString},
+		},
+	)
+
+	if got, ok := schemaColumnIndex(schema, "b"); !ok || got != 1 {
+		t.Fatalf("schemaColumnIndex(b): got (%d, %v), want (1, true)", got, ok)
+	}
+	if got, ok := schemaColumnIndex(schema, "missing"); ok || got != 0 {
+		t.Fatalf("schemaColumnIndex(missing): got (%d, %v), want (0, false)", got, ok)
 	}
 }
 
@@ -606,8 +623,8 @@ func TestLogicalOptimizerBoundaryTDDNoOpOptimizerTreatsSharedLogicalFactsAsImmut
 
 	assertLogicalPlanStillOriginal := func(t *testing.T) {
 		t.Helper()
-		if logical.InputEnv.columns[1] != "age" || logical.InputSchema.Columns[1].Name != "age" || logical.OutputSchema.Columns[0].Name != "name" {
-			t.Fatalf("logical pipeline metadata was mutated: input env=%v input schema=%v output schema=%v", logical.InputEnv.columns, logical.InputSchema.Columns, logical.OutputSchema.Columns)
+		if logical.InputEnv.columns[1].name != "age" || logical.InputSchema.Columns[1].Name != "age" || logical.OutputSchema.Columns[0].Name != "name" {
+			t.Fatalf("logical pipeline metadata was mutated: input env=%v input schema=%v output schema=%v", logical.InputEnv.columnNames(), logical.InputSchema.Columns, logical.OutputSchema.Columns)
 		}
 		filter := logical.Ops[0].(logicalFilter)
 		filterExpr := filter.expr.bound.(*logicalBoundBinary)
@@ -647,7 +664,7 @@ func TestLogicalOptimizerBoundaryTDDNoOpOptimizerTreatsSharedLogicalFactsAsImmut
 }
 
 func TestLogicalOptimizerBoundaryTDDColumnBindingsCloneCallerPaths(t *testing.T) {
-	env := schemaEnvFromTable(simplePlannerInputTable())
+	env := mustSchemaEnvFromTable(simplePlannerInputTable())
 
 	topPath := []string{"age"}
 	physicalTop, err := bindColumnPathInEnv(env, topPath)
@@ -693,7 +710,7 @@ func TestLogicalOptimizerBoundaryTDDColumnBindingsCloneCallerPaths(t *testing.T)
 }
 
 func TestLogicalOptimizerBoundaryTDDJoinLoaderAndStdinErrors(t *testing.T) {
-	env := schemaEnvFromTable(usersTable())
+	env := mustSchemaEnvFromTable(usersTable())
 	if _, err := planLogicalOp(env, &ast.JoinOp{Filename: "right.csv"}, nil); err == nil || !strings.Contains(err.Error(), "loader not configured") {
 		t.Fatalf("logical join nil loader error: got %v", err)
 	}

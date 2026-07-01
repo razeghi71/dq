@@ -37,7 +37,7 @@ func (p logicalBase) OutputEnv() schemaEnv {
 	if p.outputEnv.columns != nil {
 		return p.outputEnv
 	}
-	return schemaEnvFromSchema(p.output)
+	return mustSchemaEnvFromSchema(p.output)
 }
 
 func logicalBaseFromEnv(env schemaEnv) logicalBase {
@@ -48,7 +48,7 @@ func logicalOutputEnv(op logicalOp) schemaEnv {
 	if carrier, ok := op.(interface{ OutputEnv() schemaEnv }); ok {
 		return carrier.OutputEnv()
 	}
-	return schemaEnvFromSchema(op.OutputSchema())
+	return mustSchemaEnvFromSchema(op.OutputSchema())
 }
 
 type logicalHead struct {
@@ -195,7 +195,11 @@ type physicalPipeline struct {
 }
 
 func planLogicalPipelineFromTableWithLoad(input *table.Table, ops []ast.Op, load LoadFunc) (*logicalPipeline, error) {
-	return planLogicalPipelineInEnv(schemaEnvFromTable(input), ops, load)
+	env, err := schemaEnvFromTable(input)
+	if err != nil {
+		return nil, err
+	}
+	return planLogicalPipelineInEnv(env, ops, load)
 }
 
 func planLogicalPipelineInEnv(input schemaEnv, ops []ast.Op, load LoadFunc) (*logicalPipeline, error) {
@@ -253,17 +257,19 @@ func planLogicalOp(input schemaEnv, op ast.Op, load LoadFunc) (logicalOp, error)
 		}
 		return logicalSelect{logicalBase: logicalBaseFromEnv(logicalProjectionOutputEnv(projections, topLevelOnly)), projections: projections, topLevelOnly: topLevelOnly}, nil
 	case *ast.RenameOp:
-		cols, err := planRenameColumns(o, input)
+		columns, err := planRenameColumns(o, input)
 		if err != nil {
 			return nil, err
 		}
-		return logicalRename{logicalBase: logicalBaseFromEnv(schemaEnvFromOwnedColumns(cols, input.rawSchemas(), false))}, nil
+		env := schemaEnvFromKnownUniqueColumns(columns)
+		return logicalRename{logicalBase: logicalBaseFromEnv(env)}, nil
 	case *ast.RemoveOp:
-		cols, _, schemas, err := planRemoveColumns(o, input)
+		columns, _, kept, err := planRemoveColumns(o, input)
 		if err != nil {
 			return nil, err
 		}
-		return logicalRemove{logicalBase: logicalBaseFromEnv(schemaEnvFromOwnedColumns(cols, schemas, false)), kept: cols}, nil
+		env := schemaEnvFromKnownUniqueColumns(columns)
+		return logicalRemove{logicalBase: logicalBaseFromEnv(env), kept: kept}, nil
 	case *ast.DistinctOp:
 		if len(o.Columns) == 0 {
 			return logicalDistinct{logicalBase: logicalBaseFromEnv(input), fullRow: true}, nil
@@ -285,36 +291,29 @@ func planLogicalOp(input schemaEnv, op ast.Op, load LoadFunc) (logicalOp, error)
 }
 
 func planLogicalTransform(o *ast.TransformOp, input schemaEnv) (logicalTransform, error) {
-	cols := append([]string(nil), input.columns...)
+	columns := input.cloneColumns()
 	assignments := make([]logicalAssignment, len(o.Assignments))
 	seenTargets := make(map[string]bool, len(o.Assignments))
 
-	for i, a := range o.Assignments {
+	for _, a := range o.Assignments {
 		if seenTargets[a.Column] {
 			return logicalTransform{}, fmt.Errorf("transform target %q assigned more than once", a.Column)
 		}
 		seenTargets[a.Column] = true
-		if !containsColumnName(cols, a.Column) {
-			cols = append(cols, a.Column)
-		}
-		assignments[i].name = a.Column
 	}
 
-	schemas := input.rawSchemas()
-	for len(schemas) < len(cols) {
-		schemas = append(schemas, nil)
-	}
 	for i, a := range o.Assignments {
+		var target schemaEnvColumnRef
+		columns, target = upsertEnvColumn(columns, a.Column)
 		planned, err := planLogicalTransformExprInEnv(a.Expr, input)
 		if err != nil {
 			return logicalTransform{}, fmt.Errorf("transform %q: %w", a.Column, err)
 		}
-		assignments[i].expr = planned
-		target := indexOfColumn(cols, a.Column)
-		schemas[target] = finalizePlanningSchema(planned.typ)
+		assignments[i] = logicalAssignment{name: a.Column, expr: planned}
+		columns[target.index].raw = finalizePlanningSchema(planned.typ)
 	}
 
-	outputEnv := schemaEnvFromOwnedColumns(cols, schemas, false)
+	outputEnv := schemaEnvFromKnownUniqueColumns(columns)
 	return logicalTransform{
 		logicalBase: logicalBaseFromEnv(outputEnv),
 		assignments: assignments,
@@ -340,64 +339,57 @@ func planLogicalGroup(o *ast.GroupOp, input schemaEnv) (logicalGroup, error) {
 		schemas = append(schemas, bound.typ)
 	}
 
-	cols := append([]string(nil), keyNames...)
-	if containsColumnName(cols, o.NestedName) {
+	if containsColumnName(keyNames, o.NestedName) {
 		return logicalGroup{}, fmt.Errorf("group: nested column name %q collides with a group key output column; use as rows or another distinct nested column name", o.NestedName)
 	}
-	cols = append(cols, o.NestedName)
-	schemas = append(schemas, &table.TypeDescriptor{Kind: table.TypeList, Elem: recordSchemaForEnv(input)})
+	columns := make([]schemaEnvColumn, 0, len(keyNames)+1)
+	for i, name := range keyNames {
+		columns = append(columns, schemaEnvColumn{name: name, raw: schemas[i]})
+	}
+	columns = append(columns, schemaEnvColumn{name: o.NestedName, raw: &table.TypeDescriptor{Kind: table.TypeList, Elem: recordSchemaForEnv(input)}})
 
+	env := schemaEnvFromKnownUniqueColumns(columns)
 	return logicalGroup{
-		logicalBase: logicalBaseFromEnv(schemaEnvFromOwnedColumns(cols, schemas, false)),
+		logicalBase: logicalBaseFromEnv(env),
 		keys:        keys,
 		nestedName:  o.NestedName,
 	}, nil
 }
 
 func planLogicalReduce(o *ast.ReduceOp, input schemaEnv) (logicalReduce, error) {
-	nestedIdx := input.colIndex(o.NestedName)
-	if nestedIdx < 0 {
+	nestedCol, ok := input.lookupColumn(o.NestedName)
+	if !ok {
 		return logicalReduce{}, fmt.Errorf("reduce: nested column %q not found (did you forget to group first?)", o.NestedName)
 	}
 
-	cols := append([]string(nil), input.columns...)
+	columns := input.cloneColumns()
 	assignments := make([]logicalAssignment, len(o.Assignments))
 	seenTargets := make(map[string]bool, len(o.Assignments))
-	for i, a := range o.Assignments {
+	for _, a := range o.Assignments {
 		if seenTargets[a.Column] {
 			return logicalReduce{}, fmt.Errorf("reduce target %q assigned more than once", a.Column)
 		}
 		seenTargets[a.Column] = true
-		if !containsColumnName(cols, a.Column) {
-			cols = append(cols, a.Column)
-		}
-		assignments[i].name = a.Column
 	}
 
-	nestedColumnSchema := input.rawSchema(nestedIdx)
-	if nestedColumnSchema == nil {
-		nestedColumnSchema = input.finalSchema(nestedIdx)
-	}
+	nestedColumnSchema := nestedCol.column.planningSchema()
 	nestedSchema, err := nestedRecordSchemaForReduce(o.NestedName, nestedColumnSchema)
 	if err != nil {
 		return logicalReduce{}, err
 	}
 
-	schemas := input.rawSchemas()
-	for len(schemas) < len(cols) {
-		schemas = append(schemas, nil)
-	}
 	for i, a := range o.Assignments {
+		var target schemaEnvColumnRef
+		columns, target = upsertEnvColumn(columns, a.Column)
 		planned, err := planLogicalReduceExpr(a.Expr, nestedSchema)
 		if err != nil {
 			return logicalReduce{}, fmt.Errorf("reduce %q: %w", a.Column, err)
 		}
-		assignments[i].expr = planned
-		target := indexOfColumn(cols, a.Column)
-		schemas[target] = finalizePlanningSchema(planned.typ)
+		assignments[i] = logicalAssignment{name: a.Column, expr: planned}
+		columns[target.index].raw = finalizePlanningSchema(planned.typ)
 	}
 
-	outputEnv := schemaEnvFromOwnedColumns(cols, schemas, false)
+	outputEnv := schemaEnvFromKnownUniqueColumns(columns)
 	return logicalReduce{
 		logicalBase:  logicalBaseFromEnv(outputEnv),
 		nestedName:   o.NestedName,
@@ -451,34 +443,28 @@ func planLogicalProjections(opName string, paths [][]string, env schemaEnv) ([]l
 }
 
 func logicalProjectionOutputEnv(projections []logicalPathBinding, raw bool) schemaEnv {
-	cols := make([]string, len(projections))
-	schemas := make([]*table.TypeDescriptor, len(projections))
+	columns := make([]schemaEnvColumn, len(projections))
 	for i, projection := range projections {
-		cols[i] = projection.name
-		schemas[i] = projection.schema
+		typ := projection.schema
+		if !raw {
+			typ = finalizePlanningSchema(typ)
+		}
+		columns[i] = schemaEnvColumn{name: projection.name, raw: typ}
 	}
-	return schemaEnvFromOwnedColumns(cols, schemas, !raw)
+	return schemaEnvFromKnownUniqueColumns(columns)
 }
 
 func countOutputEnv() schemaEnv {
-	return schemaEnvFromOwnedColumns(
-		[]string{"count"},
-		[]*table.TypeDescriptor{{Kind: table.TypeInt}},
-		true,
-	)
+	return schemaEnvFromKnownUniqueColumns([]schemaEnvColumn{{name: "count", raw: &table.TypeDescriptor{Kind: table.TypeInt}}})
 }
 
 func describeOutputEnv() schemaEnv {
-	return schemaEnvFromOwnedColumns(
-		[]string{"column", "type", "row_count", "schema"},
-		[]*table.TypeDescriptor{
-			{Kind: table.TypeString},
-			{Kind: table.TypeString},
-			{Kind: table.TypeInt},
-			{Kind: table.TypeString},
-		},
-		true,
-	)
+	return schemaEnvFromKnownUniqueColumns([]schemaEnvColumn{
+		{name: "column", raw: &table.TypeDescriptor{Kind: table.TypeString}},
+		{name: "type", raw: &table.TypeDescriptor{Kind: table.TypeString}},
+		{name: "row_count", raw: &table.TypeDescriptor{Kind: table.TypeInt}},
+		{name: "schema", raw: &table.TypeDescriptor{Kind: table.TypeString}},
+	})
 }
 
 func planLogicalJoin(o *ast.JoinOp, left schemaEnv, load LoadFunc) (logicalJoin, error) {
@@ -494,20 +480,28 @@ func planLogicalJoin(o *ast.JoinOp, left schemaEnv, load LoadFunc) (logicalJoin,
 		return logicalJoin{}, fmt.Errorf("join: load %q: %w", o.Filename, err)
 	}
 
-	rightEnv := schemaEnvFromTable(right)
+	rightEnv, err := schemaEnvFromTable(right)
+	if err != nil {
+		return logicalJoin{}, fmt.Errorf("join: right schema: %w", err)
+	}
 	leftKeys, rightKeys, err := resolveLogicalJoinKeys(o.Keys, left, rightEnv)
 	if err != nil {
 		return logicalJoin{}, err
 	}
 
-	outCols, outputSources := buildLogicalJoinLayout(left.columns, rightEnv.columns, leftKeys, rightKeys, o.Filename)
+	outCols, outputSources := buildLogicalJoinLayout(left.columnNames(), rightEnv.columnNames(), leftKeys, rightKeys, o.Filename)
 	outSchemas, err := buildLogicalJoinOutputSchemas(left, rightEnv, leftKeys, rightKeys, outputSources, o.Kind)
 	if err != nil {
 		return logicalJoin{}, err
 	}
 
+	outputColumns := make([]schemaEnvColumn, len(outCols))
+	for i := range outCols {
+		outputColumns[i] = schemaEnvColumn{name: outCols[i], raw: outSchemas[i]}
+	}
+	outputEnv := schemaEnvFromKnownUniqueColumns(outputColumns)
 	return logicalJoin{
-		logicalBase:   logicalBaseFromEnv(schemaEnvFromOwnedColumns(outCols, outSchemas, false)),
+		logicalBase:   logicalBaseFromEnv(outputEnv),
 		kind:          o.Kind,
 		filename:      o.Filename,
 		right:         right,
@@ -536,7 +530,7 @@ func resolveLogicalJoinKeys(keys []ast.JoinKey, left, right schemaEnv) ([]logica
 }
 
 func resolveLogicalJoinKeySide(path []string, env schemaEnv, side string) (logicalPathBinding, error) {
-	if env.colIndex(path[0]) < 0 {
+	if _, ok := env.lookupColumn(path[0]); !ok {
 		return logicalPathBinding{}, fmt.Errorf("%s join key column %q not found", side, path[0])
 	}
 	bound, err := bindColumnPathLogicalInEnv(env, path)
@@ -631,11 +625,11 @@ func buildLogicalJoinOutputSchemas(left, right schemaEnv, leftKeys, rightKeys []
 		var schema *table.TypeDescriptor
 		switch source.kind {
 		case logicalJoinOutputLeft:
-			leftIdx := left.colIndex(source.leftName)
-			if leftIdx < 0 {
+			leftCol, ok := left.lookupColumn(source.leftName)
+			if !ok {
 				return nil, fmt.Errorf("join: left output column %q not found", source.leftName)
 			}
-			schema = left.rawSchema(leftIdx)
+			schema = leftCol.column.raw
 			if joinKind == "right" || joinKind == "full" {
 				schema = table.WithNullable(schema)
 			}
@@ -645,11 +639,11 @@ func buildLogicalJoinOutputSchemas(left, right schemaEnv, leftKeys, rightKeys []
 			}
 			schema = keySchemas[source.keyIndex]
 		case logicalJoinOutputRight:
-			rightIdx := right.colIndex(source.rightName)
-			if rightIdx < 0 {
+			rightCol, ok := right.lookupColumn(source.rightName)
+			if !ok {
 				return nil, fmt.Errorf("join: right output column %q not found", source.rightName)
 			}
-			schema = right.rawSchema(rightIdx)
+			schema = rightCol.column.raw
 			if joinKind == "left" || joinKind == "full" {
 				schema = table.WithNullable(schema)
 			}
@@ -838,7 +832,7 @@ func planPhysicalPipelineInto(plan *optimizedLogicalPipeline, out *physicalPipel
 	}
 	current := plan.InputEnv
 	if current.columns == nil {
-		current = schemaEnvFromSchema(plan.InputSchema)
+		current = mustSchemaEnvFromSchema(plan.InputSchema)
 	}
 	ops := make([]plannedOp, 0, len(plan.Ops))
 	output := plan.InputSchema
@@ -946,8 +940,8 @@ func planPhysicalRowSpan(input schemaEnv, o optimizedRowSpan) (plannedRowSpan, e
 func planPhysicalTransform(input schemaEnv, o logicalTransform) (plannedTransform, error) {
 	assignments := make([]plannedTransformAssignment, len(o.assignments))
 	for i, assignment := range o.assignments {
-		target := schemaColumnIndex(o.OutputSchema(), assignment.name)
-		if target < 0 {
+		target, ok := schemaColumnIndex(o.OutputSchema(), assignment.name)
+		if !ok {
 			return plannedTransform{}, fmt.Errorf("transform: target %q missing from output schema", assignment.name)
 		}
 		expr, err := physicalizeTypedExpr(assignment.expr, input)
@@ -972,8 +966,8 @@ func planPhysicalGroup(input schemaEnv, o logicalGroup) (plannedGroup, error) {
 }
 
 func planPhysicalReduce(input schemaEnv, o logicalReduce) (plannedReduce, error) {
-	nestedIdx := input.colIndex(o.nestedName)
-	if nestedIdx < 0 {
+	nestedCol, ok := input.lookupColumn(o.nestedName)
+	if !ok {
 		return plannedReduce{}, fmt.Errorf("reduce: nested column %q not found (did you forget to group first?)", o.nestedName)
 	}
 	nestedEnv, err := envForRecordSchema(o.nestedSchema)
@@ -982,8 +976,8 @@ func planPhysicalReduce(input schemaEnv, o logicalReduce) (plannedReduce, error)
 	}
 	assignments := make([]plannedReduceAssignment, len(o.assignments))
 	for i, assignment := range o.assignments {
-		target := schemaColumnIndex(o.OutputSchema(), assignment.name)
-		if target < 0 {
+		target, ok := schemaColumnIndex(o.OutputSchema(), assignment.name)
+		if !ok {
 			return plannedReduce{}, fmt.Errorf("reduce: target %q missing from output schema", assignment.name)
 		}
 		expr, err := physicalizeTypedExpr(assignment.expr, nestedEnv)
@@ -995,7 +989,7 @@ func planPhysicalReduce(input schemaEnv, o logicalReduce) (plannedReduce, error)
 	return plannedReduce{
 		plannedBase:  plannedBase{output: o.OutputSchema()},
 		nestedName:   o.nestedName,
-		nestedIndex:  nestedIdx,
+		nestedIndex:  nestedCol.index,
 		nestedSchema: o.nestedSchema,
 		assignments:  assignments,
 	}, nil
@@ -1014,8 +1008,8 @@ func planPhysicalGroupReduce(input schemaEnv, o logicalGroupReduce) (plannedGrou
 	assignments := make([]plannedGroupReduceAssignment, len(o.assignments))
 	var slots []plannedAggregateSlot
 	for i, assignment := range o.assignments {
-		target := schemaColumnIndex(o.OutputSchema(), assignment.name)
-		if target < 0 {
+		target, ok := schemaColumnIndex(o.OutputSchema(), assignment.name)
+		if !ok {
 			return plannedGroupReduce{}, fmt.Errorf("reduce: target %q missing from output schema", assignment.name)
 		}
 		expr, err := physicalizeTypedExpr(assignment.expr, input)
@@ -1078,17 +1072,20 @@ func physicalProjectionPlan(input schemaEnv, projections []logicalPathBinding, t
 func physicalKeptIndices(input schemaEnv, kept []string) ([]int, error) {
 	indices := make([]int, len(kept))
 	for i, col := range kept {
-		idx := input.colIndex(col)
-		if idx < 0 {
+		inputCol, ok := input.lookupColumn(col)
+		if !ok {
 			return nil, fmt.Errorf("remove: kept column %q not found", col)
 		}
-		indices[i] = idx
+		indices[i] = inputCol.index
 	}
 	return indices, nil
 }
 
 func planPhysicalJoin(input schemaEnv, o logicalJoin) (plannedJoin, error) {
-	rightEnv := schemaEnvFromTable(o.right)
+	rightEnv, err := schemaEnvFromTable(o.right)
+	if err != nil {
+		return plannedJoin{}, fmt.Errorf("join: right schema: %w", err)
+	}
 	leftKeys, rightKeys, err := physicalizeJoinKeys(input, rightEnv, o.leftKeys, o.rightKeys)
 	if err != nil {
 		return plannedJoin{}, err
@@ -1119,22 +1116,22 @@ func physicalJoinOutputs(left, right schemaEnv, o logicalJoin) ([]plannedJoinOut
 		}
 		switch source.kind {
 		case logicalJoinOutputLeft:
-			idx := left.colIndex(source.leftName)
-			if idx < 0 {
+			leftCol, ok := left.lookupColumn(source.leftName)
+			if !ok {
 				return nil, fmt.Errorf("join: left output column %q not found after optimization", source.leftName)
 			}
-			outputs[i] = plannedJoinOutput{kind: plannedJoinOutputLeft, leftIndex: idx}
+			outputs[i] = plannedJoinOutput{kind: plannedJoinOutputLeft, leftIndex: leftCol.index}
 		case logicalJoinOutputKey:
 			if source.keyIndex < 0 || source.keyIndex >= len(o.leftKeys) {
 				return nil, fmt.Errorf("join: key output %q has invalid key index %d", source.name, source.keyIndex)
 			}
 			outputs[i] = plannedJoinOutput{kind: plannedJoinOutputKey, keyIndex: source.keyIndex}
 		case logicalJoinOutputRight:
-			idx := right.colIndex(source.rightName)
-			if idx < 0 {
+			rightCol, ok := right.lookupColumn(source.rightName)
+			if !ok {
 				return nil, fmt.Errorf("join: right output column %q not found", source.rightName)
 			}
-			outputs[i] = plannedJoinOutput{kind: plannedJoinOutputRight, rightIndex: idx}
+			outputs[i] = plannedJoinOutput{kind: plannedJoinOutputRight, rightIndex: rightCol.index}
 		default:
 			return nil, fmt.Errorf("join: output %q has unknown source kind", source.name)
 		}
@@ -1305,22 +1302,13 @@ func clonePath(path []string) []string {
 	return append([]string(nil), path...)
 }
 
-func indexOfColumn(cols []string, name string) int {
-	for i, col := range cols {
-		if col == name {
-			return i
-		}
-	}
-	return -1
-}
-
-func schemaColumnIndex(schema table.Schema, name string) int {
+func schemaColumnIndex(schema table.Schema, name string) (int, bool) {
 	for i, col := range schema.Columns {
 		if col.Name == name {
-			return i
+			return i, true
 		}
 	}
-	return -1
+	return 0, false
 }
 
 func samePlanningSchema(a, b *table.TypeDescriptor) bool {

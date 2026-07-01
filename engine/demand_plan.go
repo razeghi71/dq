@@ -2,7 +2,6 @@ package engine
 
 import (
 	"fmt"
-	"reflect"
 
 	"github.com/razeghi71/dq/table"
 )
@@ -28,7 +27,7 @@ func (d columnDemand) has(name string) bool {
 }
 
 func (d *columnDemand) add(name string) {
-	if d.all || name == "" {
+	if d.all {
 		return
 	}
 	if d.columns == nil {
@@ -182,8 +181,8 @@ func demandSameNames(input schemaEnv, out columnDemand) columnDemand {
 	}
 	in := demandNoColumns()
 	for _, col := range input.columns {
-		if out.has(col) {
-			in.add(col)
+		if out.has(col.name) {
+			in.add(col.name)
 		}
 	}
 	return in
@@ -197,15 +196,15 @@ func demandForTransformInput(op logicalTransform, input schemaEnv, out columnDem
 	assignments := logicalAssignmentsByName(op.assignments)
 	in := demandNoColumns()
 	for _, col := range logicalOutputEnv(op).columns {
-		if !out.has(col) {
+		if !out.has(col.name) {
 			continue
 		}
-		if assignment, ok := assignments[col]; ok {
+		if assignment, ok := assignments[col.name]; ok {
 			in.addExpr(assignment.expr)
 			continue
 		}
-		if input.colIndex(col) >= 0 {
-			in.add(col)
+		if _, ok := input.lookupColumn(col.name); ok {
+			in.add(col.name)
 		}
 	}
 	return in
@@ -228,7 +227,7 @@ func demandForGroupReduceInput(op logicalGroupReduce, out columnDemand) columnDe
 }
 
 func groupReducePayloadDemanded(op logicalGroupReduce, out columnDemand) bool {
-	if logicalAssignmentTargetExists(op.assignments, op.nestedName) {
+	if logicalAssignmentNameExists(op.assignments, op.nestedName) {
 		return false
 	}
 	return out.all || out.has(op.nestedName)
@@ -240,8 +239,8 @@ func demandForRenameInput(input, output schemaEnv, out columnDemand) columnDeman
 	}
 	in := demandNoColumns()
 	for i, col := range output.columns {
-		if i < len(input.columns) && out.has(col) {
-			in.add(input.columns[i])
+		if inputCol, ok := input.columnAt(i); ok && out.has(col.name) {
+			in.add(inputCol.column.name)
 		}
 	}
 	return in
@@ -297,12 +296,12 @@ func sourceOutputColumnsForDemand(input schemaEnv, existing table.ColumnSelectio
 		if existing.IsAll() {
 			return table.AllColumns()
 		}
-		return table.SelectedColumns(input.columns...)
+		return table.SelectedColumns(input.columnNames()...)
 	}
 	cols := make([]string, 0, len(input.columns))
 	for _, col := range input.columns {
-		if demand.has(col) {
-			cols = append(cols, col)
+		if demand.has(col.name) {
+			cols = append(cols, col.name)
 		}
 	}
 	return table.SelectedColumns(cols...)
@@ -362,19 +361,15 @@ func rewriteLogicalTransformForDemand(op logicalTransform, input schemaEnv, out 
 		return nil, input, false, nil
 	}
 
-	cols := append([]string(nil), input.columns...)
-	schemas := input.rawSchemas()
-	for _, assignment := range assignments {
-		target := indexOfColumn(cols, assignment.name)
+	columns := input.cloneColumns()
+	for i := range assignments {
+		assignment := assignments[i]
+		var target schemaEnvColumnRef
+		columns, target = upsertEnvColumn(columns, assignment.name)
 		schema := finalizePlanningSchema(assignment.expr.typ)
-		if target >= 0 {
-			schemas[target] = schema
-			continue
-		}
-		cols = append(cols, assignment.name)
-		schemas = append(schemas, schema)
+		columns[target.index].raw = schema
 	}
-	env := schemaEnvFromOwnedColumns(cols, schemas, false)
+	env := schemaEnvFromKnownUniqueColumns(columns)
 	return logicalTransform{
 		logicalBase: logicalBaseFromEnv(env),
 		assignments: assignments,
@@ -391,15 +386,13 @@ func rewriteLogicalGroupReduceForDemand(op logicalGroupReduce, out columnDemand)
 	}
 
 	original := logicalOutputEnv(op)
-	cols := make([]string, 0, len(original.columns))
-	schemas := make([]*table.TypeDescriptor, 0, len(original.columns))
-	for i, col := range original.columns {
-		if out.all || out.has(col) {
-			cols = append(cols, col)
-			schemas = append(schemas, original.rawSchema(i))
+	columns := make([]schemaEnvColumn, 0, len(original.columns))
+	for _, col := range original.columns {
+		if out.all || out.has(col.name) {
+			columns = append(columns, col)
 		}
 	}
-	env := schemaEnvFromOwnedColumns(cols, schemas, false)
+	env := schemaEnvFromKnownUniqueColumns(columns)
 	return logicalGroupReduce{
 		logicalBase:       logicalBaseFromEnv(env),
 		keys:              op.keys,
@@ -438,21 +431,20 @@ func rewriteLogicalRenameForDemand(op logicalRename, originalInput, currentInput
 	originalOutput := logicalOutputEnv(op)
 	renamedByInput := make(map[string]string, len(originalInput.columns))
 	for i, col := range originalInput.columns {
-		if i < len(originalOutput.columns) {
-			renamedByInput[col] = originalOutput.columns[i]
+		if outCol, ok := originalOutput.columnAt(i); ok {
+			renamedByInput[col.name] = outCol.column.name
 		}
 	}
-	cols := make([]string, len(currentInput.columns))
-	schemas := currentInput.rawSchemas()
+	columns := currentInput.cloneColumns()
 	for i, col := range currentInput.columns {
-		next := renamedByInput[col]
-		if next == "" {
-			next = col
+		next, ok := renamedByInput[col.name]
+		if !ok {
+			next = col.name
 		}
-		cols[i] = next
+		columns[i].name = next
 	}
-	env := schemaEnvFromOwnedColumns(cols, schemas, false)
-	if reflect.DeepEqual(cols, currentInput.columns) {
+	env := schemaEnvFromKnownUniqueColumns(columns)
+	if schemaEnvColumnNamesEqual(env, currentInput) {
 		return nil, currentInput, false, nil
 	}
 	return logicalRename{logicalBase: logicalBaseFromEnv(env)}, env, true, nil
@@ -463,19 +455,17 @@ func rewriteLogicalRemoveForDemand(op logicalRemove, input schemaEnv) (logicalOp
 	for _, col := range op.kept {
 		keptSet[col] = true
 	}
-	cols := make([]string, 0, len(input.columns))
-	schemas := make([]*table.TypeDescriptor, 0, len(input.columns))
-	for i, col := range input.columns {
-		if keptSet[col] {
-			cols = append(cols, col)
-			schemas = append(schemas, input.rawSchema(i))
+	columns := make([]schemaEnvColumn, 0, len(input.columns))
+	for _, col := range input.columns {
+		if keptSet[col.name] {
+			columns = append(columns, col)
 		}
 	}
-	env := schemaEnvFromOwnedColumns(cols, schemas, false)
-	if reflect.DeepEqual(cols, input.columns) {
+	env := schemaEnvFromKnownUniqueColumns(columns)
+	if schemaEnvColumnNamesEqual(env, input) {
 		return nil, input, false, nil
 	}
-	return logicalRemove{logicalBase: logicalBaseFromEnv(env), kept: cols}, env, true, nil
+	return logicalRemove{logicalBase: logicalBaseFromEnv(env), kept: env.columnNames()}, env, true, nil
 }
 
 func rewriteLogicalDistinctForDemand(op logicalDistinct, input schemaEnv) (logicalOp, schemaEnv, bool, error) {
@@ -496,17 +486,15 @@ func rewriteLogicalJoinForDemand(op logicalJoin, out columnDemand) (logicalOp, s
 	if len(op.outputSources) != len(original.columns) {
 		return nil, schemaEnv{}, false, fmt.Errorf("demand pruning: join output source count mismatch")
 	}
-	cols := make([]string, 0, len(original.columns))
-	schemas := make([]*table.TypeDescriptor, 0, len(original.columns))
+	columns := make([]schemaEnvColumn, 0, len(original.columns))
 	sources := make([]logicalJoinOutputSource, 0, len(original.columns))
 	for i, col := range original.columns {
-		if out.all || out.has(col) {
-			cols = append(cols, col)
-			schemas = append(schemas, original.rawSchema(i))
+		if out.all || out.has(col.name) {
+			columns = append(columns, col)
 			sources = append(sources, op.outputSources[i])
 		}
 	}
-	env := schemaEnvFromOwnedColumns(cols, schemas, false)
+	env := schemaEnvFromKnownUniqueColumns(columns)
 	return logicalJoin{
 		logicalBase:   logicalBaseFromEnv(env),
 		kind:          op.kind,
@@ -523,7 +511,8 @@ func selectIsIdentityForEnv(projections []logicalPathBinding, env schemaEnv) boo
 		return false
 	}
 	for i, projection := range projections {
-		if len(projection.path) != 1 || projection.path[0] != env.columns[i] || projection.name != env.columns[i] {
+		name := env.columns[i].name
+		if len(projection.path) != 1 || projection.path[0] != name || projection.name != name {
 			return false
 		}
 	}
@@ -538,7 +527,7 @@ func logicalAssignmentsByName(assignments []logicalAssignment) map[string]logica
 	return out
 }
 
-func logicalAssignmentTargetExists(assignments []logicalAssignment, name string) bool {
+func logicalAssignmentNameExists(assignments []logicalAssignment, name string) bool {
 	for _, assignment := range assignments {
 		if assignment.name == name {
 			return true

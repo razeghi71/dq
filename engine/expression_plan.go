@@ -172,121 +172,186 @@ type logicalTypedStructField struct {
 }
 
 type schemaEnv struct {
-	columns []string
-	raw     []*table.TypeDescriptor
-	final   []*table.TypeDescriptor
+	columns []schemaEnvColumn
+	index   map[string]int
 }
 
-func schemaEnvFromTable(t *table.Table) schemaEnv {
+type schemaEnvColumn struct {
+	name string
+	raw  *table.TypeDescriptor
+}
+
+type schemaEnvColumnRef struct {
+	index  int
+	column schemaEnvColumn
+}
+
+const schemaEnvIndexColumnThreshold = 16
+
+func schemaEnvFromTable(t *table.Table) (schemaEnv, error) {
 	if t == nil {
-		return schemaEnv{}
+		return schemaEnv{}, nil
 	}
-	env := schemaEnv{
-		columns: append([]string(nil), t.Columns...),
-		raw:     make([]*table.TypeDescriptor, len(t.Columns)),
-		final:   make([]*table.TypeDescriptor, len(t.Columns)),
-	}
+	columns := make([]schemaEnvColumn, len(t.Columns))
 	for i := range t.Columns {
+		columns[i].name = t.Columns[i]
 		col := t.Col(i)
 		if col == nil {
 			continue
 		}
-		env.raw[i] = col.RawSchema()
-		env.final[i] = col.Schema()
-		if env.raw[i] == nil {
-			env.raw[i] = env.final[i]
+		columns[i].raw = col.RawSchema()
+		if columns[i].raw == nil {
+			columns[i].raw = col.Schema()
 		}
 	}
-	return env
+	return newSchemaEnv(columns)
 }
 
-func schemaEnvFromSchema(schema table.Schema) schemaEnv {
-	env := schemaEnv{
-		columns: make([]string, len(schema.Columns)),
-		raw:     make([]*table.TypeDescriptor, len(schema.Columns)),
-	}
+func mustSchemaEnvFromTable(t *table.Table) schemaEnv {
+	return mustSchemaEnv(schemaEnvFromTable(t))
+}
+
+func schemaEnvFromSchema(schema table.Schema) (schemaEnv, error) {
+	columns := make([]schemaEnvColumn, len(schema.Columns))
 	for i, col := range schema.Columns {
-		env.columns[i] = col.Name
-		env.raw[i] = normalizePlanningSchema(col.Type)
+		columns[i] = schemaEnvColumn{name: col.Name, raw: normalizePlanningSchema(col.Type)}
+	}
+	return newSchemaEnv(columns)
+}
+
+func mustSchemaEnvFromSchema(schema table.Schema) schemaEnv {
+	return mustSchemaEnv(schemaEnvFromSchema(schema))
+}
+
+// schemaEnvFromKnownUniqueColumns builds an unchecked, unindexed environment
+// from planner-derived columns whose names have already been proven unique.
+// The optional index is only a lookup cache; derived envs skip it unless a
+// caller has enough immediate lookups to repay the map allocation.
+func schemaEnvFromKnownUniqueColumns(columns []schemaEnvColumn) schemaEnv {
+	return schemaEnv{columns: columns}
+}
+
+func mustSchemaEnv(env schemaEnv, err error) schemaEnv {
+	if err != nil {
+		panic(fmt.Sprintf("invalid schema environment: %v", err))
 	}
 	return env
 }
 
-// schemaEnvFromOwnedColumns normalizes schemas in place and keeps the supplied
-// slices. Callers must pass slices they own; use schemaEnvFromSchema when a
-// defensive copy is needed.
-func schemaEnvFromOwnedColumns(columns []string, schemas []*table.TypeDescriptor, final bool) schemaEnv {
-	for i := range columns {
-		var typ *table.TypeDescriptor
-		if i < len(schemas) {
-			typ = normalizePlanningSchema(schemas[i])
-			if final {
-				typ = finalizePlanningSchema(typ)
+func newSchemaEnv(columns []schemaEnvColumn) (schemaEnv, error) {
+	index, err := schemaEnvIndex(columns)
+	if err != nil {
+		return schemaEnv{}, err
+	}
+	return schemaEnv{columns: columns, index: index}, nil
+}
+
+func schemaEnvIndex(columns []schemaEnvColumn) (map[string]int, error) {
+	if len(columns) < schemaEnvIndexColumnThreshold {
+		return nil, schemaEnvValidateColumnsByScan(columns)
+	}
+	index := make(map[string]int, len(columns))
+	for i, col := range columns {
+		if _, exists := index[col.name]; exists {
+			return nil, fmt.Errorf("duplicate column name %q", col.name)
+		}
+		index[col.name] = i
+	}
+	return index, nil
+}
+
+func schemaEnvValidateColumnsByScan(columns []schemaEnvColumn) error {
+	for i, col := range columns {
+		for j := 0; j < i; j++ {
+			if columns[j].name == col.name {
+				return fmt.Errorf("duplicate column name %q", col.name)
 			}
-			schemas[i] = typ
 		}
 	}
-	return schemaEnv{columns: columns, raw: schemas}
+	return nil
 }
 
-func (e schemaEnv) colIndex(name string) int {
+func (e schemaEnv) lookupColumn(name string) (schemaEnvColumnRef, bool) {
+	if e.index != nil {
+		if i, ok := e.index[name]; ok {
+			return schemaEnvColumnRef{index: i, column: e.columns[i]}, true
+		}
+		return schemaEnvColumnRef{}, false
+	}
 	for i, col := range e.columns {
-		if col == name {
-			return i
+		if col.name == name {
+			return schemaEnvColumnRef{index: i, column: col}, true
 		}
 	}
-	return -1
+	return schemaEnvColumnRef{}, false
 }
 
-func (e schemaEnv) rawSchema(i int) *table.TypeDescriptor {
-	if i < 0 || i >= len(e.raw) {
-		return nil
-	}
-	return e.raw[i]
-}
-
-func (e schemaEnv) finalSchema(i int) *table.TypeDescriptor {
+func (e schemaEnv) columnAt(i int) (schemaEnvColumnRef, bool) {
 	if i < 0 || i >= len(e.columns) {
-		return nil
+		return schemaEnvColumnRef{}, false
 	}
-	if i >= len(e.final) {
-		return finalizePlanningSchema(e.rawSchema(i))
+	return schemaEnvColumnRef{index: i, column: e.columns[i]}, true
+}
+
+func (c schemaEnvColumn) planningSchema() *table.TypeDescriptor {
+	if c.raw != nil {
+		return c.raw
 	}
-	if e.final[i] == nil {
-		raw := e.rawSchema(i)
-		if raw == nil {
-			return nil
-		}
-		// schemaEnv is intentionally passed by value throughout planning, but
-		// the final slice's backing array is shared. This memoizes finalized
-		// schemas without copying the environment on every lookup; planning is
-		// single-threaded.
-		e.final[i] = finalizePlanningSchema(raw)
-	}
-	return e.final[i]
+	return c.finalSchema()
+}
+
+func (c schemaEnvColumn) finalSchema() *table.TypeDescriptor {
+	return finalizePlanningSchema(c.raw)
 }
 
 func (e schemaEnv) schema() table.Schema {
 	columns := make([]table.SchemaColumn, len(e.columns))
-	for i, name := range e.columns {
-		typ := e.rawSchema(i)
-		if typ == nil {
-			typ = e.finalSchema(i)
-		}
-		columns[i] = table.SchemaColumn{Name: name, Type: typ}
+	for i, col := range e.columns {
+		columns[i] = table.SchemaColumn{Name: col.name, Type: col.planningSchema()}
 	}
 	return table.Schema{Columns: columns}
 }
 
-func (e schemaEnv) rawSchemas() []*table.TypeDescriptor {
-	schemas := make([]*table.TypeDescriptor, len(e.columns))
+func (e schemaEnv) columnNames() []string {
+	columns := make([]string, len(e.columns))
 	for i := range e.columns {
-		schemas[i] = e.rawSchema(i)
-		if schemas[i] == nil {
-			schemas[i] = e.finalSchema(i)
+		columns[i] = e.columns[i].name
+	}
+	return columns
+}
+
+func (e schemaEnv) cloneColumns() []schemaEnvColumn {
+	return append([]schemaEnvColumn(nil), e.columns...)
+}
+
+func schemaEnvColumnNamesEqual(a, b schemaEnv) bool {
+	if len(a.columns) != len(b.columns) {
+		return false
+	}
+	for i := range a.columns {
+		if a.columns[i].name != b.columns[i].name {
+			return false
 		}
 	}
-	return schemas
+	return true
+}
+
+func findEnvColumn(columns []schemaEnvColumn, name string) (schemaEnvColumnRef, bool) {
+	for i, col := range columns {
+		if col.name == name {
+			return schemaEnvColumnRef{index: i, column: col}, true
+		}
+	}
+	return schemaEnvColumnRef{}, false
+}
+
+func upsertEnvColumn(columns []schemaEnvColumn, name string) ([]schemaEnvColumn, schemaEnvColumnRef) {
+	if col, ok := findEnvColumn(columns, name); ok {
+		return columns, col
+	}
+	index := len(columns)
+	columns = append(columns, schemaEnvColumn{name: name})
+	return columns, schemaEnvColumnRef{index: index, column: columns[index]}
 }
 
 func normalizePlanningSchema(schema *table.TypeDescriptor) *table.TypeDescriptor {
@@ -445,14 +510,11 @@ func resolveColumnPathInEnv(env schemaEnv, path []string) (int, *table.TypeDescr
 	if len(path) == 0 {
 		return -1, nil, fmt.Errorf("empty column path")
 	}
-	idx := env.colIndex(path[0])
-	if idx < 0 {
-		return -1, nil, columnNotFoundError(path[0], env.columns)
+	col, ok := env.lookupColumn(path[0])
+	if !ok {
+		return -1, nil, columnNotFoundError(path[0], env.columnNames())
 	}
-	typ := env.rawSchema(idx)
-	if typ == nil {
-		typ = env.finalSchema(idx)
-	}
+	typ := col.column.planningSchema()
 	parentNullable := false
 	for _, seg := range path[1:] {
 		if typ == nil {
@@ -487,7 +549,7 @@ func resolveColumnPathInEnv(env schemaEnv, path []string) (int, *table.TypeDescr
 	if parentNullable {
 		typ = table.WithNullable(typ)
 	}
-	return idx, typ, nil
+	return col.index, typ, nil
 }
 
 func bindLogicalReduceExpression(expr ast.Expr, nestedSchema *table.TypeDescriptor) (logicalBoundExpr, error) {
@@ -577,14 +639,13 @@ func envForRecordSchema(schema *table.TypeDescriptor) (schemaEnv, error) {
 	if rec.Kind != table.TypeRecord {
 		return schemaEnv{}, fmt.Errorf("nested row schema must be a record, got %s", rec.String())
 	}
-	env := schemaEnv{
-		columns: make([]string, len(rec.Fields)),
-		raw:     make([]*table.TypeDescriptor, len(rec.Fields)),
-		final:   make([]*table.TypeDescriptor, len(rec.Fields)),
-	}
+	columns := make([]schemaEnvColumn, len(rec.Fields))
 	for i, field := range rec.Fields {
-		env.columns[i] = field.Name
-		env.raw[i] = normalizePlanningSchema(field.Type)
+		columns[i] = schemaEnvColumn{name: field.Name, raw: normalizePlanningSchema(field.Type)}
+	}
+	env, err := newSchemaEnv(columns)
+	if err != nil {
+		return schemaEnv{}, fmt.Errorf("nested row schema: %w", err)
 	}
 	return env, nil
 }

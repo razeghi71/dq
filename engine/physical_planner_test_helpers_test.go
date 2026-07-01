@@ -16,7 +16,11 @@ type pipelinePlan struct {
 }
 
 func planLogicalPipeline(input table.Schema, ops []ast.Op, load LoadFunc) (*logicalPipeline, error) {
-	return planLogicalPipelineInEnv(schemaEnvFromSchema(input), ops, load)
+	env, err := schemaEnvFromSchema(input)
+	if err != nil {
+		return nil, err
+	}
+	return planLogicalPipelineInEnv(env, ops, load)
 }
 
 func optimizeLogicalPipeline(plan *logicalPipeline) (*optimizedLogicalPipeline, error) {
@@ -76,16 +80,20 @@ func validatePlanInputTableSchema(want table.Schema, got *table.Table) error {
 		}
 		return fmt.Errorf("execute plan: input schema column count mismatch: planned %d columns, got 0", len(want.Columns))
 	}
-	env := schemaEnvFromTable(got)
+	env, err := schemaEnvFromTable(got)
+	if err != nil {
+		return err
+	}
 	if len(want.Columns) != len(env.columns) {
 		return fmt.Errorf("execute plan: input schema column count mismatch: planned %d columns, got %d", len(want.Columns), len(env.columns))
 	}
 	for i := range want.Columns {
 		w := want.Columns[i]
-		if w.Name != env.columns[i] {
-			return fmt.Errorf("execute plan: input schema column %d mismatch: planned %q, got %q", i, w.Name, env.columns[i])
+		gotCol := env.columns[i]
+		if w.Name != gotCol.name {
+			return fmt.Errorf("execute plan: input schema column %d mismatch: planned %q, got %q", i, w.Name, gotCol.name)
 		}
-		gotSchema := env.rawSchema(i)
+		gotSchema := gotCol.raw
 		if !table.Same(w.Type, gotSchema) {
 			return fmt.Errorf("execute plan: input schema for column %q mismatch: planned %s, got %s", w.Name, table.Render(w.Type), table.Render(gotSchema))
 		}
@@ -130,19 +138,27 @@ func planPhysicalPipelineFromTableWithLoadForTest(input *table.Table, ops []ast.
 }
 
 func planPhysicalFilterExprForTest(expr ast.Expr, t *table.Table) (typedExpr, error) {
-	typed, err := planLogicalFilterExprInEnv(expr, schemaEnvFromTable(t))
+	env, err := schemaEnvFromTable(t)
 	if err != nil {
 		return typedExpr{}, err
 	}
-	return physicalizeTypedExpr(typed, schemaEnvFromTable(t))
+	typed, err := planLogicalFilterExprInEnv(expr, env)
+	if err != nil {
+		return typedExpr{}, err
+	}
+	return physicalizeTypedExpr(typed, env)
 }
 
 func planPhysicalTransformExprForTest(expr ast.Expr, t *table.Table) (typedExpr, error) {
-	typed, err := planLogicalTransformExprInEnv(expr, schemaEnvFromTable(t))
+	env, err := schemaEnvFromTable(t)
 	if err != nil {
 		return typedExpr{}, err
 	}
-	return physicalizeTypedExpr(typed, schemaEnvFromTable(t))
+	typed, err := planLogicalTransformExprInEnv(expr, env)
+	if err != nil {
+		return typedExpr{}, err
+	}
+	return physicalizeTypedExpr(typed, env)
 }
 
 func planPhysicalReduceExprForTest(expr ast.Expr, nestedSchema *table.TypeDescriptor) (typedExpr, error) {

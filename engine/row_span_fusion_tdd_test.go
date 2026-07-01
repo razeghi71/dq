@@ -130,6 +130,15 @@ func TestRowSpanFusionTDDPhysicalPlannerLowersSpanAndBindsSequentialEnvironments
 	}
 }
 
+func TestRowSpanFusionTDDEmptySpanConstructorsRejectInvalidState(t *testing.T) {
+	if _, err := newOptimizedRowSpan(nil); err == nil || !strings.Contains(err.Error(), "empty logical span") {
+		t.Fatalf("empty optimized row span error: got %v", err)
+	}
+	if _, err := newPlannedRowSpan(nil); err == nil || !strings.Contains(err.Error(), "empty physical span") {
+		t.Fatalf("empty planned row span error: got %v", err)
+	}
+}
+
 func TestRowSpanFusionTDDSchemaBoundaryErrorsStillHappenBeforeFusion(t *testing.T) {
 	cases := []struct {
 		name     string

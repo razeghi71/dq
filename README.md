@@ -124,6 +124,14 @@ dq 'users.csv | transform age2 = age + 1 | select age2'       # age2 is availabl
 dq 'users.csv | group city | reduce n = count() | select n'   # reduce output is available downstream
 ```
 
+Column names are resolved from the current ordered schema. Duplicate top-level source columns are rejected before planning because a name such as `id` would otherwise not identify one column unambiguously; duplicate projections still get stable public names such as `city` and `city_2`:
+
+```bash
+dq 'users.csv | select city, city | describe'
+# city
+# city_2
+```
+
 When reading a single file source, `dq` reads only the columns needed by the whole query. That includes columns used by filters, sort keys, join keys, grouping keys, aggregate inputs, downstream join outputs, and transform assignments whose outputs are used. Join column names stay the same as they would without source pruning, including right-side prefixes for name collisions; add an explicit `select` before a join when you want to change that public join schema:
 
 ```bash

@@ -746,8 +746,8 @@ func TestSourceProjectionTDDSourceOutputEnvFallsBackToFinalSchema(t *testing.T) 
 	if !ok {
 		t.Fatal("expected source output env for nil raw schema")
 	}
-	if len(env.columns) != 1 || env.columns[0] != "id" {
-		t.Fatalf("columns: got %v, want [id]", env.columns)
+	if len(env.columns) != 1 || env.columns[0].name != "id" {
+		t.Fatalf("columns: got %v, want [id]", env.columnNames())
 	}
 }
 

@@ -260,58 +260,58 @@ func containsColumnName(cols []string, name string) bool {
 	return false
 }
 
-func planRenameColumns(o *ast.RenameOp, input schemaEnv) ([]string, error) {
-	cols := make([]string, len(input.columns))
-	copy(cols, input.columns)
+func planRenameColumns(o *ast.RenameOp, input schemaEnv) ([]schemaEnvColumn, error) {
+	columns := input.cloneColumns()
 
 	renamed := make(map[int]bool, len(o.Pairs))
 	for _, pair := range o.Pairs {
-		idx := input.colIndex(pair.Old)
-		if idx < 0 {
+		col, ok := input.lookupColumn(pair.Old)
+		if !ok {
 			return nil, fmt.Errorf("rename: column %q not found", pair.Old)
 		}
+		idx := col.index
 		if renamed[idx] {
 			return nil, fmt.Errorf("rename: column %q renamed more than once", pair.Old)
 		}
 		renamed[idx] = true
-		cols[idx] = pair.New
+		columns[idx].name = pair.New
 	}
 
-	seen := make(map[string]bool, len(cols))
-	for _, col := range cols {
-		if seen[col] {
-			return nil, fmt.Errorf("rename: duplicate column name %q in result; pick a unique name", col)
+	seen := make(map[string]bool, len(columns))
+	for _, col := range columns {
+		if seen[col.name] {
+			return nil, fmt.Errorf("rename: duplicate column name %q in result; pick a unique name", col.name)
 		}
-		seen[col] = true
+		seen[col.name] = true
 	}
-	return cols, nil
+	return columns, nil
 }
 
-func planRemoveColumns(o *ast.RemoveOp, input schemaEnv) ([]string, []int, []*table.TypeDescriptor, error) {
+func planRemoveColumns(o *ast.RemoveOp, input schemaEnv) ([]schemaEnvColumn, []int, []string, error) {
 	removeSet := make(map[string]bool, len(o.Columns))
 	for _, path := range o.Columns {
 		if len(path) != 1 {
 			return nil, nil, nil, fmt.Errorf("remove: dot paths not supported, got %q", strings.Join(path, "."))
 		}
 		col := path[0]
-		if input.colIndex(col) < 0 {
+		if _, ok := input.lookupColumn(col); !ok {
 			return nil, nil, nil, fmt.Errorf("remove: column %q not found", col)
 		}
 		removeSet[col] = true
 	}
 
-	cols := make([]string, 0, len(input.columns))
+	columns := make([]schemaEnvColumn, 0, len(input.columns))
 	indices := make([]int, 0, len(input.columns))
-	schemas := make([]*table.TypeDescriptor, 0, len(input.columns))
+	kept := make([]string, 0, len(input.columns))
 	for i, col := range input.columns {
-		if removeSet[col] {
+		if removeSet[col.name] {
 			continue
 		}
-		cols = append(cols, col)
+		columns = append(columns, col)
 		indices = append(indices, i)
-		schemas = append(schemas, input.rawSchema(i))
+		kept = append(kept, col.name)
 	}
-	return cols, indices, schemas, nil
+	return columns, indices, kept, nil
 }
 
 func tableFromOutputSchema(schema table.Schema) *table.Table {
