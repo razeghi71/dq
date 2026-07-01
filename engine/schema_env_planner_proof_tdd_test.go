@@ -261,7 +261,7 @@ func schemaEnvPlannerProofTDDPhysicalPlan(t *testing.T, input table.Schema, pipe
 
 func schemaEnvPlannerProofTDDPhysicalPlanInEnv(t *testing.T, input schemaEnv, pipeline string, load LoadFunc) *physicalPipeline {
 	t.Helper()
-	logical, err := planLogicalPipelineInEnv(input, parseSimplePlannerOps(t, pipeline), load)
+	logical, err := planLogicalPipelineInEnv(input, parseSimplePlannerOps(t, pipeline), newLoadFuncJoinSourceProvider(load))
 	if err != nil {
 		t.Fatalf("plan logical pipeline %q: %v", pipeline, err)
 	}

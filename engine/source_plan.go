@@ -27,6 +27,59 @@ type SourceLoadFunc func(filename string, opts ast.LoadOptions, spec SourceLoadS
 
 type SourceStreamFunc func(filename string, opts ast.LoadOptions, spec SourceLoadSpec) (rowstream.Stream, error)
 
+type JoinSourceLoadSpec struct {
+	Columns table.ColumnSelection
+}
+
+type JoinSourceLoadFunc func(JoinSourceLoadSpec) (*table.Table, error)
+
+type PreparedJoinSource struct {
+	filename string
+	schema   table.Schema
+	loadSpec JoinSourceLoadFunc
+}
+
+func NewPreparedJoinSource(filename string, schema table.Schema, loadSpec JoinSourceLoadFunc) (PreparedJoinSource, error) {
+	return newPreparedJoinSourceFromSnapshot(filename, cloneTableSchema(schema), loadSpec)
+}
+
+func newPreparedJoinSourceFromSnapshot(filename string, schema table.Schema, loadSpec JoinSourceLoadFunc) (PreparedJoinSource, error) {
+	if loadSpec == nil {
+		return PreparedJoinSource{}, fmt.Errorf("prepared join source %q is not loadable", filename)
+	}
+	return PreparedJoinSource{filename: filename, schema: schema, loadSpec: loadSpec}, nil
+}
+
+func (s PreparedJoinSource) Filename() string {
+	return s.filename
+}
+
+func (s PreparedJoinSource) Schema() table.Schema {
+	return cloneTableSchema(s.schema)
+}
+
+func (s PreparedJoinSource) planningSchema() table.Schema {
+	return s.schema
+}
+
+func (s PreparedJoinSource) Load(spec JoinSourceLoadSpec) (*table.Table, error) {
+	return s.loadSpec(spec)
+}
+
+type JoinSourceProvider interface {
+	PrepareJoinSource(filename string, opts ast.LoadOptions) (PreparedJoinSource, error)
+}
+
+func cloneTableSchema(schema table.Schema) table.Schema {
+	names := make([]string, len(schema.Columns))
+	types := make([]*table.TypeDescriptor, len(schema.Columns))
+	for i, col := range schema.Columns {
+		names[i] = col.Name
+		types[i] = col.Type
+	}
+	return table.NewSchema(names, types)
+}
+
 type logicalSource struct {
 	filename        string
 	load            ast.LoadOptions
@@ -46,11 +99,11 @@ type physicalSource struct {
 	spec     SourceLoadSpec
 }
 
-func ExecuteSourceQuery(query *ast.Query, source SourceInfo, loadSource SourceLoadFunc, loadJoin LoadFunc) (*table.Table, error) {
+func ExecuteSourceQuery(query *ast.Query, source SourceInfo, loadSource SourceLoadFunc, joinSources JoinSourceProvider) (*table.Table, error) {
 	if loadSource == nil {
 		return nil, fmt.Errorf("source loader not configured")
 	}
-	physical, err := planPhysicalSourceQuery(query, source, loadJoin)
+	physical, err := planPhysicalSourceQuery(query, source, joinSources)
 	if err != nil {
 		return nil, err
 	}
@@ -64,19 +117,19 @@ func ExecuteSourceQuery(query *ast.Query, source SourceInfo, loadSource SourceLo
 	return executePlannedOps(physical.Ops, input)
 }
 
-func ExecuteSourceStreamQuery(query *ast.Query, source SourceInfo, streamSource SourceStreamFunc, loadJoin LoadFunc) (*table.Table, error) {
+func ExecuteSourceStreamQuery(query *ast.Query, source SourceInfo, streamSource SourceStreamFunc, joinSources JoinSourceProvider) (*table.Table, error) {
 	if streamSource == nil {
 		return nil, fmt.Errorf("source stream loader not configured")
 	}
-	physical, err := planPhysicalSourceQuery(query, source, loadJoin)
+	physical, err := planPhysicalSourceQuery(query, source, joinSources)
 	if err != nil {
 		return nil, err
 	}
 	return executePhysicalSourceStreamQuery(physical, streamSource)
 }
 
-func ExecuteSourceAdaptiveQuery(query *ast.Query, source SourceInfo, streamSource SourceStreamFunc, loadSource SourceLoadFunc, loadJoin LoadFunc) (*table.Table, error) {
-	physical, err := planPhysicalSourceQuery(query, source, loadJoin)
+func ExecuteSourceAdaptiveQuery(query *ast.Query, source SourceInfo, streamSource SourceStreamFunc, loadSource SourceLoadFunc, joinSources JoinSourceProvider) (*table.Table, error) {
+	physical, err := planPhysicalSourceQuery(query, source, joinSources)
 	if err != nil {
 		return nil, err
 	}
@@ -99,13 +152,13 @@ func ExecuteSourceAdaptiveQuery(query *ast.Query, source SourceInfo, streamSourc
 	return executePhysicalSourceStreamQuery(physical, streamSource)
 }
 
-func planPhysicalSourceQuery(query *ast.Query, source SourceInfo, loadJoin LoadFunc) (*physicalPipeline, error) {
+func planPhysicalSourceQuery(query *ast.Query, source SourceInfo, joinSources JoinSourceProvider) (*physicalPipeline, error) {
 	logical, err := planLogicalQueryWithSource(query, logicalSource{
 		filename:        source.Filename,
 		load:            source.Load,
 		schema:          source.Schema,
 		disablePushdown: source.DisablePushdown,
-	}, loadJoin)
+	}, joinSources)
 	if err != nil {
 		return nil, err
 	}
@@ -192,12 +245,12 @@ func (s sourceErrorStream) Next() (rowstream.Row, bool, error) {
 	return row, ok, nil
 }
 
-func planLogicalQueryWithSource(query *ast.Query, source logicalSource, load LoadFunc) (*logicalPipeline, error) {
+func planLogicalQueryWithSource(query *ast.Query, source logicalSource, joinSources JoinSourceProvider) (*logicalPipeline, error) {
 	input, err := schemaEnvFromSchema(source.schema)
 	if err != nil {
 		return nil, fmt.Errorf("source schema: %w", err)
 	}
-	pipeline, err := planLogicalPipelineInEnv(input, query.Ops, load)
+	pipeline, err := planLogicalPipelineInEnv(input, query.Ops, joinSources)
 	if err != nil {
 		return nil, err
 	}

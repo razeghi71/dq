@@ -142,11 +142,16 @@ type logicalDescribe struct {
 type logicalJoin struct {
 	logicalBase
 	kind          string
-	filename      string
-	right         *table.Table
+	right         logicalJoinSource
 	leftKeys      []logicalPathBinding
 	rightKeys     []logicalPathBinding
 	outputSources []logicalJoinOutputSource
+}
+
+type logicalJoinSource struct {
+	source        PreparedJoinSource
+	env           schemaEnv
+	outputColumns table.ColumnSelection
 }
 
 type logicalJoinOutputKind int
@@ -185,14 +190,18 @@ type physicalPipeline struct {
 }
 
 func planLogicalPipelineFromTableWithLoad(input *table.Table, ops []ast.Op, load LoadFunc) (*logicalPipeline, error) {
+	return planLogicalPipelineFromTableWithJoinSources(input, ops, newLoadFuncJoinSourceProvider(load))
+}
+
+func planLogicalPipelineFromTableWithJoinSources(input *table.Table, ops []ast.Op, joinSources JoinSourceProvider) (*logicalPipeline, error) {
 	env, err := schemaEnvFromTable(input)
 	if err != nil {
 		return nil, err
 	}
-	return planLogicalPipelineInEnv(env, ops, load)
+	return planLogicalPipelineInEnv(env, ops, joinSources)
 }
 
-func planLogicalPipelineInEnv(input schemaEnv, ops []ast.Op, load LoadFunc) (*logicalPipeline, error) {
+func planLogicalPipelineInEnv(input schemaEnv, ops []ast.Op, joinSources JoinSourceProvider) (*logicalPipeline, error) {
 	current := input
 	planned := make([]logicalOp, 0, len(ops))
 	inputSchema := input.schema()
@@ -202,7 +211,7 @@ func planLogicalPipelineInEnv(input schemaEnv, ops []ast.Op, load LoadFunc) (*lo
 		if !isSchemaPlannedOp(op) {
 			return nil, fmt.Errorf("cannot plan operation %T in logical pipeline", op)
 		}
-		next, err := planLogicalOp(current, op, load)
+		next, err := planLogicalOp(current, op, joinSources)
 		if err != nil {
 			return nil, err
 		}
@@ -214,7 +223,7 @@ func planLogicalPipelineInEnv(input schemaEnv, ops []ast.Op, load LoadFunc) (*lo
 	return &logicalPipeline{Ops: planned, InputEnv: input, InputSchema: inputSchema, OutputSchema: outputEnv.schema()}, nil
 }
 
-func planLogicalOp(input schemaEnv, op ast.Op, load LoadFunc) (logicalOp, error) {
+func planLogicalOp(input schemaEnv, op ast.Op, joinSources JoinSourceProvider) (logicalOp, error) {
 	switch o := op.(type) {
 	case *ast.HeadOp:
 		return logicalHead{logicalBase: logicalBaseFromEnv(input), n: o.N}, nil
@@ -272,7 +281,7 @@ func planLogicalOp(input schemaEnv, op ast.Op, load LoadFunc) (logicalOp, error)
 	case *ast.DescribeOp:
 		return logicalDescribe{logicalBase: logicalBaseFromEnv(describeOutputEnv())}, nil
 	case *ast.JoinOp:
-		return planLogicalJoin(o, input, load)
+		return planLogicalJoin(o, input, joinSources)
 	default:
 		return nil, fmt.Errorf("unknown logical operation type %T", op)
 	}
@@ -455,20 +464,19 @@ func describeOutputEnv() schemaEnv {
 	})
 }
 
-func planLogicalJoin(o *ast.JoinOp, left schemaEnv, load LoadFunc) (logicalJoin, error) {
-	if load == nil {
-		return logicalJoin{}, fmt.Errorf("join: loader not configured")
+func planLogicalJoin(o *ast.JoinOp, left schemaEnv, joinSources JoinSourceProvider) (logicalJoin, error) {
+	if joinSources == nil {
+		return logicalJoin{}, fmt.Errorf("join: source preparer not configured")
 	}
 	if o.Filename == "-" {
 		return logicalJoin{}, fmt.Errorf("join: stdin is not supported as join source")
 	}
 
-	right, err := load(o.Filename, o.Load)
+	rightSource, err := joinSources.PrepareJoinSource(o.Filename, o.Load)
 	if err != nil {
 		return logicalJoin{}, fmt.Errorf("join: load %q: %w", o.Filename, err)
 	}
-
-	rightEnv, err := schemaEnvFromTable(right)
+	rightEnv, err := schemaEnvFromSchema(rightSource.planningSchema())
 	if err != nil {
 		return logicalJoin{}, fmt.Errorf("join: right schema: %w", err)
 	}
@@ -491,8 +499,7 @@ func planLogicalJoin(o *ast.JoinOp, left schemaEnv, load LoadFunc) (logicalJoin,
 	return logicalJoin{
 		logicalBase:   logicalBaseFromEnv(outputEnv),
 		kind:          o.Kind,
-		filename:      o.Filename,
-		right:         right,
+		right:         logicalJoinSource{source: rightSource, env: rightEnv},
 		leftKeys:      leftKeys,
 		rightKeys:     rightKeys,
 		outputSources: outputSources,
@@ -1069,9 +1076,9 @@ func physicalKeptIndices(input schemaEnv, kept []string) ([]int, error) {
 }
 
 func planPhysicalJoin(input schemaEnv, o logicalJoin) (plannedJoin, error) {
-	rightEnv, err := schemaEnvFromTable(o.right)
-	if err != nil {
-		return plannedJoin{}, fmt.Errorf("join: right schema: %w", err)
+	rightEnv, ok := logicalJoinRightOutputEnv(o.right)
+	if !ok {
+		return plannedJoin{}, fmt.Errorf("join: cannot derive right source output schema")
 	}
 	leftKeys, rightKeys, err := physicalizeJoinKeys(input, rightEnv, o.leftKeys, o.rightKeys)
 	if err != nil {
@@ -1084,11 +1091,35 @@ func planPhysicalJoin(input schemaEnv, o logicalJoin) (plannedJoin, error) {
 	return plannedJoin{
 		plannedBase: plannedBaseFromEnv(o.OutputEnv()),
 		kind:        o.kind,
-		right:       o.right,
-		leftKeys:    leftKeys,
-		rightKeys:   rightKeys,
-		outputs:     outputs,
+		right: plannedJoinRightSource{
+			source: o.right.source,
+			spec:   JoinSourceLoadSpec{Columns: o.right.outputColumns},
+			env:    rightEnv,
+		},
+		leftKeys:  leftKeys,
+		rightKeys: rightKeys,
+		outputs:   outputs,
 	}, nil
+}
+
+func logicalJoinRightOutputEnv(source logicalJoinSource) (schemaEnv, bool) {
+	if source.outputColumns.IsAll() {
+		return source.env, true
+	}
+	selected := source.outputColumns.Names()
+	columns := make([]schemaEnvColumn, len(selected))
+	for i, name := range selected {
+		col, ok := source.env.lookupColumn(name)
+		if !ok {
+			return schemaEnv{}, false
+		}
+		columns[i] = schemaEnvColumn{name: name, raw: col.column.planningSchema()}
+	}
+	out, err := newSchemaEnv(columns)
+	if err != nil {
+		return schemaEnv{}, false
+	}
+	return out, true
 }
 
 func physicalJoinOutputs(left, right schemaEnv, o logicalJoin) ([]plannedJoinOutput, error) {

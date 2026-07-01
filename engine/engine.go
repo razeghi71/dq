@@ -17,7 +17,8 @@ func Execute(query *ast.Query, input *table.Table, load LoadFunc) (*table.Table,
 	if len(query.Ops) == 0 {
 		return input, nil
 	}
-	logical, err := planLogicalPipelineFromTableWithLoad(input, query.Ops, load)
+	joinSources := newLoadFuncJoinSourceProvider(load)
+	logical, err := planLogicalPipelineFromTableWithJoinSources(input, query.Ops, joinSources)
 	if err != nil {
 		return nil, err
 	}
@@ -42,7 +43,8 @@ func ExecuteStreaming(query *ast.Query, input *table.Table, load LoadFunc) (*tab
 	if len(query.Ops) == 0 {
 		return input, nil
 	}
-	logical, err := planLogicalPipelineFromTableWithLoad(input, query.Ops, load)
+	joinSources := newLoadFuncJoinSourceProvider(load)
+	logical, err := planLogicalPipelineFromTableWithJoinSources(input, query.Ops, joinSources)
 	if err != nil {
 		return nil, err
 	}

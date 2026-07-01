@@ -21,7 +21,9 @@ func parseOptimizerBoundaryOpsTDD(t *testing.T, pipeline string) []ast.Op {
 
 func executeThroughOptimizerBoundaryTDD(t *testing.T, input *table.Table, pipeline string, load LoadFunc) (*table.Table, error) {
 	t.Helper()
-	logical, err := planLogicalPipeline(input.Schema(), parseOptimizerBoundaryOpsTDD(t, pipeline), load)
+	joinSources := newLoadFuncJoinSourceProvider(load)
+	inputEnv := mustSchemaEnvFromSchema(input.Schema())
+	logical, err := planLogicalPipelineInEnv(inputEnv, parseOptimizerBoundaryOpsTDD(t, pipeline), joinSources)
 	if err != nil {
 		return nil, err
 	}
@@ -39,7 +41,10 @@ func executeThroughOptimizerBoundaryTDD(t *testing.T, input *table.Table, pipeli
 		return nil, err
 	}
 
-	return executePhysicalPipeline(physical, input)
+	if err := validatePlanInputTableSchema(physical.InputSchema, input); err != nil {
+		return nil, err
+	}
+	return executePlannedOps(physical.Ops, input)
 }
 
 func TestLogicalOptimizerBoundaryTDDNoOpArtifactsAreDistinctAndPhysicalOnlyAfterOptimize(t *testing.T) {
@@ -679,10 +684,10 @@ func TestLogicalOptimizerBoundaryTDDColumnBindingsCloneCallerPaths(t *testing.T)
 
 func TestLogicalOptimizerBoundaryTDDJoinLoaderAndStdinErrors(t *testing.T) {
 	env := mustSchemaEnvFromTable(usersTable())
-	if _, err := planLogicalOp(env, &ast.JoinOp{Filename: "right.csv"}, nil); err == nil || !strings.Contains(err.Error(), "loader not configured") {
-		t.Fatalf("logical join nil loader error: got %v", err)
+	if _, err := planLogicalOp(env, &ast.JoinOp{Filename: "right.csv"}, nil); err == nil || !strings.Contains(err.Error(), "source preparer not configured") {
+		t.Fatalf("logical join nil source preparer error: got %v", err)
 	}
-	if _, err := planLogicalOp(env, &ast.JoinOp{Filename: "-"}, func(string, ast.LoadOptions) (*table.Table, error) { return usersTable(), nil }); err == nil || !strings.Contains(err.Error(), "stdin") {
+	if _, err := planLogicalOp(env, &ast.JoinOp{Filename: "-"}, newLoadFuncJoinSourceProvider(func(string, ast.LoadOptions) (*table.Table, error) { return usersTable(), nil })); err == nil || !strings.Contains(err.Error(), "stdin") {
 		t.Fatalf("logical join stdin error: got %v", err)
 	}
 }

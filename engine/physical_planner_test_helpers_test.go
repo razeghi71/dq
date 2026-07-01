@@ -20,7 +20,7 @@ func planLogicalPipeline(input table.Schema, ops []ast.Op, load LoadFunc) (*logi
 	if err != nil {
 		return nil, err
 	}
-	return planLogicalPipelineInEnv(env, ops, load)
+	return planLogicalPipelineInEnv(env, ops, newLoadFuncJoinSourceProvider(load))
 }
 
 func optimizeLogicalPipeline(plan *logicalPipeline) (*optimizedLogicalPipeline, error) {
@@ -130,7 +130,8 @@ func planPhysicalPipelineFromTableForTest(input *table.Table, ops []ast.Op) (*pi
 }
 
 func planPhysicalPipelineFromTableWithLoadForTest(input *table.Table, ops []ast.Op, load LoadFunc) (*pipelinePlan, error) {
-	logical, err := planLogicalPipelineFromTableWithLoad(input, ops, load)
+	joinSources := newLoadFuncJoinSourceProvider(load)
+	logical, err := planLogicalPipelineFromTableWithJoinSources(input, ops, joinSources)
 	if err != nil {
 		return nil, err
 	}

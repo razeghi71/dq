@@ -144,6 +144,10 @@ dq 'wide.csv | group city | reduce total = sum(amount) | remove grouped | json'
 dq 'wide.csv | count | json'  # does not read data columns
 dq 'wide.csv | select bad_col | count | json'  # bad_col values may not be read
 dq 'wide.csv | select bad_col | json'          # bad_col values are materialized
+dq 'users.csv | join orders.csv on id == user_id | select name, amount | json'
+# reads users: id, name; orders: user_id, amount
+dq 'users.csv | join orders/*.csv with format=csv on id == user_id | count | json'
+# reads join keys from both sides, but no payload columns
 ```
 
 Simple top-level filters can often be applied while the file is being read. More complex filters still run as normal pipeline operations, but their referenced columns are still read when the query needs them. For columns whose values the final result actually consumes, rows and values match the unoptimized pipeline. A column can appear in an intermediate `select` without forcing value validation if a later operation, such as `count`, only needs row existence. Use an output command (`json`, `csv`, `table`, etc.) or another consuming operation when selected values must be materialized and checked. Source-wide structure errors, such as duplicate CSV headers or malformed row widths, are still reported. After schema inference, values are checked for columns the query needs; truly unused columns may not be validated or materialized. JSON/JSONL inputs still parse each logical record with the JSON decoder, but projected-away fields and late extra fields are not validated into table columns unless needed.
@@ -162,7 +166,7 @@ dq 'wide.parquet | select id, status | head 20 | json'
 
 `filter`, `select`, `remove`, `rename`, row-local `transform`, and `head` can stream. `count` is bounded-memory but blocking: it must read every upstream row needed for the final count before emitting one row, but it does not demand data values by itself. Dead transform assignments can be skipped when no later operation consumes their output, so `transform unused = year(raw) | select name | count` does not evaluate `unused`. `tail`, `sort`, `distinct`, `group`, `reduce`, and `join` materialize before running. Adjacent `group | reduce` queries aggregate directly; when the final result does not keep the nested `grouped` rows, `dq` does not build those nested row values. After a blocking operation finishes, later streaming operations can stop early again, so `sort id | transform y = year(raw) | head 1` only evaluates the transformed suffix until `head` has its row.
 
-For single-file sources, `dq` reads only the columns your query needs. Some simple filters can be applied during file reading; other filters run later, but their columns are still read. Glob and CLI stdin sources stream rows but currently read all source columns before pipeline operations, so existing bad-record visibility stays the same. Stdin with `infer_rows=-1` must buffer the full logical input during schema acquisition because stdin cannot be rewound. Stdin JSON arrays with bounded inference also retain the remaining array records after the sample so malformed top-level array syntax still fails before results are returned. Output writers still receive a final table, so a query that streams many rows to `json`/`csv` may materialize at the writer boundary.
+For single-file sources, `dq` reads only the columns your query needs. Some simple filters can be applied during file reading; other filters run later, but their columns are still read. As primary sources, globs and CLI stdin stream rows but currently read all source columns before pipeline operations, so existing bad-record visibility stays the same. Join files and deterministic join globs read only the join keys and right-side columns needed by the query. Stdin with `infer_rows=-1` must buffer the full logical input during schema acquisition because stdin cannot be rewound. Stdin JSON arrays with bounded inference also retain the remaining array records after the sample so malformed top-level array syntax still fails before results are returned. Output writers still receive a final table, so a query that streams many rows to `json`/`csv` may materialize at the writer boundary.
 
 Each pipeline stage sees the columns produced by previous stages. Within one `transform` or `reduce`, assignment target names must be unique and all right-hand sides see the input schema only:
 
@@ -582,7 +586,7 @@ dq 'users.csv | join left orders/part-*.csv on user_id'
 ```
 
 - Patterns are matched relative to the current working directory.
-- Primary-source globs stream matched files in deterministic expanded order after schema acquisition. Join globs are loaded as join inputs.
+- Primary-source globs stream matched files in deterministic expanded order after schema acquisition. Join globs read matched files in deterministic order and load only the join keys and right-side columns needed by the query.
 - CSV glob shards follow the CSV header rules below; compatible extended headers create a column union and missing values are null.
 - CSV header names must be unique; duplicate header names fail at load time.
 - JSON/JSONL glob shards use one sampled schema in deterministic path order. Fields first seen after the sample are bad records; use `with format=jsonl, infer_rows=-1` (or a larger `infer_rows`) when sparse late fields should be part of the schema.
@@ -591,4 +595,4 @@ dq 'users.csv | join left orders/part-*.csv on user_id'
 - Positional shards: values map to the first file's columns by position. CSV row-width rules match single-file loading (strict by default): use `with format=csv, allow_jagged_rows=true` and/or `with format=csv, ignore_unknown_values=true` on globs (format is required at parse time for CSV-only options).
 - Renamed columns with no overlap with the first file's header (e.g. `user_id` vs anchor `id`) are read positionally, not by name.
 - Literal paths with `[` (e.g. `data[1].csv`) are not globs unless `*`, `?`, or `{` is present.
-- Single-file sources can stream rows and avoid storing columns not needed by the query; glob sources stream rows but currently read all source columns before pipeline operations.
+- Single-file sources can stream rows and avoid storing columns not needed by the query. Primary-source globs stream rows but currently read all source columns before pipeline operations; right-hand join globs can be column-pruned by join demand.

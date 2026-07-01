@@ -2866,7 +2866,7 @@ func TestJoinConfigurationAndTopLevelKeyErrors(t *testing.T) {
 			t.Fatalf("parse error: %v", err)
 		}
 		_, err = Execute(q, left, nil)
-		if err == nil || !strings.Contains(err.Error(), "loader not configured") {
+		if err == nil || !strings.Contains(err.Error(), "source preparer not configured") {
 			t.Fatalf("expected loader configuration error, got %v", err)
 		}
 	})

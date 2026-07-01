@@ -40,6 +40,8 @@ func runQuery(query string, stdout io.Writer, disallowStdin bool) error {
 		return fmt.Errorf("load error: %w", err)
 	}
 	defer prepared.Close()
+	joinSources := newPreparedJoinSourceProvider()
+	defer joinSources.Close()
 
 	result, err := engine.ExecuteSourceAdaptiveQuery(q, engine.SourceInfo{
 		Filename:        q.Source.Filename,
@@ -58,14 +60,46 @@ func runQuery(query string, stdout io.Writer, disallowStdin bool) error {
 			OutputColumns: spec.OutputColumns,
 			Predicate:     loader.RowPredicate(spec.Predicate),
 		})
-	}, func(filename string, opts ast.LoadOptions) (*table.Table, error) {
-		return loader.Load(filename, loader.FromAST(opts))
-	})
+	}, joinSources)
 	if err != nil {
 		return fmt.Errorf("error: %w", err)
 	}
 
 	return writeQueryResult(q, result, stdout)
+}
+
+type preparedJoinSourceProvider struct {
+	sources []*loader.PreparedSource
+}
+
+func newPreparedJoinSourceProvider() *preparedJoinSourceProvider {
+	return &preparedJoinSourceProvider{}
+}
+
+func (p *preparedJoinSourceProvider) PrepareJoinSource(filename string, opts ast.LoadOptions) (engine.PreparedJoinSource, error) {
+	prepared, err := loader.PrepareInput(filename, loader.FromAST(opts), nil)
+	if err != nil {
+		return engine.PreparedJoinSource{}, err
+	}
+	source, err := engine.NewPreparedJoinSource(filename, prepared.Schema, func(spec engine.JoinSourceLoadSpec) (*table.Table, error) {
+		return prepared.LoadSpec(loader.SourceLoadSpec{
+			ReadColumns:   spec.Columns,
+			OutputColumns: spec.Columns,
+		})
+	})
+	if err != nil {
+		_ = prepared.Close()
+		return engine.PreparedJoinSource{}, err
+	}
+	p.sources = append(p.sources, prepared)
+	return source, nil
+}
+
+func (p *preparedJoinSourceProvider) Close() {
+	for _, prepared := range p.sources {
+		_ = prepared.Close()
+	}
+	p.sources = nil
 }
 
 func runMaterializedQuery(q *ast.Query, stdout io.Writer) error {

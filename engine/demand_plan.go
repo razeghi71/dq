@@ -104,7 +104,7 @@ func demandPruningMayRewrite(plan *optimizedLogicalPipeline) bool {
 	}
 	for _, op := range plan.Ops {
 		switch op.(type) {
-		case logicalTransform, logicalSelect, logicalRename, logicalRemove, logicalGroupReduce:
+		case logicalTransform, logicalSelect, logicalRename, logicalRemove, logicalGroupReduce, logicalJoin:
 			return true
 		}
 	}
@@ -260,15 +260,12 @@ func demandForRemoveInput(op logicalRemove, out columnDemand) columnDemand {
 }
 
 func demandForJoinInput(op logicalJoin, input schemaEnv, out columnDemand) columnDemand {
-	if len(op.outputSources) == 0 || out.all {
-		return demandAllColumns()
-	}
 	in := demandNoColumns()
 	for _, key := range op.leftKeys {
 		in.addPath(key.path)
 	}
 	for _, source := range op.outputSources {
-		if !out.has(source.name) {
+		if !out.all && !out.has(source.name) {
 			continue
 		}
 		switch source.kind {
@@ -278,6 +275,22 @@ func demandForJoinInput(op logicalJoin, input schemaEnv, out columnDemand) colum
 			if source.keyIndex >= 0 && source.keyIndex < len(op.leftKeys) {
 				in.addPath(op.leftKeys[source.keyIndex].path)
 			}
+		}
+	}
+	return in
+}
+
+func demandForJoinRightSource(op logicalJoin, out columnDemand) columnDemand {
+	in := demandNoColumns()
+	for _, key := range op.rightKeys {
+		in.addPath(key.path)
+	}
+	for _, source := range op.outputSources {
+		if !out.all && !out.has(source.name) {
+			continue
+		}
+		if source.kind == logicalJoinOutputRight {
+			in.add(source.rightName)
 		}
 	}
 	return in
@@ -495,11 +508,13 @@ func rewriteLogicalJoinForDemand(op logicalJoin, out columnDemand) (logicalOp, s
 		}
 	}
 	env := schemaEnvFromKnownUniqueColumns(columns)
+	rightOutput := sourceOutputColumnsForDemand(op.right.env, op.right.outputColumns, demandForJoinRightSource(op, out))
+	right := op.right
+	right.outputColumns = rightOutput
 	return logicalJoin{
 		logicalBase:   logicalBaseFromEnv(env),
 		kind:          op.kind,
-		filename:      op.filename,
-		right:         op.right,
+		right:         right,
 		leftKeys:      op.leftKeys,
 		rightKeys:     op.rightKeys,
 		outputSources: sources,

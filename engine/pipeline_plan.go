@@ -227,10 +227,16 @@ type plannedDescribe struct {
 type plannedJoin struct {
 	plannedBase
 	kind      string
-	right     *table.Table
+	right     plannedJoinRightSource
 	leftKeys  []resolvedJoinKey
 	rightKeys []resolvedJoinKey
 	outputs   []plannedJoinOutput
+}
+
+type plannedJoinRightSource struct {
+	source PreparedJoinSource
+	spec   JoinSourceLoadSpec
+	env    schemaEnv
 }
 
 type plannedJoinOutputKind int

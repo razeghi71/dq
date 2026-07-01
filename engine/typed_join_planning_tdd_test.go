@@ -310,12 +310,23 @@ func TestTypedJoinPlanningTDDDefensiveBoundJoinKeyBranches(t *testing.T) {
 		t.Fatal("expected buildJoinIndex bound-column error")
 	}
 
+	joinSources := newLoadFuncJoinSourceProvider(func(string, ast.LoadOptions) (*table.Table, error) {
+		return left, nil
+	})
+	rightSource, err := joinSources.PrepareJoinSource("right.csv", ast.LoadOptions{})
+	if err != nil {
+		t.Fatalf("prepare right source: %v", err)
+	}
 	plan := plannedJoin{
 		plannedBase: plannedBaseFromTestSchema(rawSchemaFromColumns([]string{"id"}, []*table.TypeDescriptor{intSchema})),
 		kind:        "inner",
-		right:       left,
-		leftKeys:    []resolvedJoinKey{{column: boundColumn{topIndex: 0, rawPath: []string{"id"}, typ: intSchema}}},
-		rightKeys:   badKeys,
+		right: plannedJoinRightSource{
+			source: rightSource,
+			spec:   JoinSourceLoadSpec{Columns: table.AllColumns()},
+			env:    mustSchemaEnvFromTable(left),
+		},
+		leftKeys:  []resolvedJoinKey{{column: boundColumn{topIndex: 0, rawPath: []string{"id"}, typ: intSchema}}},
+		rightKeys: badKeys,
 	}
 	if _, err := execPlannedJoin(plan, left); err == nil {
 		t.Fatal("expected execPlannedJoin index-build error")

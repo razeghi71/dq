@@ -151,8 +151,8 @@ func TestDemandPruningTDDDescribeAndFullRowDistinctRemainReadAllBarriers(t *test
 }
 
 func TestDemandPruningTDDJoinDemandsLeftKeysAndDemandedLeftOutputs(t *testing.T) {
-	right := table.NewTableWithTypes([]string{"user_id", "amount", "right_unused"}, []table.ValueType{table.TypeInt, table.TypeInt, table.TypeString})
-	right.AddRow([]table.Value{table.IntVal(1), table.IntVal(10), table.StrVal("x")})
+	right := table.NewTableWithTypes([]string{"amount", "user_id", "right_unused"}, []table.ValueType{table.TypeInt, table.TypeInt, table.TypeString})
+	right.AddRow([]table.Value{table.IntVal(10), table.IntVal(1), table.StrVal("x")})
 
 	physical := planDemandPruningTDDSourceQuery(t,
 		`users.csv | join orders.csv on id == user_id | select name, amount | json`,
@@ -166,7 +166,28 @@ func TestDemandPruningTDDJoinDemandsLeftKeysAndDemandedLeftOutputs(t *testing.T)
 	)
 
 	requireDemandPruningTDDSourceSpec(t, physical, []string{"id", "name"}, []string{"id", "name"}, false)
+	requireDemandPruningTDDJoinRightSpec(t, physical, []string{"amount", "user_id"})
 	requireDemandPruningTDDPlannedOpTypes(t, physical, "join")
+}
+
+func TestDemandPruningTDDJoinCountDemandsOnlyJoinKeys(t *testing.T) {
+	right := table.NewTableWithTypes([]string{"amount", "user_id", "right_unused"}, []table.ValueType{table.TypeInt, table.TypeInt, table.TypeString})
+	right.AddRow([]table.Value{table.IntVal(10), table.IntVal(1), table.StrVal("x")})
+
+	physical := planDemandPruningTDDSourceQuery(t,
+		`users.csv | join orders.csv on id == user_id | count | json`,
+		demandPruningTDDJoinLeftSchema(),
+		func(filename string, opts ast.LoadOptions) (*table.Table, error) {
+			if filename != "orders.csv" {
+				t.Fatalf("join loader filename: got %q, want orders.csv", filename)
+			}
+			return right, nil
+		},
+	)
+
+	requireDemandPruningTDDSourceSpec(t, physical, []string{"id"}, []string{"id"}, false)
+	requireDemandPruningTDDJoinRightSpec(t, physical, []string{"user_id"})
+	requireDemandPruningTDDPlannedOpTypes(t, physical, "join", "count")
 }
 
 func TestDemandPruningTDDJoinOutputNamesStayStableWhenLeftCollisionColumnOtherwiseUnused(t *testing.T) {
@@ -225,12 +246,12 @@ func executeDemandPruningTDDJoinCollisionQuery(t *testing.T, query string, left,
 		}
 		*loadedSpec = spec
 		return projectDemandPruningTDDTableForSpec(t, left, spec), nil
-	}, func(filename string, opts ast.LoadOptions) (*table.Table, error) {
+	}, newLoadFuncJoinSourceProvider(func(filename string, opts ast.LoadOptions) (*table.Table, error) {
 		if filename != "orders.csv" {
 			t.Fatalf("join loader filename: got %q, want orders.csv", filename)
 		}
 		return right, nil
-	})
+	}))
 	if err != nil {
 		t.Fatalf("execute join collision query %q: %v", query, err)
 	}
@@ -278,13 +299,13 @@ func planDemandPruningTDDSourceQuery(t *testing.T, query string, schema table.Sc
 		Filename: q.Source.Filename,
 		Load:     q.Source.Load,
 		Schema:   schema,
-	}, func(filename string, opts ast.LoadOptions) (*table.Table, error) {
+	}, newLoadFuncJoinSourceProvider(func(filename string, opts ast.LoadOptions) (*table.Table, error) {
 		if load != nil {
 			return load(filename, opts)
 		}
 		t.Fatalf("unexpected load for %q", filename)
 		return nil, nil
-	})
+	}))
 	if err != nil {
 		t.Fatalf("plan physical source query %q: %v", query, err)
 	}
@@ -303,6 +324,23 @@ func requireDemandPruningTDDSourceSpec(t *testing.T, physical *physicalPipeline,
 	if gotPredicate := spec.Predicate != nil; gotPredicate != wantPredicate {
 		t.Fatalf("source predicate presence: got %v, want %v", gotPredicate, wantPredicate)
 	}
+}
+
+func requireDemandPruningTDDJoinRightSpec(t *testing.T, physical *physicalPipeline, columns []string) {
+	t.Helper()
+	ops := flattenPlannedRowSpans(physical.Ops)
+	for _, op := range ops {
+		join, ok := op.(plannedJoin)
+		if !ok {
+			continue
+		}
+		got := join.right.spec.Columns.Names()
+		if !reflect.DeepEqual(got, columns) {
+			t.Fatalf("join right spec columns: got %#v, want %#v", got, columns)
+		}
+		return
+	}
+	t.Fatalf("planned join missing; ops=%v", demandPruningTDDOpTypes(physical.Ops))
 }
 
 func requireDemandPruningTDDPlannedOpTypes(t *testing.T, physical *physicalPipeline, want ...string) {
