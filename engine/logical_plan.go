@@ -72,6 +72,11 @@ type logicalTransform struct {
 	assignments []logicalAssignment
 }
 
+type optimizedRowSpan struct {
+	logicalBase
+	ops []logicalOp
+}
+
 type logicalAssignment struct {
 	name string
 	expr logicalTypedExpr
@@ -722,6 +727,9 @@ func optimizeLogicalPipelineInto(plan *logicalPipeline, out *optimizedLogicalPip
 	if err := optimizeDemandDrivenPruning(out); err != nil {
 		return err
 	}
+	if err := optimizeRowSpans(out); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -760,6 +768,64 @@ func optimizeFusedGroupReduce(plan *optimizedLogicalPipeline) {
 	}
 	if rewritten != nil {
 		plan.Ops = rewritten
+	}
+}
+
+func optimizeRowSpans(plan *optimizedLogicalPipeline) error {
+	if plan == nil || len(plan.Ops) == 0 {
+		return nil
+	}
+	var rewritten []logicalOp
+	for i := 0; i < len(plan.Ops); {
+		if !isLogicalRowLocalOp(plan.Ops[i]) {
+			if rewritten != nil {
+				rewritten = append(rewritten, plan.Ops[i])
+			}
+			i++
+			continue
+		}
+		start := i
+		for i < len(plan.Ops) && isLogicalRowLocalOp(plan.Ops[i]) {
+			i++
+		}
+		if i-start < 2 {
+			if rewritten != nil {
+				rewritten = append(rewritten, plan.Ops[start:i]...)
+			}
+			continue
+		}
+		if rewritten == nil {
+			rewritten = make([]logicalOp, 0, len(plan.Ops)-(i-start)+1)
+			rewritten = append(rewritten, plan.Ops[:start]...)
+		}
+		span, err := newOptimizedRowSpan(plan.Ops[start:i])
+		if err != nil {
+			return err
+		}
+		rewritten = append(rewritten, span)
+	}
+	if rewritten != nil {
+		plan.Ops = rewritten
+	}
+	return nil
+}
+
+func newOptimizedRowSpan(ops []logicalOp) (optimizedRowSpan, error) {
+	if len(ops) == 0 {
+		return optimizedRowSpan{}, fmt.Errorf("row span: empty logical span")
+	}
+	return optimizedRowSpan{
+		logicalBase: logicalBaseFromEnv(logicalOutputEnv(ops[len(ops)-1])),
+		ops:         ops,
+	}, nil
+}
+
+func isLogicalRowLocalOp(op logicalOp) bool {
+	switch op.(type) {
+	case logicalFilter, logicalSelect, logicalRename, logicalRemove, logicalTransform:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -815,6 +881,8 @@ func planPhysicalOp(input schemaEnv, op logicalOp) (plannedOp, error) {
 			return nil, fmt.Errorf("filter: %w", err)
 		}
 		return plannedFilter{plannedBase: plannedBase{output: o.OutputSchema()}, expr: expr}, nil
+	case optimizedRowSpan:
+		return planPhysicalRowSpan(input, o)
 	case logicalTransform:
 		return planPhysicalTransform(input, o)
 	case logicalGroup:
@@ -857,6 +925,22 @@ func planPhysicalOp(input schemaEnv, op logicalOp) (plannedOp, error) {
 	default:
 		return nil, fmt.Errorf("unknown optimized logical operation type %T", op)
 	}
+}
+
+func planPhysicalRowSpan(input schemaEnv, o optimizedRowSpan) (plannedRowSpan, error) {
+	current := input
+	ops := make([]plannedOp, 0, len(o.ops))
+	for i, child := range o.ops {
+		next, err := planPhysicalOp(current, child)
+		if err != nil {
+			return plannedRowSpan{}, err
+		}
+		ops = append(ops, next)
+		if i+1 < len(o.ops) {
+			current = logicalOutputEnv(child)
+		}
+	}
+	return newPlannedRowSpan(ops)
 }
 
 func planPhysicalTransform(input schemaEnv, o logicalTransform) (plannedTransform, error) {

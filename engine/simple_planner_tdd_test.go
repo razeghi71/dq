@@ -215,8 +215,8 @@ func TestSimplePlannerTDDPlansShapeChangingSimpleOpsWithoutRows(t *testing.T) {
 				t.Fatalf("planPhysicalPipelineForTest(%q): %v", tc.pipeline, err)
 			}
 			requireSimplePlannerSchema(t, plan.OutputSchema, tc.want...)
-			if len(plan.Ops) != len(parseSimplePlannerOps(t, tc.pipeline)) {
-				t.Fatalf("planned op count: got %d, want raw op count", len(plan.Ops))
+			if got := len(flattenPlannedRowSpans(plan.Ops)); got != len(parseSimplePlannerOps(t, tc.pipeline)) {
+				t.Fatalf("planned op count: got %d, want raw op count", got)
 			}
 		})
 	}

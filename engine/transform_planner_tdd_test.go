@@ -14,8 +14,9 @@ func TestTransformPlannerTDDPlansTransformInsideSimplePipelineWithoutRows(t *tes
 	if err != nil {
 		t.Fatalf("planPhysicalPipelineForTest with transform: %v", err)
 	}
-	if len(plan.Ops) != 4 {
-		t.Fatalf("planned op count: got %d, want 4", len(plan.Ops))
+	ops := flattenPlannedRowSpans(plan.Ops)
+	if len(ops) != 4 {
+		t.Fatalf("planned op count: got %d, want 4", len(ops))
 	}
 	requireSimplePlannerSchema(t, plan.OutputSchema,
 		"name:string",
@@ -25,7 +26,7 @@ func TestTransformPlannerTDDPlansTransformInsideSimplePipelineWithoutRows(t *tes
 		"profile:record<city:string, name:string>",
 		"tags:list<string?>",
 	)
-	requireSimplePlannerSchema(t, plan.Ops[1].OutputSchema(),
+	requireSimplePlannerSchema(t, ops[1].OutputSchema(),
 		"name:string",
 		"age:int",
 		"city:string",

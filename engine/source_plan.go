@@ -139,38 +139,45 @@ func executePhysicalSourceStreamQuery(physical *physicalPipeline, streamSource S
 }
 
 func shouldLoadSourceMaterializedForStreaming(ops []plannedOp) bool {
-	for i := 0; i < len(ops); {
-		if end := rowLocalSpanEnd(ops, i); end > i {
-			span := ops[i:end]
-			next := nextPlannedOp(ops, end)
-			if rowSpanCanDropRows(span) || next == nil {
-				return false
+	for i, op := range ops {
+		switch op.executionTraits().class {
+		case plannedExecutionRowSpan:
+			span := op.(plannedRowSpan)
+			load, decided := sourceMaterializedDecisionAfterRowLocal(plannedRowLocalInfo{
+				dropsRows:         span.dropsRows,
+				parallelCandidate: span.parallelCandidate,
+			}, nextPlannedOp(ops, i+1))
+			if decided {
+				return load
 			}
-			if _, earlyStop := next.(plannedHead); earlyStop {
-				return false
+		case plannedExecutionRowLocal:
+			info, _ := plannedRowLocalInfoForOp(op)
+			load, decided := sourceMaterializedDecisionAfterRowLocal(info, nextPlannedOp(ops, i+1))
+			if decided {
+				return load
 			}
-			if _, fold := next.(plannedCount); fold {
-				return false
-			}
-			if _, fold := next.(plannedDescribe); fold {
-				return false
-			}
-			if isMaterializedStreamingBoundary(next) {
-				return true
-			}
-			i = end
-			continue
-		}
-		switch ops[i].(type) {
-		case plannedHead, plannedCount, plannedDescribe:
+		case plannedExecutionEarlyStop, plannedExecutionStreamingFold:
 			return false
-		case plannedTail, plannedGroup, plannedReduce, plannedSort, plannedDistinct, plannedJoin:
+		case plannedExecutionMaterializedBoundary:
 			return true
-		default:
-			return false
 		}
 	}
 	return false
+}
+
+func sourceMaterializedDecisionAfterRowLocal(info plannedRowLocalInfo, next plannedOp) (bool, bool) {
+	if info.dropsRows || next == nil {
+		return false, true
+	}
+	switch next.executionTraits().class {
+	case plannedExecutionEarlyStop, plannedExecutionStreamingFold:
+		return false, true
+	default:
+		if isMaterializedStreamingBoundary(next) {
+			return true, true
+		}
+		return false, false
+	}
 }
 
 type sourceErrorStream struct {

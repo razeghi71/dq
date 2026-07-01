@@ -492,11 +492,12 @@ func TestSourceProjectionTDDUnsupportedFilterAfterSelectKeepsFilterButPushesSele
 	if len(optimized.Source.predicates) != 0 {
 		t.Fatalf("unsupported filter should not be pushed, got %d predicates", len(optimized.Source.predicates))
 	}
-	if len(optimized.Ops) != 1 {
-		t.Fatalf("unsupported filter must stay as a normal op, got %d ops", len(optimized.Ops))
+	ops := flattenSourceProjectionTDDLogicalOps(optimized.Ops)
+	if len(ops) != 1 {
+		t.Fatalf("unsupported filter must stay as a normal op, got %d ops", len(ops))
 	}
-	if _, ok := optimized.Ops[0].(logicalFilter); !ok {
-		t.Fatalf("remaining op: got %T, want logicalFilter", optimized.Ops[0])
+	if _, ok := ops[0].(logicalFilter); !ok {
+		t.Fatalf("remaining op: got %T, want logicalFilter", ops[0])
 	}
 	physical, err := planPhysicalPipeline(optimized)
 	if err != nil {
@@ -523,11 +524,12 @@ func TestSourceProjectionTDDSelectAfterUnsupportedFilterPrunesToDemandedColumns(
 	if len(optimized.Source.predicates) != 0 {
 		t.Fatalf("unsupported filter should not be pushed, got %d predicates", len(optimized.Source.predicates))
 	}
-	if len(optimized.Ops) != 1 {
-		t.Fatalf("unsupported filter should remain and identity select should be removed, got %d ops", len(optimized.Ops))
+	ops := flattenSourceProjectionTDDLogicalOps(optimized.Ops)
+	if len(ops) != 1 {
+		t.Fatalf("unsupported filter should remain and identity select should be removed, got %d ops", len(ops))
 	}
-	if _, ok := optimized.Ops[0].(logicalFilter); !ok {
-		t.Fatalf("first remaining op: got %T, want logicalFilter", optimized.Ops[0])
+	if _, ok := ops[0].(logicalFilter); !ok {
+		t.Fatalf("first remaining op: got %T, want logicalFilter", ops[0])
 	}
 	physical, err := planPhysicalPipeline(optimized)
 	if err != nil {
@@ -592,14 +594,15 @@ func TestSourceProjectionTDDUnsupportedFilterBeforeSelectDemandsPredicateColumns
 	if len(optimized.Source.predicates) != 0 {
 		t.Fatalf("unsupported filter should not be pushed, got %d predicates", len(optimized.Source.predicates))
 	}
-	if len(optimized.Ops) != 2 {
-		t.Fatalf("unsupported filter plus final select should remain, got %d ops", len(optimized.Ops))
+	ops := flattenSourceProjectionTDDLogicalOps(optimized.Ops)
+	if len(ops) != 2 {
+		t.Fatalf("unsupported filter plus final select should remain, got %d ops", len(ops))
 	}
-	if _, ok := optimized.Ops[0].(logicalFilter); !ok {
-		t.Fatalf("first remaining op: got %T, want logicalFilter", optimized.Ops[0])
+	if _, ok := ops[0].(logicalFilter); !ok {
+		t.Fatalf("first remaining op: got %T, want logicalFilter", ops[0])
 	}
-	if _, ok := optimized.Ops[1].(logicalSelect); !ok {
-		t.Fatalf("second remaining op: got %T, want logicalSelect", optimized.Ops[1])
+	if _, ok := ops[1].(logicalSelect); !ok {
+		t.Fatalf("second remaining op: got %T, want logicalSelect", ops[1])
 	}
 	physical, err := planPhysicalPipeline(optimized)
 	if err != nil {
@@ -625,17 +628,18 @@ func TestSourceProjectionTDDRetainedFilterBlocksLaterPredicatePushdownButStillPr
 	if len(optimized.Source.predicates) != 0 {
 		t.Fatalf("later filter must not be pushed across retained filter, got %d predicates", len(optimized.Source.predicates))
 	}
-	if len(optimized.Ops) != 3 {
-		t.Fatalf("retained filters plus final select should remain, got %d ops", len(optimized.Ops))
+	ops := flattenSourceProjectionTDDLogicalOps(optimized.Ops)
+	if len(ops) != 3 {
+		t.Fatalf("retained filters plus final select should remain, got %d ops", len(ops))
 	}
-	if _, ok := optimized.Ops[0].(logicalFilter); !ok {
-		t.Fatalf("first remaining op: got %T, want logicalFilter", optimized.Ops[0])
+	if _, ok := ops[0].(logicalFilter); !ok {
+		t.Fatalf("first remaining op: got %T, want logicalFilter", ops[0])
 	}
-	if _, ok := optimized.Ops[1].(logicalFilter); !ok {
-		t.Fatalf("second remaining op: got %T, want logicalFilter", optimized.Ops[1])
+	if _, ok := ops[1].(logicalFilter); !ok {
+		t.Fatalf("second remaining op: got %T, want logicalFilter", ops[1])
 	}
-	if _, ok := optimized.Ops[2].(logicalSelect); !ok {
-		t.Fatalf("third remaining op: got %T, want logicalSelect", optimized.Ops[2])
+	if _, ok := ops[2].(logicalSelect); !ok {
+		t.Fatalf("third remaining op: got %T, want logicalSelect", ops[2])
 	}
 	physical, err := planPhysicalPipeline(optimized)
 	if err != nil {
@@ -829,6 +833,18 @@ func parseSourceProjectionTDDQuery(t *testing.T, query string) *ast.Query {
 		t.Fatalf("parse %q: %v", query, err)
 	}
 	return q
+}
+
+func flattenSourceProjectionTDDLogicalOps(ops []logicalOp) []logicalOp {
+	var out []logicalOp
+	for _, op := range ops {
+		if span, ok := op.(optimizedRowSpan); ok {
+			out = append(out, flattenSourceProjectionTDDLogicalOps(span.ops)...)
+			continue
+		}
+		out = append(out, op)
+	}
+	return out
 }
 
 func sourceProjectionTDDWideSchema() table.Schema {

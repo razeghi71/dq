@@ -12,6 +12,22 @@ import (
 // plannedOp is a schema-planned operation.
 type plannedOp interface {
 	OutputSchema() table.Schema
+	executionTraits() plannedExecutionTraits
+}
+
+type plannedExecutionClass int
+
+const (
+	plannedExecutionRowLocal plannedExecutionClass = iota
+	plannedExecutionRowSpan
+	plannedExecutionEarlyStop
+	plannedExecutionStreamingFold
+	plannedExecutionMaterializedBoundary
+)
+
+type plannedExecutionTraits struct {
+	class    plannedExecutionClass
+	rowLocal plannedRowLocalInfo
 }
 
 type plannedBase struct {
@@ -20,6 +36,64 @@ type plannedBase struct {
 
 func (p plannedBase) OutputSchema() table.Schema {
 	return p.output
+}
+
+func (plannedHead) executionTraits() plannedExecutionTraits {
+	return plannedExecutionTraits{class: plannedExecutionEarlyStop}
+}
+func (plannedTail) executionTraits() plannedExecutionTraits {
+	return plannedExecutionTraits{class: plannedExecutionMaterializedBoundary}
+}
+func (p plannedFilter) executionTraits() plannedExecutionTraits {
+	return plannedExecutionTraits{
+		class: plannedExecutionRowLocal,
+		rowLocal: plannedRowLocalInfo{
+			dropsRows:         true,
+			parallelCandidate: typedExprHasCall(p.expr),
+		},
+	}
+}
+func (p plannedTransform) executionTraits() plannedExecutionTraits {
+	return plannedExecutionTraits{
+		class:    plannedExecutionRowLocal,
+		rowLocal: plannedRowLocalInfo{parallelCandidate: len(p.assignments) > 0},
+	}
+}
+func (plannedRowSpan) executionTraits() plannedExecutionTraits {
+	return plannedExecutionTraits{class: plannedExecutionRowSpan}
+}
+func (plannedGroup) executionTraits() plannedExecutionTraits {
+	return plannedExecutionTraits{class: plannedExecutionMaterializedBoundary}
+}
+func (plannedReduce) executionTraits() plannedExecutionTraits {
+	return plannedExecutionTraits{class: plannedExecutionMaterializedBoundary}
+}
+func (plannedGroupReduce) executionTraits() plannedExecutionTraits {
+	return plannedExecutionTraits{class: plannedExecutionMaterializedBoundary}
+}
+func (plannedSort) executionTraits() plannedExecutionTraits {
+	return plannedExecutionTraits{class: plannedExecutionMaterializedBoundary}
+}
+func (plannedSelect) executionTraits() plannedExecutionTraits {
+	return plannedExecutionTraits{class: plannedExecutionRowLocal}
+}
+func (plannedRename) executionTraits() plannedExecutionTraits {
+	return plannedExecutionTraits{class: plannedExecutionRowLocal}
+}
+func (plannedRemove) executionTraits() plannedExecutionTraits {
+	return plannedExecutionTraits{class: plannedExecutionRowLocal}
+}
+func (plannedDistinct) executionTraits() plannedExecutionTraits {
+	return plannedExecutionTraits{class: plannedExecutionMaterializedBoundary}
+}
+func (plannedCount) executionTraits() plannedExecutionTraits {
+	return plannedExecutionTraits{class: plannedExecutionStreamingFold}
+}
+func (plannedDescribe) executionTraits() plannedExecutionTraits {
+	return plannedExecutionTraits{class: plannedExecutionStreamingFold}
+}
+func (plannedJoin) executionTraits() plannedExecutionTraits {
+	return plannedExecutionTraits{class: plannedExecutionMaterializedBoundary}
 }
 
 type plannedHead struct {
@@ -40,6 +114,13 @@ type plannedFilter struct {
 type plannedTransform struct {
 	plannedBase
 	assignments []plannedTransformAssignment
+}
+
+type plannedRowSpan struct {
+	plannedBase
+	ops               []plannedOp
+	dropsRows         bool
+	parallelCandidate bool
 }
 
 type plannedTransformAssignment struct {
@@ -263,6 +344,8 @@ func execPlannedOp(op plannedOp, input *table.Table) (*table.Table, error) {
 		return execPlannedTail(p, input), nil
 	case plannedFilter:
 		return execPlannedFilter(p, input)
+	case plannedRowSpan:
+		return execPlannedRowSpan(p, input)
 	case plannedTransform:
 		return execPlannedTransform(p, input)
 	case plannedGroup:
@@ -290,6 +373,63 @@ func execPlannedOp(op plannedOp, input *table.Table) (*table.Table, error) {
 	default:
 		return nil, fmt.Errorf("unknown planned operation type %T", op)
 	}
+}
+
+func newPlannedRowSpan(ops []plannedOp) (plannedRowSpan, error) {
+	if len(ops) == 0 {
+		return plannedRowSpan{}, fmt.Errorf("row span: empty physical span")
+	}
+	return plannedRowSpan{
+		plannedBase:       plannedBase{output: ops[len(ops)-1].OutputSchema()},
+		ops:               ops,
+		dropsRows:         plannedRowSpanDropsRows(ops),
+		parallelCandidate: plannedRowSpanParallelCandidate(ops),
+	}, nil
+}
+
+type plannedRowLocalInfo struct {
+	dropsRows         bool
+	parallelCandidate bool
+}
+
+func plannedRowLocalInfoForOp(op plannedOp) (plannedRowLocalInfo, bool) {
+	traits := op.executionTraits()
+	if traits.class != plannedExecutionRowLocal {
+		return plannedRowLocalInfo{}, false
+	}
+	return traits.rowLocal, true
+}
+
+func plannedRowSpanDropsRows(ops []plannedOp) bool {
+	for _, op := range ops {
+		info, ok := plannedRowLocalInfoForOp(op)
+		if ok && info.dropsRows {
+			return true
+		}
+	}
+	return false
+}
+
+func plannedRowSpanParallelCandidate(ops []plannedOp) bool {
+	for _, op := range ops {
+		info, ok := plannedRowLocalInfoForOp(op)
+		if ok && info.parallelCandidate {
+			return true
+		}
+	}
+	return false
+}
+
+func execPlannedRowSpan(p plannedRowSpan, input *table.Table) (*table.Table, error) {
+	current := input
+	for _, op := range p.ops {
+		var err error
+		current, err = execPlannedOp(op, current)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return current, nil
 }
 
 func execPlannedHead(p plannedHead, input *table.Table) *table.Table {

@@ -310,9 +310,6 @@ func requireDemandPruningTDDPlannedOpTypes(t *testing.T, physical *physicalPipel
 	if want == nil {
 		want = []string{}
 	}
-	if len(physical.Ops) != len(want) {
-		t.Fatalf("physical ops: got %v, want %v", demandPruningTDDOpTypes(physical.Ops), want)
-	}
 	got := demandPruningTDDOpTypes(physical.Ops)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("physical ops: got %v, want %v", got, want)
@@ -321,12 +318,13 @@ func requireDemandPruningTDDPlannedOpTypes(t *testing.T, physical *physicalPipel
 
 func requireDemandPruningTDDTransform(t *testing.T, physical *physicalPipeline, idx int) plannedTransform {
 	t.Helper()
-	if idx < 0 || idx >= len(physical.Ops) {
+	ops := flattenPlannedRowSpans(physical.Ops)
+	if idx < 0 || idx >= len(ops) {
 		t.Fatalf("transform op index %d out of range; ops=%v", idx, demandPruningTDDOpTypes(physical.Ops))
 	}
-	transform, ok := physical.Ops[idx].(plannedTransform)
+	transform, ok := ops[idx].(plannedTransform)
 	if !ok {
-		t.Fatalf("op %d: got %T, want plannedTransform; ops=%v", idx, physical.Ops[idx], demandPruningTDDOpTypes(physical.Ops))
+		t.Fatalf("op %d: got %T, want plannedTransform; ops=%v", idx, ops[idx], demandPruningTDDOpTypes(physical.Ops))
 	}
 	return transform
 }
@@ -343,8 +341,9 @@ func requireDemandPruningTDDTransformAssignments(t *testing.T, transform planned
 }
 
 func demandPruningTDDOpTypes(ops []plannedOp) []string {
-	got := make([]string, len(ops))
-	for i, op := range ops {
+	flat := flattenPlannedRowSpans(ops)
+	got := make([]string, len(flat))
+	for i, op := range flat {
 		switch op.(type) {
 		case plannedFilter:
 			got[i] = "filter"
@@ -377,6 +376,18 @@ func demandPruningTDDOpTypes(ops []plannedOp) []string {
 		}
 	}
 	return got
+}
+
+func flattenPlannedRowSpans(ops []plannedOp) []plannedOp {
+	var out []plannedOp
+	for _, op := range ops {
+		if span, ok := op.(plannedRowSpan); ok {
+			out = append(out, flattenPlannedRowSpans(span.ops)...)
+			continue
+		}
+		out = append(out, op)
+	}
+	return out
 }
 
 func demandPruningTDDWideSchema() table.Schema {

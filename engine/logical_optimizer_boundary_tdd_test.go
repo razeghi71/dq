@@ -576,9 +576,10 @@ func TestLogicalOptimizerBoundaryTDDLogicalAndPhysicalColumnRefsAreDifferentADTs
 	if err != nil {
 		t.Fatalf("physical plan: %v", err)
 	}
-	plannedFilter, ok := physical.Ops[0].(plannedFilter)
+	physicalOps := flattenPlannedRowSpans(physical.Ops)
+	plannedFilter, ok := physicalOps[0].(plannedFilter)
 	if !ok {
-		t.Fatalf("first physical op: got %T, want plannedFilter", physical.Ops[0])
+		t.Fatalf("first physical op: got %T, want plannedFilter", physicalOps[0])
 	}
 	physicalBinary, ok := plannedFilter.expr.bound.(*boundBinary)
 	if !ok {

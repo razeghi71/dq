@@ -9,36 +9,49 @@ import (
 
 func executePlannedOpsStreaming(ops []plannedOp, input rowstream.Stream) (*table.Table, error) {
 	current := input
-	for i := 0; i < len(ops); {
-		if end := rowLocalSpanEnd(ops, i); end > i {
-			span := ops[i:end]
-			schema := span[len(span)-1].OutputSchema()
-			next := nextPlannedOp(ops, end)
+	for i, op := range ops {
+		if span, ok := op.(plannedRowSpan); ok {
+			next := nextPlannedOp(ops, i+1)
 			if shouldExecuteRowSpanMaterialized(span, next) {
 				materialized, err := materializeStreamingInput(current)
 				if err != nil {
 					return nil, err
 				}
-				for _, spanOp := range span {
-					materialized, err = execPlannedOp(spanOp, materialized)
-					if err != nil {
-						return nil, err
-					}
+				materialized, err = execPlannedRowSpan(span, materialized)
+				if err != nil {
+					return nil, err
 				}
 				current = rowstream.FromTable(materialized)
-			} else if program := compileRowProgram(span); shouldExecuteRowSpanParallel(span, next) {
-				current = rowstream.ParallelMapOrdered(current, schema, program, rowstream.DefaultParallelOptions())
+			} else if program := compileRowProgram(span.ops); shouldExecuteRowSpanParallel(span, next) {
+				current = rowstream.ParallelMapOrdered(current, span.OutputSchema(), program, rowstream.DefaultParallelOptions())
 			} else {
-				current = rowstream.Map(current, schema, program)
+				current = rowstream.Map(current, span.OutputSchema(), program)
 			}
-			i = end
 			continue
 		}
 
-		op := ops[i]
+		if info, ok := plannedRowLocalInfoForOp(op); ok {
+			next := nextPlannedOp(ops, i+1)
+			if shouldExecuteRowLocalMaterialized(info, next) {
+				materialized, err := materializeStreamingInput(current)
+				if err != nil {
+					return nil, err
+				}
+				materialized, err = execPlannedOp(op, materialized)
+				if err != nil {
+					return nil, err
+				}
+				current = rowstream.FromTable(materialized)
+			} else if program := compileRowProgramStep(op); shouldExecuteRowLocalParallel(info, next) {
+				current = rowstream.ParallelMapOrdered(current, op.OutputSchema(), program, rowstream.DefaultParallelOptions())
+			} else {
+				current = rowstream.Map(current, op.OutputSchema(), program)
+			}
+			continue
+		}
+
 		if head, ok := op.(plannedHead); ok {
 			current = &headStream{input: current, schema: head.OutputSchema(), n: head.n}
-			i++
 			continue
 		}
 
@@ -47,7 +60,6 @@ func executePlannedOpsStreaming(ops []plannedOp, input rowstream.Stream) (*table
 				return nil, err
 			}
 			current = rowstream.FromTable(result)
-			i++
 			continue
 		}
 
@@ -60,7 +72,6 @@ func executePlannedOpsStreaming(ops []plannedOp, input rowstream.Stream) (*table
 			return nil, err
 		}
 		current = rowstream.FromTable(result)
-		i++
 	}
 	return materializeStreamingInput(current)
 }
@@ -72,23 +83,6 @@ func materializeStreamingInput(input rowstream.Stream) (*table.Table, error) {
 	return rowstream.Materialize(input)
 }
 
-func rowLocalSpanEnd(ops []plannedOp, start int) int {
-	end := start
-	for end < len(ops) && isRowLocalStreamingOp(ops[end]) {
-		end++
-	}
-	return end
-}
-
-func isRowLocalStreamingOp(op plannedOp) bool {
-	switch op.(type) {
-	case plannedFilter, plannedSelect, plannedRename, plannedRemove, plannedTransform:
-		return true
-	default:
-		return false
-	}
-}
-
 func nextPlannedOp(ops []plannedOp, idx int) plannedOp {
 	if idx < 0 || idx >= len(ops) {
 		return nil
@@ -96,54 +90,39 @@ func nextPlannedOp(ops []plannedOp, idx int) plannedOp {
 	return ops[idx]
 }
 
-func shouldExecuteRowSpanParallel(span []plannedOp, next plannedOp) bool {
-	if len(span) == 0 {
-		return false
-	}
+func shouldExecuteRowSpanParallel(span plannedRowSpan, next plannedOp) bool {
+	return shouldExecuteRowLocalParallel(plannedRowLocalInfo{
+		dropsRows:         span.dropsRows,
+		parallelCandidate: span.parallelCandidate,
+	}, next)
+}
+
+func shouldExecuteRowSpanMaterialized(span plannedRowSpan, next plannedOp) bool {
+	return shouldExecuteRowLocalMaterialized(plannedRowLocalInfo{
+		dropsRows:         span.dropsRows,
+		parallelCandidate: span.parallelCandidate,
+	}, next)
+}
+
+func shouldExecuteRowLocalParallel(info plannedRowLocalInfo, next plannedOp) bool {
 	if _, earlyStop := next.(plannedHead); earlyStop {
 		return false
 	}
-	for _, op := range span {
-		switch p := op.(type) {
-		case plannedTransform:
-			if len(p.assignments) > 0 {
-				return true
-			}
-		case plannedFilter:
-			if typedExprHasCall(p.expr) {
-				return true
-			}
-		}
-	}
-	return false
+	return info.parallelCandidate
 }
 
-func shouldExecuteRowSpanMaterialized(span []plannedOp, next plannedOp) bool {
-	if len(span) == 0 || !isMaterializedStreamingBoundary(next) {
+func shouldExecuteRowLocalMaterialized(info plannedRowLocalInfo, next plannedOp) bool {
+	if !isMaterializedStreamingBoundary(next) {
 		return false
 	}
-	if rowSpanCanDropRows(span) {
+	if info.dropsRows {
 		return false
 	}
 	return true
 }
 
-func rowSpanCanDropRows(span []plannedOp) bool {
-	for _, op := range span {
-		if _, dropsRows := op.(plannedFilter); dropsRows {
-			return true
-		}
-	}
-	return false
-}
-
 func isMaterializedStreamingBoundary(op plannedOp) bool {
-	switch op.(type) {
-	case plannedTail, plannedGroup, plannedReduce, plannedGroupReduce, plannedSort, plannedDistinct, plannedJoin:
-		return true
-	default:
-		return false
-	}
+	return op != nil && op.executionTraits().class == plannedExecutionMaterializedBoundary
 }
 
 func typedExprHasCall(expr typedExpr) bool {
